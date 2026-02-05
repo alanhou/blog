@@ -13,6 +13,8 @@ schema: z.object({
   date: z.date(),
   tags: z.array(z.string()).optional(),
   image: z.string().optional(),
+  series: z.string().optional(),
+  seriesOrder: z.number().optional(),
 }),
 });
 
