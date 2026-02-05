@@ -10,7 +10,7 @@ tags: ["ai", "llm", "productivity", "andrej-karpathy"]
 image: "https://i2.ytimg.com/vi/EWvNQjAaOHw/hqdefault.jpg"
 ---
 
-::en
+:::en
 This post summarizes Andrej Karpathy's video "How I Use LLMs" (Feb 2025). The video is freely available for educational use. Watch the original: [YouTube](https://www.youtube.com/watch?v=EWvNQjAaOHw)
 
 ## The LLM Landscape in 2025
@@ -149,9 +149,9 @@ The key is providing examples (few-shot prompting), not just descriptions.
 5. **Try multiple models**: Claude for artifacts, Perplexity for search, Cursor for coding. Each has strengths.
 
 6. **Vibe code**: For programming, describe what you want and let the AI implement. Review and iterate.
-::
+:::
 
-::zh
+:::zh
 本文总结了 Andrej Karpathy 的视频《我如何使用大语言模型》（2025年2月）。该视频可免费用于教育目的。原视频：[YouTube](https://www.youtube.com/watch?v=EWvNQjAaOHw)
 
 ## 2025 年的 LLM 生态
@@ -290,4 +290,4 @@ Artifact 是独立的，可以分享或嵌入。
 5. **尝试多个模型**：Claude 做 artifact，Perplexity 做搜索，Cursor 做编程。各有所长。
 
 6. **Vibe code**：编程时，描述你想要的，让 AI 实现。审查并迭代。
-::
+:::

@@ -10,7 +10,7 @@ tags: ["ai", "llm", "machine-learning", "andrej-karpathy"]
 image: "https://i4.ytimg.com/vi/7xTGNNLPyMI/hqdefault.jpg"
 ---
 
-::en
+:::en
 This post summarizes Andrej Karpathy's video "Deep Dive into LLMs like ChatGPT" (Feb 2025). The video is freely available for educational use. Watch the original: [YouTube](https://www.youtube.com/watch?v=7xTGNNLPyMI)
 
 ## The Three Stages of Training
@@ -79,9 +79,9 @@ The thinking process emerges from optimization. No human programmed "wait, let m
 3. Use tools when available (web search, code interpreter)
 4. Understand you're talking to a simulation of a labeler, not magic
 5. Expect random failures - the Swiss cheese model
-::
+:::
 
-::zh
+:::zh
 本文总结了 Andrej Karpathy 的视频《深入理解 ChatGPT 等大语言模型》（2025年2月）。该视频可免费用于教育目的。原视频：[YouTube](https://www.youtube.com/watch?v=7xTGNNLPyMI)
 
 ## 训练的三个阶段
@@ -150,4 +150,4 @@ LLM 在许多领域能力惊人，但存在随机的漏洞。一个模型可能�
 3. 有工具时就用（网络搜索、代码解释器）
 4. 理解你在和标注员的模拟对话，不是魔法
 5. 预期随机失败——瑞士奶酪模型
-::
+:::
