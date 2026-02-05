@@ -1,10 +1,10 @@
 ---
 title:
-en: "Code Review Assistant"
-zh: "代码审查助手"
+  en: "Code Review Assistant"
+  zh: "代码审查助手"
 description:
-en: "A prompt for thorough code review"
-zh: "用于全面代码审查的提示词"
+  en: "A prompt for thorough code review"
+  zh: "用于全面代码审查的提示词"
 category: "development"
 tags: ["code", "review", "development"]
 ---
