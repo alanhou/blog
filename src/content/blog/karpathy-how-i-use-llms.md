@@ -1,0 +1,293 @@
+---
+title:
+  en: "Notes: How I Use LLMs"
+  zh: "笔记：我如何使用大语言模型"
+description:
+  en: "Practical tips from Andrej Karpathy on getting the most out of ChatGPT, Claude, and other LLMs"
+  zh: "Andrej Karpathy 分享的 ChatGPT、Claude 等大语言模型实用技巧"
+date: 2025-02-27
+tags: ["ai", "llm", "productivity", "andrej-karpathy"]
+image: "https://i2.ytimg.com/vi/EWvNQjAaOHw/hqdefault.jpg"
+---
+
+::en
+This post summarizes Andrej Karpathy's video "How I Use LLMs" (Feb 2025). The video is freely available for educational use. Watch the original: [YouTube](https://www.youtube.com/watch?v=EWvNQjAaOHw)
+
+## The LLM Landscape in 2025
+
+ChatGPT (OpenAI) remains the most feature-rich option, but the ecosystem has grown:
+
+- **Big Tech**: Gemini (Google), Copilot (Microsoft), Meta AI
+- **Startups**: Claude (Anthropic), Grok (xAI), DeepSeek (China), Le Chat (Mistral, France)
+
+Track model performance on [LM Arena](https://lmarena.ai/) or [SEAL Leaderboard](https://scale.com/leaderboard).
+
+## Understanding Pricing Tiers
+
+**Free tier**: GPT-4o mini, basic features. Good for simple tasks.
+
+**Plus ($20/month)**: GPT-4o, thinking models (o1, o3-mini), more usage limits.
+
+**Pro ($200/month)**: Unlimited usage, Deep Research, o1 pro mode.
+
+The free tier is surprisingly capable for everyday use. Pay for Plus when you need thinking models or hit rate limits.
+
+## When to Use Thinking Models
+
+Thinking models (o1, o3) use reinforcement learning to reason through problems. They're slower and more expensive, but better for:
+
+- Complex math and logic problems
+- Multi-step reasoning
+- Tasks where accuracy matters more than speed
+
+For quick questions, stick with GPT-4o. For hard problems, switch to o1 or o3-mini.
+
+## Tool Use: Web Search
+
+LLMs have knowledge cutoffs. For recent information, use web search:
+
+- ChatGPT: Click the search icon or let it auto-detect
+- Perplexity: Built for search-first queries
+- Claude: Currently lacks web search integration
+
+Good search queries:
+- "Is the market open today?" (time-sensitive)
+- "When is [show] season X coming out?" (recent info)
+- "Does [company] offer [feature]?" (changes over time)
+
+## Deep Research
+
+ChatGPT Pro's Deep Research spends 10-30 minutes doing extensive web research. It's like having a research assistant who reads dozens of sources and synthesizes findings.
+
+Use cases:
+- Researching supplements or health topics
+- Understanding complex technical subjects
+- Comparing products or services
+- Any question that would take you hours to research manually
+
+## File Uploads
+
+You can upload documents (PDFs, code files, images) directly to the context window. The model can then answer questions about them.
+
+Practical uses:
+- "Summarize this research paper"
+- "Find bugs in this code"
+- "What does this contract say about X?"
+
+## Claude Artifacts
+
+Claude has a unique feature: it can create interactive artifacts (apps, diagrams, visualizations) that run in the browser.
+
+Ask Claude to:
+- "Create a diagram of X"
+- "Build a simple calculator"
+- "Make an interactive visualization of this data"
+
+The artifacts are self-contained and can be shared or embedded.
+
+## Cursor and Vibe Coding
+
+For programming, Karpathy uses Cursor (an AI-powered code editor). Key features:
+
+- **Cmd+K**: Edit a specific line
+- **Cmd+L**: Explain code
+- **Cmd+I (Composer)**: Autonomous agent that edits multiple files
+
+"Vibe coding" = giving high-level instructions and letting the AI handle implementation. You can always fall back to manual coding when needed.
+
+Example: "Add confetti when a player wins" → Cursor installs a library, writes the code, and even downloads a sound file.
+
+## Voice and Audio
+
+**Speech-to-text**: Talk to ChatGPT instead of typing. Useful for brainstorming or when your hands are busy.
+
+**Advanced Voice Mode**: The model processes audio natively (not transcription → text → speech). It can hear tone, emotion, and respond more naturally.
+
+**NotebookLM**: Google's tool that generates podcast-style discussions from your documents. Upload sources, get a conversation between two AI hosts.
+
+## Image and Video
+
+**Image input**: Upload screenshots, photos, diagrams. Ask "What's in this image?" or "OCR this receipt."
+
+**Image output**: DALL-E (ChatGPT), Ideogram, Midjourney. Describe what you want, get an image.
+
+**Video input**: Some models can process video frames. Point your camera and ask questions.
+
+**Video output**: Sora (OpenAI), Veo 2 (Google). Still early, but improving rapidly.
+
+## Memory and Custom Instructions
+
+**Memory**: ChatGPT learns about you over time. It remembers preferences, context, and personal details across conversations.
+
+Trigger it explicitly: "Remember that I prefer X" or "Save this to memory."
+
+**Custom Instructions**: Set global preferences in settings:
+- "Don't be overly formal"
+- "I'm learning Korean, use 해요체 formality"
+- "Always explain your reasoning"
+
+## Custom GPTs
+
+Save frequently-used prompts as Custom GPTs. Instead of re-explaining a task each time, create a GPT that already knows the context.
+
+Example: Korean vocabulary extractor
+- Input: A Korean sentence
+- Output: Vocabulary in "Korean; English" format for flashcards
+
+The key is providing examples (few-shot prompting), not just descriptions.
+
+## Practical Takeaways
+
+1. **Match the tool to the task**: Quick questions → GPT-4o. Hard problems → thinking models. Recent info → web search.
+
+2. **Use tools**: Don't rely on the model's "mental math." Ask it to use code for calculations.
+
+3. **Upload context**: Give the model documents, images, code. More context = better answers.
+
+4. **Customize**: Set up memory, custom instructions, and Custom GPTs for your workflow.
+
+5. **Try multiple models**: Claude for artifacts, Perplexity for search, Cursor for coding. Each has strengths.
+
+6. **Vibe code**: For programming, describe what you want and let the AI implement. Review and iterate.
+::
+
+::zh
+本文总结了 Andrej Karpathy 的视频《我如何使用大语言模型》（2025年2月）。该视频可免费用于教育目的。原视频：[YouTube](https://www.youtube.com/watch?v=EWvNQjAaOHw)
+
+## 2025 年的 LLM 生态
+
+ChatGPT（OpenAI）仍然是功能最丰富的选择，但生态系统已经扩展：
+
+- **大厂**：Gemini（Google）、Copilot（Microsoft）、Meta AI
+- **创业公司**：Claude（Anthropic）、Grok（xAI）、DeepSeek（中国）、Le Chat（Mistral，法国）
+
+在 [LM Arena](https://lmarena.ai/) 或 [SEAL Leaderboard](https://scale.com/leaderboard) 跟踪模型性能。
+
+## 理解定价层级
+
+**免费版**：GPT-4o mini，基础功能。适合简单任务。
+
+**Plus（$20/月）**：GPT-4o，思考模型（o1、o3-mini），更高使用限额。
+
+**Pro（$200/月）**：无限使用，Deep Research，o1 pro 模式。
+
+免费版对日常使用已经相当强大。当你需要思考模型或达到速率限制时再付费升级 Plus。
+
+## 何时使用思考模型
+
+思考模型（o1、o3）使用强化学习来推理问题。它们更慢、更贵，但更适合：
+
+- 复杂的数学和逻辑问题
+- 多步推理
+- 准确性比速度更重要的任务
+
+快速问题用 GPT-4o。难题切换到 o1 或 o3-mini。
+
+## 工具使用：网络搜索
+
+LLM 有知识截止日期。获取最新信息需要网络搜索：
+
+- ChatGPT：点击搜索图标或让它自动检测
+- Perplexity：专为搜索优先的查询设计
+- Claude：目前缺乏网络搜索集成
+
+好的搜索查询：
+- "今天股市开门吗？"（时效性）
+- "[剧集]第X季什么时候出？"（最新信息）
+- "[公司]提供[功能]吗？"（随时间变化）
+
+## Deep Research
+
+ChatGPT Pro 的 Deep Research 会花 10-30 分钟进行广泛的网络研究。就像有一个研究助理阅读数十个来源并综合发现。
+
+使用场景：
+- 研究补充剂或健康话题
+- 理解复杂技术主题
+- 比较产品或服务
+- 任何需要你手动研究数小时的问题
+
+## 文件上传
+
+你可以直接上传文档（PDF、代码文件、图片）到上下文窗口。模型可以回答关于它们的问题。
+
+实际用途：
+- "总结这篇研究论文"
+- "找出这段代码的 bug"
+- "这份合同关于 X 说了什么？"
+
+## Claude Artifacts
+
+Claude 有一个独特功能：它可以创建在浏览器中运行的交互式 artifact（应用、图表、可视化）。
+
+让 Claude：
+- "创建 X 的图表"
+- "构建一个简单的计算器"
+- "制作这些数据的交互式可视化"
+
+Artifact 是独立的，可以分享或嵌入。
+
+## Cursor 和 Vibe Coding
+
+编程时，Karpathy 使用 Cursor（AI 驱动的代码编辑器）。主要功能：
+
+- **Cmd+K**：编辑特定行
+- **Cmd+L**：解释代码
+- **Cmd+I（Composer）**：自主代理，编辑多个文件
+
+"Vibe coding" = 给出高层指令，让 AI 处理实现。需要时随时可以回退到手动编码。
+
+示例："玩家获胜时添加彩带效果" → Cursor 安装库、写代码，甚至下载音效文件。
+
+## 语音和音频
+
+**语音转文字**：对 ChatGPT 说话而不是打字。适合头脑风暴或手忙时。
+
+**高级语音模式**：模型原生处理音频（不是转录 → 文字 → 语音）。它能听到语气、情感，响应更自然。
+
+**NotebookLM**：Google 的工具，从你的文档生成播客风格的讨论。上传来源，获得两个 AI 主持人之间的对话。
+
+## 图像和视频
+
+**图像输入**：上传截图、照片、图表。问"这张图里有什么？"或"OCR 这张收据"。
+
+**图像输出**：DALL-E（ChatGPT）、Ideogram、Midjourney。描述你想要的，获得图像。
+
+**视频输入**：一些模型可以处理视频帧。指向摄像头并提问。
+
+**视频输出**：Sora（OpenAI）、Veo 2（Google）。还在早期，但快速改进中。
+
+## 记忆和自定义指令
+
+**记忆**：ChatGPT 随时间了解你。它记住偏好、上下文和个人细节，跨对话保持。
+
+显式触发："记住我偏好 X"或"保存到记忆"。
+
+**自定义指令**：在设置中设置全局偏好：
+- "不要过于正式"
+- "我在学韩语，使用해요体"
+- "总是解释你的推理"
+
+## Custom GPTs
+
+将常用提示保存为 Custom GPT。不用每次重新解释任务，创建一个已经知道上下文的 GPT。
+
+示例：韩语词汇提取器
+- 输入：一个韩语句子
+- 输出："韩语; 英语"格式的词汇，用于闪卡
+
+关键是提供示例（few-shot prompting），而不只是描述。
+
+## 实用要点
+
+1. **匹配工具和任务**：快速问题 → GPT-4o。难题 → 思考模型。最新信息 → 网络搜索。
+
+2. **使用工具**：不要依赖模型的"心算"。让它用代码做计算。
+
+3. **上传上下文**：给模型文档、图片、代码。更多上下文 = 更好的答案。
+
+4. **自定义**：为你的工作流设置记忆、自定义指令和 Custom GPT。
+
+5. **尝试多个模型**：Claude 做 artifact，Perplexity 做搜索，Cursor 做编程。各有所长。
+
+6. **Vibe code**：编程时，描述你想要的，让 AI 实现。审查并迭代。
+::
