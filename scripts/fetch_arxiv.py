@@ -128,7 +128,11 @@ Reply with ONLY the numbers of your selected papers, one per line. Example:
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
     )
-    text = resp.choices[0].message.content.strip()
+    content = resp.choices[0].message.content if resp.choices else None
+    if not content:
+        print(f"Warning: LLM returned empty response for paper selection, falling back to first {count}")
+        return papers[:count]
+    text = content.strip()
     selected_indices = []
     for line in text.split("\n"):
         line = line.strip().rstrip(".")
@@ -226,7 +230,11 @@ IMPORTANT:
         messages=[{"role": "user", "content": prompt}],
         temperature=0.5,
     )
-    return resp.choices[0].message.content.strip()
+    content = resp.choices[0].message.content if resp.choices else None
+    if not content:
+        print(f"Warning: LLM returned empty response for post generation ({paper['id']})")
+        return None
+    return content.strip()
 
 
 def main():
@@ -273,6 +281,8 @@ def main():
 
         print(f"Generating post for: {paper['title']}...")
         content = generate_blog_post(client, model, paper)
+        if not content:
+            continue
 
         # Strip markdown code fences if the LLM wrapped the output
         if content.startswith("```"):
