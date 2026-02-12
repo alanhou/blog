@@ -237,6 +237,25 @@ IMPORTANT:
     return content.strip()
 
 
+def sanitize_mdx(content):
+    """Escape bare < characters that MDX would interpret as JSX tags.
+
+    Replaces < followed by a digit (e.g. <10, <2%) with &lt; but leaves
+    code blocks, HTML tags, and ::: directives untouched.
+    """
+    lines = content.split("\n")
+    result = []
+    in_code_block = False
+    for line in lines:
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+        if not in_code_block:
+            # Escape < followed by a digit (not a valid HTML/JSX tag)
+            line = re.sub(r"<(\d)", r"&lt;\1", line)
+        result.append(line)
+    return "\n".join(result)
+
+
 def main():
     client, model = get_llm_client()
     last_fetch = load_last_fetch()
@@ -294,6 +313,7 @@ def main():
                 lines = lines[1:]
             content = "\n".join(lines)
 
+        content = sanitize_mdx(content)
         filepath.write_text(content + "\n")
         print(f"Wrote {filepath}")
 
