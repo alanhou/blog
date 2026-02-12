@@ -238,10 +238,10 @@ IMPORTANT:
 
 
 def sanitize_mdx(content):
-    """Escape bare < characters that MDX would interpret as JSX tags.
+    """Fix common LLM-generated MDX issues.
 
-    Replaces < followed by a digit (e.g. <10, <2%) with &lt; but leaves
-    code blocks, HTML tags, and ::: directives untouched.
+    - Escape bare < followed by digits (MDX parses as JSX)
+    - Repair mismatched bold markers (**text* → **text**)
     """
     lines = content.split("\n")
     result = []
@@ -252,6 +252,8 @@ def sanitize_mdx(content):
         if not in_code_block:
             # Escape < followed by a digit (not a valid HTML/JSX tag)
             line = re.sub(r"<(\d)", r"&lt;\1", line)
+            # Fix **text* → **text** (bold opened with ** but closed with single *)
+            line = re.sub(r"\*\*([^*\n]+)\*(?!\*)", r"**\1**", line)
         result.append(line)
     return "\n".join(result)
 
