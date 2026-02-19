@@ -1,6 +1,6 @@
 ---
 series: "odoo14-cookbook"
-seriesOrder: 18
+seriesOrder: 19
 title:
   en: "Chapter 20: Remote Procedure Calls in Odoo"
   zh: "第20章 Odoo中的远程过程调用（RPC）"

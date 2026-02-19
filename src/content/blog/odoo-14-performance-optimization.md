@@ -1,6 +1,6 @@
 ---
 series: "odoo14-cookbook"
-seriesOrder: 19
+seriesOrder: 20
 title:
   en: "Chapter 21: Performance Optimization"
   zh: "第21章 性能优化"

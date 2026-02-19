@@ -51,6 +51,7 @@ export default defineConfig({
     '/odoo-14-web-client-development': '/blog/odoo-14-web-client-development',
     '/odoo-14-odoo-web-library-owl': '/blog/odoo-14-odoo-web-library-owl',
     '/odoo-14-in-app-purchasing-odoo': '/blog/odoo-14-in-app-purchasing-odoo',
+    '/odoo-14-automated-test-cases': '/blog/odoo-14-automated-test-cases',
     '/odoo-14-remote-procedure-calls-odoo': '/blog/odoo-14-remote-procedure-calls-odoo',
     '/odoo-14-performance-optimization': '/blog/odoo-14-performance-optimization',
     '/odoo-14-manage-emails-odoo': '/blog/odoo-14-manage-emails-odoo',
