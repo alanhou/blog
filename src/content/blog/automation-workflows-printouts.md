@@ -12,6 +12,7 @@ tags: ["odoo", "automation", "workflows", "qweb", "reports"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下小节：
 
 - 管理动态记录阶段
@@ -33,7 +34,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 本章的技术要求包含Odoo在线平台。
 
-本章中的所有代码可通过GitHub仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter13。
+本章中的所有代码可通过GitHub仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter13>。
 
 观看如下视频来查看代码实时操作：
 
@@ -43,7 +44,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 ### 准备工作
 
-本节我们将使用[第九章 高级服务端开发技巧](/blog/advanced-server-side-development-techniques)中的my_library模块。该模块管理图书和它们的分类。它还记录图书的借出。我们添加了一个初始模块，Chapter13/r0_initial_module/my_library，本书的GitHub仓库可以帮助你开始学习：https://github.com/alanhou/odoo12-cookbook。
+本节我们将使用[第九章 高级服务端开发技巧](/blog/advanced-server-side-development-techniques)中的my_library模块。该模块管理图书和它们的分类。它还记录图书的借出。我们添加了一个初始模块，Chapter13/r0_initial_module/my_library，本书的GitHub仓库可以帮助你开始学习：<https://github.com/alanhou/odoo12-cookbook>。
 
 ### 如何实现...
 
@@ -539,7 +540,7 @@ TODO
 - **Add Followers**允许用户或频道订阅记录。
 - **Create Next Activity**允许我们创建新的活动。这会在聊天器（chatter）中显示。
 
-本例中我们使用了Update the Record来设置当前记录的一些值。我们设置了Priority为1来星标任务，并对Deadline字段设置了值。这个更有意思一些，因为所使用的值由Python表达式运算而得。配合中使用了Python中的datetime模块（https://docs.python.org/3/library/datetime.html）来计算三天后的日期。
+本例中我们使用了Update the Record来设置当前记录的一些值。我们设置了Priority为1来星标任务，并对Deadline字段设置了值。这个更有意思一些，因为所使用的值由Python表达式运算而得。配合中使用了Python中的datetime模块（<https://docs.python.org/3/library/datetime.html>）来计算三天后的日期。
 
 这里以及其它动作类型中均可使用任意的Python表达式。出于安全原因，代码由odoo/tools/safe_eval.py文件中所实现的safe_eval函数进行检查。这意味着会不允许某些Python运算，但通常这都不构成问题。
 
@@ -852,3 +853,4 @@ TODO
 > ℹ️注意web.internal_layout, web.external_layout, web.external_layout_header和web.external_layout_footer（后两者称为外部布局）本身仅仅是视图，读者已经知道如何通过继承来对它们进行修改。要通过template元素进行继承，使用inherit_id属性。
 
 > **小贴士：**在此前版本的Odoo中，这些模型在report而非web模块中进行定义。在将模块移植到Odoo 11时，请不要忘记将调用中的标识符修改为t-call。
+:::

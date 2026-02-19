@@ -12,6 +12,7 @@ tags: ["odoo", "web-development", "controllers", "http", "api"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下内容：
 
 - 让路径在网络中可访问
@@ -29,13 +30,13 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 本章的要求包含一个在线的Odoo平台。
 
-本章中使用的所有代码可通过GitHub仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter14。
+本章中使用的所有代码可通过GitHub仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter14>。
 
 观看如下视频来查看代码实时操作：
 
 ## 让路径在网络中可访问
 
-本节中我们来看如何http://yourserver/path1/path2这样的表单 URL 对用户可访问。这既有可能是一个网页，也有可能是返回供其它程序使用的数据的路径。后一种情况中，我们通常会使用JSON格式来接收参数并提供数据。
+本节中我们来看如何<http://yourserver/path1/path2>这样的表单 URL 对用户可访问。这既有可能是一个网页，也有可能是返回供其它程序使用的数据的路径。后一种情况中，我们通常会使用JSON格式来接收参数并提供数据。
 
 ### 准备工作
 
@@ -168,7 +169,7 @@ route装饰器可带有其它的参数来进一步自定义其行为。默认允
 
 参见以下各点来了解有关HTTP路由的更多知识：
 
-- 如果在同一个实例中托管多个Odoo数据库，那么不同的数据库可能运行在不同的域中。这时我们可以使用--db-filter参数或使用https://github.com/OCA/server-tools,的dbfilter_from_header模块，它有助于按域过滤出数据库。在写本书时这个模块还没有迁移到版本12，但在本书出版时应该会进行迁移了（**译者注：**当前已可在 Odoo 12中使用）。
+- 如果在同一个实例中托管多个Odoo数据库，那么不同的数据库可能运行在不同的域中。这时我们可以使用--db-filter参数或使用<https://github.com/OCA/server-tools,>的dbfilter_from_header模块，它有助于按域过滤出数据库。在写本书时这个模块还没有迁移到版本12，但在本书出版时应该会进行迁移了（**译者注：**当前已可在 Odoo 12中使用）。
 - 要学习如何使用模板来实现模块化，请参见本单中的*修改已有handler*一节。
 
 ## 限制网络可访问路径的访问
@@ -304,7 +305,7 @@ class IrHttp(models.Model):
 
 转换器的优美之处在于runtime强制参数为所需类型，而使用普通关键字参数则需要自己处理。这些以字符串进行分发，而你需要像第一个示例一样自己处理必要的类型转换。
 
-内置的werkzeug转换器包含 int, float和string，以及更为复杂的path, any或uuid等。可以在http://werkzeug.pocoo.org/docs/0.11/routing/#builtin-converters中查看它们的语法。
+内置的werkzeug转换器包含 int, float和string，以及更为复杂的path, any或uuid等。可以在<http://werkzeug.pocoo.org/docs/0.11/routing/#builtin-converters>中查看它们的语法。
 
 ### 其它内容
 
@@ -402,3 +403,4 @@ return request.render('template.name', values)
 ### 其它内容
 
 - 有关QWeb的详情会在[第十六章 网页客户端开发](/blog/web-client-development)中进行讲解
+:::

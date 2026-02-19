@@ -12,6 +12,7 @@ tags: ["odoo", "performance", "optimization", "caching", "profiling"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 借助于Odoo框架，你可以开发大型且复杂的应用。任何项目成功的关键是良好的性能。本章中，我们将探讨你需要来优化性能的套路和工具。本章中包含的各节是为提升ORM级别的性能，而非客户端或部署端的性能。
 
 本章中，我们将讲解如下小节：
@@ -330,7 +331,7 @@ def read_group(self, domain, fields, groupby, offset=0, limit=None, orderby=Fals
   self.env['sale.order'].read_group([], ['partner_id', 'total:sum(amount_total)', 'avg_total:avg(amount_total)'], ['partner_id'])
   ```
 
-> ℹ️如果想要学习PostgreSQL聚合函数更多的知识，请参见文档：https://www.postgresql.org/docs/current/functions-aggregate.html。
+> ℹ️如果想要学习PostgreSQL聚合函数更多的知识，请参见文档：<https://www.postgresql.org/docs/current/functions-aggregate.html>。
 
 以下是read_group方法所支持的参数列表：
 
@@ -550,3 +551,4 @@ xdot /Users/parth/Desktop/prof.xdot
 TODO
 
 这里你可以放大、查看调用栈，并查看方法执行时间的详情。
+:::

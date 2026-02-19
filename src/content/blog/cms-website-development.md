@@ -12,6 +12,7 @@ tags: ["odoo", "cms", "website", "themes", "e-commerce", "seo"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下小节：
 
 - 管理静态资源
@@ -203,7 +204,7 @@ Odoo CMS的底层是名为QWeb的XML模板引擎，在下一节中会对它进�
 
 > **小贴士：**对于CSS/SCSS文件来说，有时顺序很重要。因此，如果你需要重载另一个插件中定义的样式，需要注意将你的文件放在所需修改的原始文件之后加载。这通过调整视图的priority字段或直接继承向其中注入引用的CSS文件的插件视图。更多详情，请参见[第十章 后端视图](10.md/)中的*修改已有视图 - 视图继承*一节。
 
-在第5步中，我们添加了基本的SCSS。Odoo对SCSS预处理器具有内置支持。Odoo会自动编译SCSS文件为CSS。在本例中，我们使用了带有变量的基本SCSS以及函数darken来让$my-text-color的暗度降低15%。SCSS预处理器有大量的其它功能，如果想深入学习SCSS，请参见http://sass-lang.com/。
+在第5步中，我们添加了基本的SCSS。Odoo对SCSS预处理器具有内置支持。Odoo会自动编译SCSS文件为CSS。在本例中，我们使用了带有变量的基本SCSS以及函数darken来让$my-text-color的暗度降低15%。SCSS预处理器有大量的其它功能，如果想深入学习SCSS，请参见<http://sass-lang.com/>。
 
 > ℹ️Odoo 12之前的版本中使用Bootstrap 3，使用的是LESS (http://lesscss.org)预处理器。Odoo 12使用最新的Bootstrap版本，即Bootstrap 4 (https:// getbootstrap.com/)，使用的是SCSS。因此，如果你使用的是老版本的Odoo的话，需要编写LESS而非SCSS。
 
@@ -327,7 +328,7 @@ odoo.define('another_module', function (require) {
        })
    ```
 
-在浏览器中打开http://your-server-url:8069/books，你将会看到一个带有作者的图书列表。通过这段代码，用户可mnyw 看到图书列表及详情。授予相应权限的话，用户还将能修改图书详情及一些其它文本。
+在浏览器中打开<http://your-server-url:8069/books>，你将会看到一个带有作者的图书列表。通过这段代码，用户可mnyw 看到图书列表及详情。授予相应权限的话，用户还将能修改图书详情及一些其它文本。
 
 ### 运行原理...
 
@@ -629,7 +630,7 @@ Odoo使werkzeug来处理HTTP请求。Odoo对werkzeug添加了很轻的封装来�
 - /pages/<page>接收字符串
 - /pages/<category>/<int:page>接收多个值
 
-对于路由有大量可用的变体，可以参见http://werkzeug.pocoo.org/docs/0.14/routing/。
+对于路由有大量可用的变体，可以参见<http://werkzeug.pocoo.org/docs/0.14/routing/>。
 
 ## 为用户提供小组件
 
@@ -1220,9 +1221,9 @@ Odoo CMS有对GeoIP的内置支持。在线上环境中，你可以根据IP来�
 
 更新该模块来应用修改。我们需要执行如下步骤来测试UTM：
 
-- 在Odoo中，UTM根据cookie来进行处理，并且一些浏览器不支持localhost的cookie，因此如果你是通过localhost来进行测试的话，通过http://127.0.0.1:8069来访问该实例。
+- 在Odoo中，UTM根据cookie来进行处理，并且一些浏览器不支持localhost的cookie，因此如果你是通过localhost来进行测试的话，通过<http://127.0.0.1:8069>来访问该实例。
 - 默认，UTM追踪是屏蔽销售人员的。因此，要测试UTM功能，你需要使用门户用户来进行登录。
-- 现在，打开像http://127.0.0.1:8069/books/submit_issues?utm_campaign=sale这样的URL。
+- 现在，打开像<http://127.0.0.1:8069/books/submit_issues?utm_campaign=sale>这样的URL。
 - 提交图书问题并查看后台中的图书问题。它会在图书的表单视图中显示活动。
 
 ### 运行原理...
@@ -1327,5 +1328,4 @@ TODO
 
 - 在第4步中，我们限制了图书的访问。如果图书不是针对当前网站的话，那么我们会抛出not found错误。如果图书记录针对当前活跃网站的话方法can_access_from_current_website会返回值True，而针对另一个网站时返回False。
 - 如果查看的话，我们在两个控制器中都添加了**post。这是因为没有它，**post /books and /books/不会接收查询参数。它会在通过网站切换器切换网站时产生报错，因此我们进行了添加。正常在每个控制器中添加**post是一个良好实践，这样它可以处理查询参数。
-
- 
+:::

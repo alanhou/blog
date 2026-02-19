@@ -12,6 +12,7 @@ tags: ["odoo", "rpc", "xml-rpc", "json-rpc", "api", "integration"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 Odoo服务支持远程过程调用（RPC），即你可以在外部应用中连接Odoo实例。通过Odoo RPC API，你可以对数据库执行任意增删改查（CRUD）操作。 Odoo RPC不只是可以执行增删改查操作，还可以调用任意模型中的公共方法。当做，你需要相应的访问权限来执行这些操作，因为RPC遵循你在数据库中定义的所有访问权限和记录规则。因此，使用起来非常安全。Odoo RPC不依赖于平台，你可以在任何平台上使用，包含Odoo.sh、线上或自托管平台。Odoo RPC可用于任一编程语言，因此你可以将Odoo集成到任何外部应用中。
 
 Odoo提供了两种类型的RPC API - XML-RPC 和 JSON-RPC。本章中，我们将学习如何在外部程序中使用这些RPC。最后，你会学到如何通过OCA的odoorpc库使用Odoo RPC。
@@ -30,11 +31,11 @@ Odoo提供了两种类型的RPC API - XML-RPC 和 JSON-RPC。本章中，我们�
 
 ## 技术准备
 
-本章中我们将使用[第十九章 使用Odoo.sh管理、部署和测试](/blog/managing-deploying-testing-odoo-sh)中所创建的my_library模块。初始的my_library模块代码请见GitHub仓库：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter20/r0_initial_module。
+本章中我们将使用[第十九章 使用Odoo.sh管理、部署和测试](/blog/managing-deploying-testing-odoo-sh)中所创建的my_library模块。初始的my_library模块代码请见GitHub仓库：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter20/r0_initial_module>。
 
 这里我们不会介绍读者可能熟悉的新语言。我们会继续使用Python来访问RPC API。如果愿意你可以使用其它语言，这里访问RPC的流程同样适用于其它语言。
 
-通过RPC连接Odoo，我们将需要运行Odoo实例来供连接。整章中我们都将假设你的Odoo服务运行于http://localhost:8069且安装了my_library模块的数据库名称为test-12。注意你其实可以通过RPC连接任意有效IP或域名。
+通过RPC连接Odoo，我们将需要运行Odoo实例来供连接。整章中我们都将假设你的Odoo服务运行于<http://localhost:8069>且安装了my_library模块的数据库名称为test-12。注意你其实可以通过RPC连接任意有效IP或域名。
 
 ## 通过XML-RPC登录/连接Odoo
 
@@ -42,7 +43,7 @@ Odoo提供了两种类型的RPC API - XML-RPC 和 JSON-RPC。本章中，我们�
 
 ### 准备工作
 
-要通过RPC连接Odoo实例，你需要运行Odoo实例来供连接。我们将假定你的Odoo服务运行于http://localhost:8069并且已安装了my_library模块。
+要通过RPC连接Odoo实例，你需要运行Odoo实例来供连接。我们将假定你的Odoo服务运行于<http://localhost:8069>并且已安装了my_library模块。
 
 ### 如何实现...
 
@@ -113,7 +114,7 @@ TODO
 
 ### 准备工作
 
-我们将创建一个Python程序来从library.book模型中获取图书数据。请确保已经安装了my_library模块并且服务运行于http://localhost:8069。
+我们将创建一个Python程序来从library.book模型中获取图书数据。请确保已经安装了my_library模块并且服务运行于<http://localhost:8069>。
 
 ### 如何实现...
 
@@ -220,7 +221,7 @@ else:
 
 ### 准备工作
 
-我们将创建Python程序来对 library.book模型创建、写入和删除数据。确保已安装了my_library并且服务运行于http://localhost:8069。
+我们将创建Python程序来对 library.book模型创建、写入和删除数据。确保已安装了my_library并且服务运行于<http://localhost:8069>。
 
 ### 如何实现...
 
@@ -332,7 +333,7 @@ else:
 
 ### 准备工作
 
-我们将创建一个Python程序来对library.book模型调用make_available。确保你已安装了my_library模块并且服务运行于http://localhost:8069。
+我们将创建一个Python程序来对library.book模型调用make_available。确保你已安装了my_library模块并且服务运行于<http://localhost:8069>。
 
 ### 如何实现...
 
@@ -407,7 +408,7 @@ Odoo还提供另一种类型的RPC API: JSON-RPC。由名称可知，JSON-RPC以
 
 ### 准备工作
 
-本节中，我们将通过JSON-RPC 来执行用户认证来检查给定的认证信息是否有效。确保已安装了my_library模块并且服务运行于http://localhost:8069。
+本节中，我们将通过JSON-RPC 来执行用户认证来检查给定的认证信息是否有效。确保已安装了my_library模块并且服务运行于<http://localhost:8069>。
 
 ### 如何实现...
 
@@ -468,7 +469,7 @@ TODO
 
 JSON-RPC使用JSON格式来与服务端通讯。它使用/jsonrpc端点来与服务端通讯。在本例中，我们使用了Python的requests包来进行POST请求，但如果你希望的话，也可以使用其它包，如urllib。
 
-JSON-RPC仅接收按照JSON-RPC 2.0规范格式的数据，参见https://www.jsonrpc.org/specification来学习有关JSON-RPC格式的更多知识。在本例中，我们创建了 get_json_payload()方法。该方法将以有效的JSON-RPC 2.0格式准备加载数据。这个方法接收服务名和要调用的方法，并且剩余的参数将会放在*args中。我们将在后续的小节中使用这一方法。JSON-RPC接收JSON格式的请求并且这些请求仅接收包含{"Content-Type": "application/json"}头的请求。请求的结果为JSON格式。
+JSON-RPC仅接收按照JSON-RPC 2.0规范格式的数据，参见<https://www.jsonrpc.org/specification>来学习有关JSON-RPC格式的更多知识。在本例中，我们创建了 get_json_payload()方法。该方法将以有效的JSON-RPC 2.0格式准备加载数据。这个方法接收服务名和要调用的方法，并且剩余的参数将会放在*args中。我们将在后续的小节中使用这一方法。JSON-RPC接收JSON格式的请求并且这些请求仅接收包含{"Content-Type": "application/json"}头的请求。请求的结果为JSON格式。
 
 类似XML-RPC，所有的公有方法，包含login，都在common服务下。出于这一原因，我们传递了common作为服务以及login作为方法来准备JSON加载数据。login方法要求一些额外的参数，因此我们传递了数据库名、用户名和密码。然后我们使用加载数据和头信息对这个JSON端点进行了POST请求。如果你传递了正确的用户名和密码，该方法返回用户 id。响应将为JSON格式并且你会在result键中获取到结果。
 
@@ -506,7 +507,7 @@ TODO
 
 ### 准备工作
 
-本节中我将通过JSON-RPC来获取图书信息。确保已安装my_library模块并且服务运行于http://localhost:8069。
+本节中我将通过JSON-RPC来获取图书信息。确保已安装my_library模块并且服务运行于<http://localhost:8069>。
 
 ### 如何实现...
 
@@ -594,7 +595,7 @@ else:
 
 ### 准备工作
 
-我们将创建一个Python程序来创建、写入和删除 library.book 模型中的数据。确保已安装了my_library模块并且服务运行于http://localhost:8069。
+我们将创建一个Python程序来创建、写入和删除 library.book 模型中的数据。确保已安装了my_library模块并且服务运行于<http://localhost:8069>。
 
 ### 如何实现...
 
@@ -692,7 +693,7 @@ TODO
 
 ### 准备工作
 
-我们将创建Python程序来调用library.book中的make_available方法。确保已安装my_library模块并且服务运行于http://localhost:8069。
+我们将创建Python程序来调用library.book中的make_available方法。确保已安装my_library模块并且服务运行于<http://localhost:8069>。
 
 ### 如何实现...
 
@@ -751,7 +752,7 @@ execute_kw能够调用模型中的任意公有方法。如我们在*通过XML-RP
 
 ## OCA odoorpc库
 
-Odoo社区联盟（OCA）提供名为odoorpc的Python库。可通过https://github.com/OCA/odoorpc进行获取。odoorpc库提供一种用户友好的语法，使用它可以通过RPC访问Odoo数据。它提供一种类似于后端服务的语法。在本节中，我们将学习如何使用odoorpc库来通过RPC执行操作。
+Odoo社区联盟（OCA）提供名为odoorpc的Python库。可通过<https://github.com/OCA/odoorpc>进行获取。odoorpc库提供一种用户友好的语法，使用它可以通过RPC访问Odoo数据。它提供一种类似于后端服务的语法。在本节中，我们将学习如何使用odoorpc库来通过RPC执行操作。
 
 ### 准备工作
 
@@ -761,7 +762,7 @@ odoorpc库在Python包（PyPi）索引中注册。使用这个库我们需要通
 pip install OdooRPC
 ```
 
-在本节中，我们将使用odoorpc库来进行一些基本操作。我们将使用library.book模型来执行这些操作。确保已安装my_library模型并且服务运行于http://localhost:8069。
+在本节中，我们将使用odoorpc库来进行一些基本操作。我们将使用library.book模型来执行这些操作。确保已安装my_library模型并且服务运行于<http://localhost:8069>。
 
 ### 如何实现...
 
@@ -850,3 +851,4 @@ print(books_info)
 - https://github.com/odoo/openerp-client-lib
 - http://pythonhosted.org/OdooRPC
 - https://github.com/abhishek-jaiswal/php-openerp-lib
+:::

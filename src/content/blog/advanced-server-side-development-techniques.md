@@ -12,6 +12,7 @@ tags: ["odoo", "advanced-development", "wizards", "onchange", "sql"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下内容：
 
 - 更改执行动作的用户
@@ -32,7 +33,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 本章章的技术要求包含Odoo在线平台。
 
-本章中所使用的所有代码可通过GitHub仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter09。
+本章中所使用的所有代码可通过GitHub仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter09>。
 
 观看视频来查看代码实时操作：http://t.cn/AiWiA3uY
 
@@ -64,7 +65,7 @@ class LibraryBookRent(models.Model):
 
 你会需要添加一个表单视图、一个动作以及一个通过用户界面查看新模型的菜单项。还需要为librarian添加一个权限规则，这样他们可以发布供出租的图书。如果不了解这些知识，请参见[第四章 创建Odoo插件模块](/blog/creating-odoo-add-on-modules)。
 
-同时，你也可以使用GitHub上已经编写好的初始模块代码示例来节约一点时间。该模块位于Chapter09/r0_initial_module文件夹下。GitHub 代码示例请参见https://github.com/alanhou/odoo12-cookbook。
+同时，你也可以使用GitHub上已经编写好的初始模块代码示例来节约一点时间。该模块位于Chapter09/r0_initial_module文件夹下。GitHub 代码示例请参见<https://github.com/alanhou/odoo12-cookbook>。
 
 ### 如何操作...
 
@@ -133,7 +134,7 @@ public_book = self.env['library.book'].sudo(public_user)
 
 > ℹ️在使用sudo()时，对由谁创建或更新记录的动作都不进行跟踪记录。本节中公司的最后一次修改人为Administrator，而非最初调用create的用户。
 >
-> 位于https://github.com/OCA/server-backend/的社区插件base_suspend_security可用于处理这一问题。
+> 位于<https://github.com/OCA/server-backend/>的社区插件base_suspend_security可用于处理这一问题。
 
 ### 扩展知识...
 
@@ -942,3 +943,4 @@ module_my_library_extras = fields.Boolean(string='Library Extra Features')
 
 - pre_init_hook：这个钩子会在开始安装模块时触发。它与post_init_hook正好相反，会在当前模块安装前触发。
 - uninstall_hook：这个钩子会在你卸载该模块时触发。它多用于模块需要垃圾回收机制时。
+:::

@@ -12,6 +12,7 @@ tags: ["odoo", "i18n", "internationalization", "translations", "localization"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下内容：
 
 - 安装语言及配置用户首选项
@@ -307,7 +308,7 @@ PO文件格式是gettext国际化和本地化系统的一部分，它在类Unix�
 
 ### 扩展知识...
 
-本小节只涉及到GNU gettext工具集中丰富工具的冰山一角。完整的讲解不是本书的范畴。如果读者感举，GNU gettext的文档包含大量的有关对PO操作的信息，参见http://www.gnu.org/software/gettext/manual/gettext.html。
+本小节只涉及到GNU gettext工具集中丰富工具的冰山一角。完整的讲解不是本书的范畴。如果读者感举，GNU gettext的文档包含大量的有关对PO操作的信息，参见<http://www.gnu.org/software/gettext/manual/gettext.html>。
 
 ## 将翻译文件导入到Odoo中
 
@@ -342,3 +343,4 @@ Import Translation接受一个PO或CSV文件，并将翻译字符串导入到ir.
 网页客户端功能中要求填写语言名，但它并没有在导入过程中使用到。还有一个重写选项。如果勾选，会强制导入所有的翻译字符串，即便这些字符串已经存在，在这个过程中会进行覆盖。
 
 在命令行中，导入可通过--i18n-import选项来实现。它必须提供该文件相对插件路径目录的路径，-d和--language (或-l)也是强制的。还可以通过在命令行中添加--i18n-overwrite 选项来实现重写。注意我们在这里没有使用--stop-after-init选项。不需要使用，因为导入动作在完成时会停止服务。
+:::

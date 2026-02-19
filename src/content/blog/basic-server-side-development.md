@@ -12,6 +12,7 @@ tags: ["odoo", "server-side", "orm", "crud", "recordsets"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下内容：
 
 - 定义模型方法及使用API装饰器
@@ -36,7 +37,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 本章的技术准备包括Odoo在线平台。
 
-本章中所使用的代码可以在如下GitHub仓库中下载：https://github.com/alanhou/odoo12-cookbook。
+本章中所使用的代码可以在如下GitHub仓库中下载：<https://github.com/alanhou/odoo12-cookbook>。
 
 观看视频来查看实时代码操作：https://dwz.cn/dBKge1V5
 
@@ -766,7 +767,7 @@ class LibraryBookCategory(models.Model):
     default=10)
 ```
 
-需要按照[第十章 后端视图](/blog/backend-views)中的*修改已有视图 - 视图继承*一节来在视图中添加该字段。你可以在https://github.com/alanhou/odoo12-cookbook中查看代码的完整示例。
+需要按照[第十章 后端视图](/blog/backend-views)中的*修改已有视图 - 视图继承*一节来在视图中添加该字段。你可以在<https://github.com/alanhou/odoo12-cookbook>中查看代码的完整示例。
 
 ### 如何操作...
 
@@ -1075,7 +1076,7 @@ read_group()方法的内部使用SQL的group by及累加函数来获取数据。
 - domain：用于为分组过滤记录。更多有关过滤域的知识，请参见[第十章 后端视图](/blog/backend-views))中的*定义搜索视图*一节。
 - fields：它传递你希望获取分组数据的字段名称。该参数的值可能如下：
   - 字段名：你可以向fields参数传递字段名，但如果使用这一选项，还应将该字段名同时传递给groupby参数，否则会产生错误
-  - field_name:agg：你可以传递带有聚合函数的字段名。例如，在cost_price:avg中，avg是一个SQL聚合函数。PostgreSQL中的聚合函数请参见https://www.postgresql.org/docs/current/functions-aggregate.html。
+  - field_name:agg：你可以传递带有聚合函数的字段名。例如，在cost_price:avg中，avg是一个SQL聚合函数。PostgreSQL中的聚合函数请参见<https://www.postgresql.org/docs/current/functions-aggregate.html>。
   - name:agg(field_name)：它与前面一个相同，但使用这种语句，你可以给数据列一个别名，例如average_price:avg(cost_price)。
 - groupby：这个参数接收一个字段描述列表。记录将根据这些字段分组。对于date和datetime列，你可以传递groupby_function来根据不同的时长应用日期分组，如 date_release:month。这会根据月来应用分组。
 
@@ -1087,3 +1088,4 @@ read_group()还支持一些可选参数，如下：
 - lazy：它接收布尔值，并且默认值为True。如果传递了True，结果仅通过第一个groupby进行分组，剩余的groupby会被放到__context键中。若为False，所有的groupby在一次调用中完成。
 
 > **小贴士：**性能贴士：read_group()要比从记录集中读取和处理值快速的多。因此对KPI或图表应保持使用read_group()。
+:::

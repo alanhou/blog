@@ -12,6 +12,7 @@ tags: ["odoo", "module-data", "xml", "csv", "demo-data"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下小节：
 
 - 使用外部ID和命名空间
@@ -30,7 +31,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 本章的技术要求包含在线Odoo平台。
 
-本章中的所有代码可通过GitHub代码仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter07。
+本章中的所有代码可通过GitHub代码仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter07>。
 
 实时代码操作请观看如下视频：http://t.cn/Ailakrsh
 
@@ -378,7 +379,7 @@ def migrate(cr, version):
 
 ### 其它内容
 
-在编写迁移脚本时，你常常会碰到重复的任务，比如查某数据列或数据表是否存在、重命名或映射一些旧的值到新值。重复造轮子可能会容易产生问题并让你沮丧，如果你可以承担额外依赖的话考虑使用https://github.com/OCA/openupgradelib。
+在编写迁移脚本时，你常常会碰到重复的任务，比如查某数据列或数据表是否存在、重命名或映射一些旧的值到新值。重复造轮子可能会容易产生问题并让你沮丧，如果你可以承担额外依赖的话考虑使用<https://github.com/OCA/openupgradelib>。
 
 ## 从XML文件中删除记录
 
@@ -485,3 +486,4 @@ def update_book_price(self, category, amount_to_increase):
 ```
 
 在你安装这一模块时，会对指定分类的图书单价增加$20。.
+:::

@@ -12,6 +12,7 @@ tags: ["odoo", "models", "orm", "fields", "inheritance"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中我们将讲解如下小节：
 
 - 定义模型表现及顺序
@@ -36,7 +37,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 要按照本章中的示例进行操作，你应该要有一个[第四章 创建Odoo插件模块](/blog/creating-odoo-add-on-modules)中所创建的模块并且该模型应可用。
 
-本章中使用的代码可以在GitHub仓库中进行下载，地址为https://github.com/alanhou/odoo12-cookbook/tree/master/Chapter05。
+本章中使用的代码可以在GitHub仓库中进行下载，地址为<https://github.com/alanhou/odoo12-cookbook/tree/master/Chapter05>。
 
 观看如下视频来查看实时代码操作：http://t.cn/E9ZHCPR
 
@@ -718,7 +719,7 @@ class LibraryBook(models.Model):
 - PostgreSQL中用于修改或创建数据表的SQL指令。
 - 在违反约束时向用户报出的消息。
 
-我们在前面已经提到，也可以使用其它数据表约束。注意列级约束如NOT NULL不能以这种方式进行使用。有关PostgreSQL的通用约束以及具体的数据表约束更详细的信息，请参见https://www.postgresql.org/docs/current/ddl-constraints.html。
+我们在前面已经提到，也可以使用其它数据表约束。注意列级约束如NOT NULL不能以这种方式进行使用。有关PostgreSQL的通用约束以及具体的数据表约束更详细的信息，请参见<https://www.postgresql.org/docs/current/ddl-constraints.html>。
 
 在第2步中，我们添加了一个方法来执行Python代码验证。它使用了@api.constrains装饰器，表示在参数列表中字段发生变化时应执行它来运行检查 。如果检查失败，会抛出一个ValidationError异常。
 
@@ -1152,5 +1153,4 @@ class LibraryMember(models.Model):
 关于代理继承一个值得注意的用例是用户模型 res.users。它继承自成员（res.partner）。这表示其中在User中可见的一些字段实际存储Partner模型中（尤其是name字段）。在新用户创建时，我们还获取了一个新的自动创建的Partner。
 
 还应说明带有_inherit的传统继承会将功能拷贝到新模型中，虽然效率并不高。这在*使用继承向模型添加功能*一节中进行了讨论。
-
- 
+:::

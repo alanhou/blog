@@ -12,6 +12,7 @@ tags: ["odoo", "iot", "raspberry-pi", "hardware", "peripherals"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 在版本12中，Odoo加入了对物联网（IoT）的支持。Odoo使用名为IoT盒子的硬件，用于连接打印机、卡尺和脚踏开关等设备。本章中，你将学习如何设置和配置IoT盒子。这里，我们将讲解如下课题：
 
 - 为树莓派（Raspberry Pi）闪存IoT盒子镜像
@@ -22,13 +23,13 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 - 通过SSH访问IoT盒子
 - 配置 POS（销售点）
 
-> ℹ️IoT盒子是一个基于树莓派的设备。本章中的各小节基于Raspberry Pi 3 Model B+，可通过https://www.raspberrypi.org/products/raspberry-pi-3-model-b-plus/进行购买。IoT是企业版部分的功能，因此你需要有企业版来完成本章中的操作。注意本章的止的是安装和配置IoT盒子。开发硬件驱动不在本书的讨论范围。如果你想要深入地学习IoT盒子，请认真研究企业版中的iot模块。
+> ℹ️IoT盒子是一个基于树莓派的设备。本章中的各小节基于Raspberry Pi 3 Model B+，可通过<https://www.raspberrypi.org/products/raspberry-pi-3-model-b-plus/>进行购买。IoT是企业版部分的功能，因此你需要有企业版来完成本章中的操作。注意本章的止的是安装和配置IoT盒子。开发硬件驱动不在本书的讨论范围。如果你想要深入地学习IoT盒子，请认真研究企业版中的iot模块。
 
 ## 技术准备
 
 本章的技术准备包含在线Odoo平台。
 
-本章中的所有代码可在如下GitHub仓库中进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter24/r5_take_device_inputs/my_library。
+本章中的所有代码可在如下GitHub仓库中进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter24/r5_take_device_inputs/my_library>。
 
 观看如下视频查看代码实时操作：‘
 
@@ -47,8 +48,8 @@ https://youtu.be/rG6R2aAHoOk
 执行如下步骤来在SD卡上安装IoT盒子镜像：
 
 1. 将microSD卡插入你的电脑（如果电脑上没卡槽请使用适配器）。
-2. 从Odoo的nightly构建上下载IoT例子镜像。镜像地址为https://nightly.odoo.com/master/iotbox/。
-3. 下载并在电脑上安装Balena Etcher。下载地址为https://www.balena.io/etcher/。
+2. 从Odoo的nightly构建上下载IoT例子镜像。镜像地址为<https://nightly.odoo.com/master/iotbox/>。
+3. 下载并在电脑上安装Balena Etcher。下载地址为<https://www.balena.io/etcher/>。
 4. 打开Balena Etcher，选择IoT例子镜像，并选择闪存你的microSD卡。你可以参见如下截图：
    TODO
 5. 点击Flash!按钮并等待处理完成。
@@ -117,7 +118,7 @@ IoT盒子通过网络与Odoo实例进行通讯。连接IoT盒子是很关键的�
 
 > ℹ️需要注意以下几点，否则IoT盒子无法与 Odoo进行连接。
 >
-> - 如果你在本地实例上测试IoT盒子，需要使用http://192.168.1.*:8069（本地 IP）来代替http://localhost:8069。如果使用localhost，IoT盒子会无法连接到Odoo实例。
+> - 如果你在本地实例上测试IoT盒子，需要使用<http://192.168.1.*:8069（>本地 IP）来代替<http://localhost:8069>。如果使用localhost，IoT盒子会无法连接到Odoo实例。
 > - 你需要通过 Odoo 实例所运行电脑使用的相同WiFi或以太网连接IoT盒子。否则IoT盒子会无法连接到Odoo实例。
 > - 如果你的Odoo实例运行着多数据库。IoT盒子不会与Odoo实例进行自动连接。使用--db-filter参数来避免这一情况。
 
@@ -203,7 +204,7 @@ IoT盒子并不是仅局限于企业版。也可以在社区版中作为PoSBox�
 
 [![每个IoT盒子所连接的一组设备](https://alanhou.org/homepage/wp-content/uploads/2019/05/2019082102330313.png)](https://alanhou.org/homepage/wp-content/uploads/2019/05/2019082102330313.png)
 
-现在，IoT盒子仅支持有限制的硬件设备，如摄像头、脚踏开关、打印机和卡尺。Odoo所推荐的设备列表请见https://www.odoo.com/page/iot-hardware。如果尚未支持你的设备，可以付费来进行驱动开发。
+现在，IoT盒子仅支持有限制的硬件设备，如摄像头、脚踏开关、打印机和卡尺。Odoo所推荐的设备列表请见<https://www.odoo.com/page/iot-hardware>。如果尚未支持你的设备，可以付费来进行驱动开发。
 
 ## 从设备接收输入
 
@@ -328,7 +329,7 @@ IoT运行于Raspbian OS之上，可以通过SSH来访问IoT盒子。本节中，
 
 ### 扩展知识...
 
-注意IoT盒子仅与本地机器进行了连接。因此，无法通过互联网直接远程访问它的shell。如果希望远程访问IoT盒子，可以在IoT盒子的远程调试页面中粘贴ngrok认证Token，参见下图。这会在IoT盒子中启用TCP通道，这样就可以在任何地方通过SSH来连接IoT盒子了。可通过https://ngrok.com/学习更多有关ngrok的知识。
+注意IoT盒子仅与本地机器进行了连接。因此，无法通过互联网直接远程访问它的shell。如果希望远程访问IoT盒子，可以在IoT盒子的远程调试页面中粘贴ngrok认证Token，参见下图。这会在IoT盒子中启用TCP通道，这样就可以在任何地方通过SSH来连接IoT盒子了。可通过<https://ngrok.com/>学习更多有关ngrok的知识。
 
 [![img](https://alanhou.org/homepage/wp-content/uploads/2019/05/2019082102341926.png)](https://alanhou.org/homepage/wp-content/uploads/2019/05/2019082102341926.png)
 
@@ -368,3 +369,4 @@ POS 应用属于社区版。如果你使用的是社区版，在 POS 设置中�
 [![img](https://alanhou.org/homepage/wp-content/uploads/2019/05/2019082102361762.png)](https://alanhou.org/homepage/wp-content/uploads/2019/05/2019082102361762.png)
 
 如果想要在社区版集成硬件，需要在该字段中使用IoT盒子的IP地址。
+:::

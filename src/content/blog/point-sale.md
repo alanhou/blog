@@ -12,6 +12,7 @@ tags: ["odoo", "pos", "point-of-sale", "retail", "customization"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下内容：
 
 - 添加自定义JavaScript/SCSS文件
@@ -33,7 +34,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 本章的技术要求包括在线的Odoo平台。
 
-本章中使用的所有代码通过GitHub仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter22。
+本章中使用的所有代码通过GitHub仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter22>。
 
 观看如下视频来查看代码实时操作：
 
@@ -505,4 +506,5 @@ OrderWidget的set_value()函数用于通过键盘更新产品价格。相同的�
 </t>
 ```
 
-Odoo使用XML-ESC/POS Python 库来生成收据。参见https://github.com/fvdsn/py-xml-escpos来了解所支持的XML结构。
+Odoo使用XML-ESC/POS Python 库来生成收据。参见<https://github.com/fvdsn/py-xml-escpos>来了解所支持的XML结构。
+:::

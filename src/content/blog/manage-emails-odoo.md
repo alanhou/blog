@@ -12,6 +12,7 @@ tags: ["odoo", "email", "mail-thread", "jinja", "automation"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 Email集成是Odoo的一个最耀眼的功能。你可以通过Odoo用户界面直接发送和接收邮件。你甚至可以在业务文档中直接管理email线程，如线索、销售订单和项目。本章中，我们将探讨一些在Odoo处理邮件的重要方式。这里我们将讲解如下课题：
 
 - 配置接收和发送邮件服务器
@@ -26,7 +27,7 @@ Email集成是Odoo的一个最耀眼的功能。你可以通过Odoo用户界面�
 
 本章的技术要求包含一个在线Odoo平台。
 
-本章中使用的所有代码均可通过GitHub仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter23。
+本章中使用的所有代码均可通过GitHub仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter23>。
 
 观看如下视频来查看代码实时操作：
 
@@ -334,7 +335,7 @@ Odoo支持通过Jinja模板创建动态邮件。本节中我们钭创建一个Ji
 - email_to：这个字段的值是接收者的邮箱地址。
 - subject：这个字段包含邮件的标题。
 - model_id：这个字段包含对模型的引用。邮件模板会使用这个模型的数据进行渲染。
-- body_html：这个字段将追住邮件模板的主体。它是一个Jinja模板，因此你可以使用变量、循环、条件等。如果想要学习有关Jinja模板的更多知识，可访问https://jinja.palletsprojects.com/en/2.10.x/。通常我们在CDATA标签中封装内容，这样body中的内容会被看作字符数据而不是标记语言。
+- body_html：这个字段将追住邮件模板的主体。它是一个Jinja模板，因此你可以使用变量、循环、条件等。如果想要学习有关Jinja模板的更多知识，可访问<https://jinja.palletsprojects.com/en/2.10.x/>。通常我们在CDATA标签中封装内容，这样body中的内容会被看作字符数据而不是标记语言。
 - auto_delete：这是一个在邮件发送后用于删除邮件的布尔字段。该字段的默认值为False。
 - lang：这个字段用于将邮件模板翻译为其它语言。
 
@@ -601,3 +602,4 @@ class LibraryBookRent(models.Model):
 本节中，我们对state字段添加了track_visibility='always'，并对rent_date和return_date字段添加了track_visibility='onchange'。这表示Odoo会在更新ent_date, return_date或state 字段的值时记录这些修改。但因为state设置为track_visibility='always'，即使它的值未进行修改也会进行记录。查看*如何实现*小节中的截图，我们仅修改了rent_date字段，并设置了日志显示State: Ongoing。
 
 注意track_visibility功能仅用于继承了 mail.thread模型的模型，因此代码相关的聊天器和日志是mail.thread 模型的一部分。
+:::

@@ -12,6 +12,7 @@ tags: ["odoo", "server", "instance-management", "modules"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下内容：
 
 - 配置插件路径
@@ -572,3 +573,4 @@ $ git checkout -b 12.0-custom
 ```
 $ git pull origin 12.0
 ```
+:::

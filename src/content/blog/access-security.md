@@ -12,6 +12,7 @@ tags: ["odoo", "security", "access-control", "record-rules", "groups"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们来看如何实现如下小节的内容：
 
 - 创建权限组并为用户分配组
@@ -28,7 +29,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 本章的技术要求包含使用按照[第四章 创建Odoo插件模块](/blog/creating-odoo-add-on-modules)各小一节所创建的模块。在继续本章的示例之前应创建该模块并做法使用的准备。
 
-本章中的所有代码可通 GitHub 仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter11。
+本章中的所有代码可通 GitHub 仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter11>。
 
 代码实时操作请观看视频：
 
@@ -631,5 +632,4 @@ module_选项字段不需要任何的额外属性。字段名的剩余部分标�
 几乎可以在任何地方使用groups属性，包括<field>, <notebook>, <group>, <menuitems>和视图结构中的任意标签。如果用户不属于该组的话则会对其隐藏这些元素。可以在网页和QWeb报表中使用相同的组属性，这将在[第十三章 自动化、工作流和打印件](/blog/automation-workflows-printouts)和[第十五章 CMS网站开发](/blog/cms-website-development)中进行讲解。
 
 正如在本章*以超级用户访问记录集*一节中所看到的，我们可以在Python字段定义中使用groups参数来对一些用户隐藏字段。注意字段上的安全组和视图中的Python安全组有很大的区别。Python中的安全组提供了真正的安全，非授权用户无法通过ORM或RPC调用来访问字段。但是视图中的组仅为了提升易用性。XML文件中通过组隐藏的字段仍可以通过RPC或ORM进行访问。
-
- 
+:::

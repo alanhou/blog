@@ -12,6 +12,7 @@ tags: ["odoo", "odoo-sh", "cloud", "deployment", "ci-cd"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下内容：
 
 - 探讨Odoo.sh的一些基本概念
@@ -27,7 +28,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 2017年，Odoo发布了Odoo.sh，一个全新的云端服务。Odoo.sh是一个让测试处理、部署和Odoo实例监控都尽可能简单的平台。本章中，我们将来看Odoo.sh 的运作方式，以及何时应使用它来代替其它部署选项。
 
-> ℹ️本章假定你能使用Odoo.sh。这是一个付费服务，你需要订阅码来访问该平台。如果你是一个Odoo合作伙伴，可能获取到免费的Odoo.sh订阅码。否则需要通过https://www.odoo.sh/pricing来进行购买。
+> ℹ️本章假定你能使用Odoo.sh。这是一个付费服务，你需要订阅码来访问该平台。如果你是一个Odoo合作伙伴，可能获取到免费的Odoo.sh订阅码。否则需要通过<https://www.odoo.sh/pricing>来进行购买。
 >
 > 即使你没有订阅码也可以学习本章，其中有大量的截图可帮助你了解这个平台。
 
@@ -35,7 +36,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 本章的技术准备包含在线Odoo平台。
 
-本章中使用的所有代码可通过GitHub仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter19。
+本章中使用的所有代码可通过GitHub仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter19>。
 
 观看如下视频来查看实时代码操作：
 
@@ -85,13 +86,13 @@ Odoo投入了大量的时间来开发Odoo.sh平台，因此它内置了很多的
 
 ### 准备工作
 
-学习本节，你会需要一个用于添加自定义模块的GitHub账户。你还将需要一个Odoo.sh订阅码。如果你是Odoo官方合作伙伴，你将可以获取到免费的 Odoo.sh订阅码。否则，你需要通过https://www.odoo.sh/pricing来进行购买。
+学习本节，你会需要一个用于添加自定义模块的GitHub账户。你还将需要一个Odoo.sh订阅码。如果你是Odoo官方合作伙伴，你将可以获取到免费的 Odoo.sh订阅码。否则，你需要通过<https://www.odoo.sh/pricing>来进行购买。
 
 ### 如何实现...
 
 按照如下步骤来创建一个Odoo.sh账户：
 
-1. 打开https://www.odoo.sh并点击顶部菜单中的Sign in。这会将你重定向到GitHub页面：
+1. 打开<https://www.odoo.sh>并点击顶部菜单中的Sign in。这会将你重定向到GitHub页面：
    TODO
 2. 进行仓库的授权，然后会重定向回到 Odoo.sh。填写表单来部署实例：
    TODO
@@ -167,7 +168,7 @@ TODO
 
 ### 准备工作
 
-访问https://www.odoo.sh/project并打开我们在*创建一个Odoo.sh账户*一节中所创建的项目。我们将创建一个针对新功能的开发分支，然后在预发布分支中进行测试。最后，我们将在生产分支中合并这一功能。
+访问<https://www.odoo.sh/project>并打开我们在*创建一个Odoo.sh账户*一节中所创建的项目。我们将创建一个针对新功能的开发分支，然后在预发布分支中进行测试。最后，我们将在生产分支中合并这一功能。
 
 ### 如何实现...
 
@@ -399,7 +400,7 @@ Odoo.sh在设置菜单下提供了一些其它的选项。本节中，我们将�
 
 #### 项目名
 
-你可以通过这个选项修改Odoo.sh项目的名称。输入框中的Project Name可用于生成生产分支URL。开发分支也使用这个项目名称来作为前缀。本例中，我们的功能分支的URL会类似https://parthgajjar-odooshdemo-feature-branch-260887.dev.odoo.com。
+你可以通过这个选项修改Odoo.sh项目的名称。输入框中的Project Name可用于生成生产分支URL。开发分支也使用这个项目名称来作为前缀。本例中，我们的功能分支的URL会类似<https://parthgajjar-odooshdemo-feature-branch-260887.dev.odoo.com>。
 
 > **小贴士：**这个选项会修改生产URL，但不能去除掉*.odoo.com。如果你希望在自定义域名上运行生产分支，可以在生产分支的设置标签栏中添加自定义域名。你还需要在自己域名的DNS管理器中添加一个CNAME。
 
@@ -467,3 +468,4 @@ TODO
 #### Odoo 源代码修订
 
 这一版块将显示Odoo项目的GitHub修订版号码。它会显示针对社区版、企业版和在平台中当前使用的主题项目的修订版哈希。源代码每周会自动更新。这个选项有且于在本机上获取完全一致的版本。你还可以通过仓库中的git命令在网页shell中查看它。
+:::

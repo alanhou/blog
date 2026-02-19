@@ -12,6 +12,7 @@ tags: ["odoo", "web-client", "javascript", "widgets", "qweb"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下小节：
 
 - 创建自定义组件
@@ -38,7 +39,7 @@ Odoo的网页客户端或后台，是公司成员花费最多时间的地方。�
 
 本章的技术要求有在线Odoo平台。
 
-本章中的所有代码可通过GitHub仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter16。
+本章中的所有代码可通过GitHub仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter16>。
 
 观看如下视频来查看实时代码操作：
 
@@ -1009,6 +1010,5 @@ Odoo中的移动工具有如下这些：
 - scanBarcode(): 扫描二维码
 - switchAccount(): 在Android中打开账号切换器
 
-学习更多有关移动端的JavaScript知识，请参见：https://www.odoo.com/documentation/12.0/reference/mobile.html。
-
- 
+学习更多有关移动端的JavaScript知识，请参见：<https://www.odoo.com/documentation/12.0/reference/mobile.html>。
+:::

@@ -12,6 +12,7 @@ tags: ["odoo", "iap", "in-app-purchase", "monetization"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下内容：
 
 - 应用内购买（IAP）的概念
@@ -29,7 +30,7 @@ Odoo在版本11中引入了IAP。IAP用于提供循环收费服务而又无需�
 
 本章的技术要求包含在线Odoo平台。
 
-本章中使用的所有代码可通过GitHub仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter17。
+本章中使用的所有代码可通过GitHub仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter17>。
 
 观看如下视频来查看实时代码操作：http://bit.ly/2ULQAc0
 
@@ -76,13 +77,13 @@ TODO
 
 ### 准备工作...
 
-通过IAP平台销售服务，服务提供者需要向Odoo注册服务和方案。我们将在https://iap-sandbox.odoo.com/上注册服务。这个IAP端点用于进行测试。你可以免费购买一个服务包。对于生产环境，你需要在https://iap.odoo.com注册服务。本节中我们将使IAP沙盒端点。
+通过IAP平台销售服务，服务提供者需要向Odoo注册服务和方案。我们将在<https://iap-sandbox.odoo.com/>上注册服务。这个IAP端点用于进行测试。你可以免费购买一个服务包。对于生产环境，你需要在<https://iap.odoo.com>注册服务。本节中我们将使IAP沙盒端点。
 
 ### 如何实现...
 
 按照如下步骤来在Odoo上创建IAP服务：
 
-1. 打开https://iap-sandbox.odoo.com/并登录（如没有账户请注册）。
+1. 打开<https://iap-sandbox.odoo.com/>并登录（如没有账户请注册）。
 2. 在首页中点击Manage my service按钮。
 3. 点击Create按钮来新建服务。
 4. 这会打开如下图的表单。此处，填写包含服务Logo、技术名称（必须唯一）、单位名称、隐私政策等信息。
@@ -98,7 +99,7 @@ TODO
 
 ### 运行原理...
 
-我们在https://iap-sandbox.odoo.com/上创建了一个IAP服务，因为我们想要迁移到生产环境前测试下IAP服务。让我们来了解下创建服务时所填写的字段的用途吧：
+我们在<https://iap-sandbox.odoo.com/>上创建了一个IAP服务，因为我们想要迁移到生产环境前测试下IAP服务。让我们来了解下创建服务时所填写的字段的用途吧：
 
 - 技术名称（Technical name ）用于识别服务，它必须是唯一名称。我们在这里添加了book_isbn。（此后无法修改这一名称）
 - 标签、描述和服务Logo用于提供信息。这一信息会在用户购买服务的网页中显示。
@@ -464,7 +465,7 @@ return data_found
 ### 其它内容
 
 - IAP不仅限于Odoo框架。你可以开在其它平台或框架中开发一个服务提供者模块。仅需确保它能够处理[JSON-RPC2](https://www.jsonrpc.org/specification)请求。
-- 如果想要在其它平台开发一个服务提供者，你还需要手动使用IAP端点来管理交易。你将需要通过请求IAP端点来授权并获取余额。可以参见https://www.odoo.com/documentation/12.0/webservices/iap.html#json-rpc2-transaction-api获取更多有关端点的知识。
+- 如果想要在其它平台开发一个服务提供者，你还需要手动使用IAP端点来管理交易。你将需要通过请求IAP端点来授权并获取余额。可以参见<https://www.odoo.com/documentation/12.0/webservices/iap.html#json-rpc2-transaction-api>获取更多有关端点的知识。
 
 ## 创建一个IAP客户端模块
 
@@ -480,7 +481,7 @@ return data_found
 ./odoo-bin -c server-config -d service_db --db-filter=^service_db$ --http-port=8070
 ```
 
-这会在8070端口上运行Odoo服务。确保在这个数据库中安装了服务模块并且已添加IAP服务密钥。注意本节假定你的IAP服务运行在http://localhost:8070这一链接上。
+这会在8070端口上运行Odoo服务。确保在这个数据库中安装了服务模块并且已添加IAP服务密钥。注意本节假定你的IAP服务运行在<http://localhost:8070>这一链接上。
 
 ### 如何实现...
 
@@ -728,6 +729,7 @@ TODO
 
 ### 扩展知识...
 
-在模板中没有图片，但如果我想要在模板中使用图片，需要格外小心。原因是在这里不能像平常那样使用图片的绝对路径URL。因为服务模块运行在单独的服务器上，弹窗不会显示图片。要解决这一问题，你需要传递带有域名的完整图片URL，因为这个模板会在客户端屏幕上显示。例如，如果服务域名为http://localhost:8070，那么你需要使用下面这样的图片写法：
+在模板中没有图片，但如果我想要在模板中使用图片，需要格外小心。原因是在这里不能像平常那样使用图片的绝对路径URL。因为服务模块运行在单独的服务器上，弹窗不会显示图片。要解决这一问题，你需要传递带有域名的完整图片URL，因为这个模板会在客户端屏幕上显示。例如，如果服务域名为<http://localhost:8070>，那么你需要使用下面这样的图片写法：
 
 <image src="http://localhost:8070/module_name/static/img/image.png "/>
+:::

@@ -12,6 +12,7 @@ tags: ["odoo", "deployment", "nginx", "docker", "ssl"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下部分
 
 - 安装Odoo来供生产使用
@@ -34,7 +35,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 我们预设你已有准备好了一个开发实例。这部分中我们假设：
 
-- 你实例的这个项目以与[第二章 管理Odoo服务器实例](/blog/managing-odoo-server-instances)中*标准化你的实例目录布局*所建议的方式进行管理。我们将使用https://github.com/你的登录名/project.git。这个仓库应包含该实例在开发时所使用的配置文件，该实例的具体插件以及在该项目上下文你所创建的帮助脚本。
+- 你实例的这个项目以与[第二章 管理Odoo服务器实例](/blog/managing-odoo-server-instances)中*标准化你的实例目录布局*所建议的方式进行管理。我们将使用<https://github.com/>你的登录名/project.git。这个仓库应包含该实例在开发时所使用的配置文件，该实例的具体插件以及在该项目上下文你所创建的帮助脚本。
 
   > ℹ️注意：
   > 如果你项目的配置文件包含安全信息，如密码，则不应将该项目推送到GitHub这样的公共服务上。而应使用内部Git仓库或私有GitHub项目。
@@ -187,7 +188,7 @@ default_statistics_target = 100
 
 在修改了这些设置之后你需要重启PostgreSQL（sudo /etc/init.d/postgresql restart）。
 
-pgtune工具可以帮助你找到更多的合适的配置。在线版本地址为http://pgtune.leopard.in.ua/：
+pgtune工具可以帮助你找到更多的合适的配置。在线版本地址为<http://pgtune.leopard.in.ua/>：
 
 [![PGTune](https://alanhou.org/homepage/wp-content/uploads/2019/05/201905120707327.png)](https://alanhou.org/homepage/wp-content/uploads/2019/05/201905120707327.png)
 
@@ -209,7 +210,7 @@ pgtune工具可以帮助你找到更多的合适的配置。在线版本地址�
 
 - 你可以在一个文件中手动记录本地修订的SHA1版本，在项目仓库中进行记录，并确保你在生产服务器上使用相同的修订版本。
 - 你可以使用自己的GitHub仓库中对这些仓库复制的标签或分支。
-- 你可以使用git submodule来绑定你项目仓库中的这些修订版本（访问https://git-scm.com/book/en/v2/Git-Tools-Submodules来获取这个很顺手的工具的文档）。
+- 你可以使用git submodule来绑定你项目仓库中的这些修订版本（访问<https://git-scm.com/book/en/v2/Git-Tools-Submodules>来获取这个很顺手的工具的文档）。
 
 > ℹ️**为什么不使用Odoo所提供的Linux发行包？**
 >
@@ -228,7 +229,7 @@ pgtune工具可以帮助你找到更多的合适的配置。在线版本地址�
 
 不要忘记创建这个/backups目录。备份文件不应存储在相同的硬盘上，理想情况下，这些文件应镜像到在不同物理空间的服务器上。定期检查这些备份，保留不能还原的备份文件是没有意义的。
 
-推荐的方案是保留最近7天的每日备份，这表示如果问题出现的话你会丢失大约一天的运行数据。PostgreSQL有更高级的方案可允许基于时间点的故障恢复（PITR）。你可以在Packt出版社的PostgreSQL 9 Admin Cookbook一书了解到更多信息。类似地，有很多可用于文件备份Linux的工具，如duplicity（http://duplicity.nongnu.org/），会让管理更容易。
+推荐的方案是保留最近7天的每日备份，这表示如果问题出现的话你会丢失大约一天的运行数据。PostgreSQL有更高级的方案可允许基于时间点的故障恢复（PITR）。你可以在Packt出版社的PostgreSQL 9 Admin Cookbook一书了解到更多信息。类似地，有很多可用于文件备份Linux的工具，如duplicity（<http://duplicity.nongnu.org/>），会让管理更容易。
 
 ## 为生产环境调整配置文件
 
@@ -433,7 +434,7 @@ systemd 使用一些配置文件或脚本来识别在服务启动时必须运行
 
 ## 使用nginx和Let's Encrypt配置反向代理及SSL
 
-在你通过HTTP协议访问Odoo服务时，用户浏览器与Odoo服务之前的所有信息都暴露在网络中，因此使用HTTPS协议来对传输信息进行加密非常之有必要。Odoo无法原生地实现这点，有必要配置反向代理来为Odoo处理加密和解密。这节向您展示使用nginx（http://nginx.net）来进行实现。我们还将向你展示在你的组织没有自己签署 SSL 证书的方式时使用Let's Encrypt（https:// letsencrypt.org）来管理证书和更新证书。
+在你通过HTTP协议访问Odoo服务时，用户浏览器与Odoo服务之前的所有信息都暴露在网络中，因此使用HTTPS协议来对传输信息进行加密非常之有必要。Odoo无法原生地实现这点，有必要配置反向代理来为Odoo处理加密和解密。这节向您展示使用nginx（<http://nginx.net>）来进行实现。我们还将向你展示在你的组织没有自己签署 SSL 证书的方式时使用Let's Encrypt（https:// letsencrypt.org）来管理证书和更新证书。
 
 **相关文章：**
 
@@ -619,7 +620,7 @@ systemd 使用一些配置文件或脚本来识别在服务启动时必须运行
 
 ### 运行原理...
 
-在第1步和第2步中，我们安装了certbot并为odoo.example.com网站生成了SSL证书。certbot程序是一个命令行工具，简化了与letsencrypt.org交互来生成免费SSL证书的操作。完整文档参见https://certbot.eff.org/docs/。本节中，我们使用了子命令certbot certonly，它将向Let's Encrypt请求一个-d 选项所传递域名的签名证书。使用-m选项指定你的email地址。--standalone选项要求certbot设置本地临时网页服务，Let's Encrypt将尝试与其联系来检查你对请求证书的域名的控制权。因此在托管Odoo的服务器上运行该命令、DNS指向该服务器以及没有防火禁用80和443端口的访问都很重要。
+在第1步和第2步中，我们安装了certbot并为odoo.example.com网站生成了SSL证书。certbot程序是一个命令行工具，简化了与letsencrypt.org交互来生成免费SSL证书的操作。完整文档参见<https://certbot.eff.org/docs/>。本节中，我们使用了子命令certbot certonly，它将向Let's Encrypt请求一个-d 选项所传递域名的签名证书。使用-m选项指定你的email地址。--standalone选项要求certbot设置本地临时网页服务，Let's Encrypt将尝试与其联系来检查你对请求证书的域名的控制权。因此在托管Odoo的服务器上运行该命令、DNS指向该服务器以及没有防火禁用80和443端口的访问都很重要。
 
 > ℹ️这一检查通过连接http://<yourdomain>:80/.well-known/acme来实现。certbot的--standalone模式创建一个临时web服务监听该端口并能响应请求，但这仅在没有其它进程监听80端口及外部防火墙允许对该端口的外部访问通过时生效。
 
@@ -700,8 +701,8 @@ systemd 使用一些配置文件或脚本来识别在服务启动时必须运行
 
 ### 其它知识
 
-- 有关nginx配置选项的更多信息，参见http://nginx.org/en/docs/。
-- 有关Apache2作为反向代理配置的教程及个人证书机构的使用，参见http://antiun.github.io/odoo-reverse-proxy-howto/。
+- 有关nginx配置选项的更多信息，参见<http://nginx.org/en/docs/>。
+- 有关Apache2作为反向代理配置的教程及个人证书机构的使用，参见<http://antiun.github.io/odoo-reverse-proxy-howto/>。
 
 ## 使用Docker来运行Odoo
 
@@ -711,7 +712,7 @@ Docker项目通过提供更高级别的工具来让Linux容器（LXC）更易于
 
 ### 准备工作
 
-我们假定在你的开发机器及生产服务器上都安装了Docker。在Debian GNU/Linux上安装Docker社区版的指南参见https://docs.docker.com/install/linux/docker-ce/debian/（其它平台的安装指南在该页面上也可以找到）。而在Ubuntu服务器上你可以使用如下命令来进行安装：
+我们假定在你的开发机器及生产服务器上都安装了Docker。在Debian GNU/Linux上安装Docker社区版的指南参见<https://docs.docker.com/install/linux/docker-ce/debian/（>其它平台的安装指南在该页面上也可以找到）。而在Ubuntu服务器上你可以使用如下命令来进行安装：
 
 ```
 $ sudo apt-get install docker.io -y
@@ -745,7 +746,7 @@ $ sudo apt-get install docker.io -y
    # docker start odoo
    ```
 
-以上命令会在8069端口上启动Odoo服务。在你的本地机器上，你可以通过http://localhost:8069来访问该odoo实例。
+以上命令会在8069端口上启动Odoo服务。在你的本地机器上，你可以通过<http://localhost:8069>来访问该odoo实例。
 
 如果你想要查看运行中的docker容器的状态，运行如下命令即可：
 
@@ -764,7 +765,7 @@ CONTAINER ID        IMAGE               COMMAND                  CREATED        
 
 ### 运行原理...
 
-Docker允许你创建系统镜像并将它们分发到其它服务器上来运行。Docker镜像通过编写Dockerfile来创建，该文件描述如何在已存在的Dockerfile上添加层。Docker镜像托管在https://hub.docker.com上，在这一节中，我们使用了PostgreSQL和Odoo的官方镜像。
+Docker允许你创建系统镜像并将它们分发到其它服务器上来运行。Docker镜像通过编写Dockerfile来创建，该文件描述如何在已存在的Dockerfile上添加层。Docker镜像托管在<https://hub.docker.com>上，在这一节中，我们使用了PostgreSQL和Odoo的官方镜像。
 
 在运行Odoo实例容器之前，我们需要为PostgreSQL设置一个容器。在第1步中，我们运行了PostgreSQL 10的Docker镜像。该命令会搜索这一PostgreSQL Docker镜像。如果在你的系统中不存在，Docker会下载它。在命令中，我们传递了--name db选项。这里，db是该PostgreSQL容器的名称。在第2步中，我们启动了PostgreSQL的Docker容器。
 
@@ -803,7 +804,7 @@ $ docker run -v /path/to/my_addons:/mnt/extra-addons -p 8069:8069 --name odoo --
 
 ### 扩展内容...
 
-如果使用官方Odoo Docker镜像安装的服务无法满足你的要求，那么你可以通过Dockerfile创建你自己的Docker镜像。Odoo官方的Dockerfile地址为https://github.com/odoo/docker。你可以修改该Dockerfile，然后使用docker build 命令构建Docker镜像。
+如果使用官方Odoo Docker镜像安装的服务无法满足你的要求，那么你可以通过Dockerfile创建你自己的Docker镜像。Odoo官方的Dockerfile地址为<https://github.com/odoo/docker>。你可以修改该Dockerfile，然后使用docker build 命令构建Docker镜像。
 
 ## 通过docker-compose运行Odoo
 
@@ -856,7 +857,7 @@ docker-compose需要一个YAML文件来设置服务。在YAML文件中，你需�
 
 Odoo实例不能无数据库运行。因此，我们需要通过depends_on键来指定依赖。接着，我们指定了PostgreSQL的服务。为该服务指定了名称db。注意这是这是我们在web服务的依赖中添加的相同服务。
 
-第二步中，我们使用了docker-compose命令来运行该Odoo实例。docker-compose命令将运行两个容器。你可以通过docker ps命令来查看细节。在运行了该命令之后，可通过https://localhost:8069来访问Odoo。
+第二步中，我们使用了docker-compose命令来运行该Odoo实例。docker-compose命令将运行两个容器。你可以通过docker ps命令来查看细节。在运行了该命令之后，可通过<https://localhost:8069>来访问Odoo。
 
 如果你想要使用自定义插件或你自己的配置，可以像如下这样在docker compose YAML文件中指定数据卷：
 
@@ -968,5 +969,4 @@ CDN服务商，如Cloudflare，使用基于DNS的技术来提供网站内容的�
 > ℹ️**警告**
 >
 > 在通过不同 URL 为相同网站提供服务时需要格外小心，因为如果你提交该CDN域名给搜索引擎索引的话可能更改掉你的sitemap.xml文件。
-
- 
+:::

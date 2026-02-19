@@ -12,6 +12,7 @@ tags: ["odoo", "testing", "automated-tests", "unit-tests", "ci"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下小节：
 
 - Python测试用例
@@ -61,7 +62,7 @@ class LibraryBook(models.Model):
 
 本章的技术要求包含Odoo在线平台。
 
-本章中使用的所有代码可通过GitHub仓库进行下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter18。
+本章中使用的所有代码可通过GitHub仓库进行下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter18>。
 
 观看如下视频查看实时代码操作：
 
@@ -354,7 +355,7 @@ Odoo对JavaScript测试用例使用Headless Chrome。其背后的原因是它在
 
 Odoo中，JavaScript测试用例在/static/tests/目录中进行添加。第1步中，我们为测试用例添加了colorpicker_tests.js文件，我们还导入了表单视图和测试工具的引用。导入了web.FormView的原因在于我们为表单视图创建了一个int_color组件，要测试该组件，我们需要这个表单视图。web.test_utils将为我们提供我们需要创建JavaScript测试用例的测试工具。如果你不知道导入JavaScript的运行机制，请参见[第十五章 CMS网站开发](/blog/cms-website-development)中的*为网站扩展CSS和JavaScript*一节。
 
-Odoo客户端测试用例使用QUnit框架进行创建，它是针对JavaScript单元测试用例的JQuery框架。参见https://qunitjs.com/来学习更多相关知识。beforeEach函数在运行测试用例之前调用，这有助于初始化测试数据。beforeEach函数的引用由QUnit框架自身提供。
+Odoo客户端测试用例使用QUnit框架进行创建，它是针对JavaScript单元测试用例的JQuery框架。参见<https://qunitjs.com/>来学习更多相关知识。beforeEach函数在运行测试用例之前调用，这有助于初始化测试数据。beforeEach函数的引用由QUnit框架自身提供。
 
 我们在beforeEach函数中初始化了一些数据。让我们来看看这些数据在测试用例中如何使用。客户端测试用例在一个隔离的环境（mock）中运行，它不对数据建立连接，因此对于这些测试用例，我们需要创建测试数据。在内部Odoo创建mock服务来模拟远程过程调用（RPC）调用并使用this.data 属性来作为数据库。因此，在beforeEach我们在this.data 属性中初始化了我们的测试数据。this.data 属性中的键被看作数据表，值包含字段的数据表行的信息。fields键用于定义数据表字段，records键用于数据行。在本例中，我们添加了带有两个属性的book表：name(char)和color(integer)。注意在这里，我们可以使用任意Odoo字段，甚至包含关联字段；例如，{string: "M2o FIeld", type: "many2one", relation: 'partner'}。我们还添加了两条带有records键的图书记录。
 
@@ -603,3 +604,4 @@ apt-get install ffmpeg
 要生成测试用例的视频，Odoo使用ffmpeg包。如果没有在服务器上安装该包的话，那么它仅会保存失败测试用例的截图。在安装了该包之后，你将可以看到失败测试用例的mp4文件。注意截图和视频仅对失败了的测试用例才会生成，因此如果你想要进行相关的测试的话，需要编写一个将会失败的测试用例。
 
 > ℹ️为测试用例生成视频会消耗大量的磁盘空间，因此请谨慎使用这一选项，仅在实在需要时使用它。
+:::

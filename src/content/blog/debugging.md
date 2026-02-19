@@ -12,6 +12,7 @@ tags: ["odoo", "debugging", "logging", "pdb", "developer-tools"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下小节：
 
 - 自动加载和--dev 选项
@@ -451,7 +452,7 @@ Odoo社区联盟（OCA）使用GitHub管理着大量的Odoo项目。联盟项目
 
 要通过你的仓库集成OCA维护者质量工具，你需要执行如下步骤：
 
-1. 连接https://travis-ci.org/：
+1. 连接<https://travis-ci.org/>：
    TODO
 
 2. 选择Sign in with GitHub进行登录：
@@ -518,17 +519,17 @@ Odoo社区联盟（OCA）使用GitHub管理着大量的Odoo项目。联盟项目
 
 在仓库中启用Travis CI时，Travis会在GitHub上注册一个钩子。默认，这个钩子会对仓库分支的每一次推送及每个拉取请求触发Travis CI构建。拉取请求基于临时合并构建来确保合并后的分支能通过测试。
 
-这里所提供的Travis CI配置文件非常的高阶，很接近maintainer-quality-tools项目中sample_file子目录中的文件，可参见https://github.com/OCA/maintainer-quality-tools（我们删除了用于管理模块翻译的transifex配置）。以下是关于该文件自定义区的说明：
+这里所提供的Travis CI配置文件非常的高阶，很接近maintainer-quality-tools项目中sample_file子目录中的文件，可参见<https://github.com/OCA/maintainer-quality-tools（>我们删除了用于管理模块翻译的transifex配置）。以下是关于该文件自定义区的说明：
 
 - addons：它与Odoo的插件模块毫无关系。用于要求Travis安装一些用于在测试环境里分发包的Ubuntu包。这节约了我们从源码安装Python包的时间，如 python-lxml，否则会花费大量时间。
 - env：这个版块定义环境变量和构建矩阵。维护者质量工具使用这些环境变量来了解要测试什么以及在独立的测试运行中运行每个env行：
   - VERSION：所测试的Odoo版本。
   - LINT_CHECK：在构建中使用0来取消flake8或Pylint测试，1则为启用。在矩阵中，我们设置第一个构建来执行lint测试，因为这很快速并我们想要快速的反馈来看代码是否符合标准或者linter是否发现了错误。
   - TESTS：对无需运行模块测试的构建使用0，否则使用1.
-  - ODOO_REPO：在TESTS为1时这是用于测试的Odoo的GitHub仓库。在本节中，我们设置对官方https://github.com/odoo/odoo仓库及社区补丁仓库https://github.com/OCA/OCB同时设置了构建。如未设置，仅会使用官方仓库。
+  - ODOO_REPO：在TESTS为1时这是用于测试的Odoo的GitHub仓库。在本节中，我们设置对官方<https://github.com/odoo/odoo>仓库及社区补丁仓库<https://github.com/OCA/OCB>同时设置了构建。如未设置，仅会使用官方仓库。
 - install：这一部分在构建环境中下载 maintainer-quality-tools并调用travis_install_nightly工具，用于在Travis中设置Odoo。
 - script：这一部分从maintainer-quality-tools中调用travis_run_tests。该脚本负责从构建矩阵中检查环境变量并执行相应的动作。
-- after_success：在script部分中的测试成功运行后，会运行travis_after_test_success脚本。在本节的上下文中，该脚本会使用https://coveralls.io查看模块的测试范围并在构建中生成报告。
+- after_success：在script部分中的测试成功运行后，会运行travis_after_test_success脚本。在本节的上下文中，该脚本会使用<https://coveralls.io>查看模块的测试范围并在构建中生成报告。
 
 ### 扩展知识...
 
@@ -658,3 +659,4 @@ TODO
   TODO
 
 - **Leave Developer Tools**：该选项允许我们退出开发者模式。
+:::

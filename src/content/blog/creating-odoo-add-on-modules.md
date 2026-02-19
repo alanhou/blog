@@ -12,6 +12,7 @@ tags: ["odoo", "modules", "addon-development", "scaffolding"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下内容：
 
 - 创建和安装一个新的插件模块
@@ -24,7 +25,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 ## 技术准备
 
-本章中，我们将预设你已安装了Odoo并且按照[第一章 安装Odoo开发环境](/blog/installing-odoo-development-environment)进行的操作。你还应熟悉[第二章 管理Odoo服务器实例](/blog/managing-odoo-server-instances)中所描述的查找和安装附加的插件模块。本章中所使用的代码可以从如下GitHub仓库中进行下载：https://github.com/alanhou/odoo12-cookbook/tree/master/Chapter04/my_library。
+本章中，我们将预设你已安装了Odoo并且按照[第一章 安装Odoo开发环境](/blog/installing-odoo-development-environment)进行的操作。你还应熟悉[第二章 管理Odoo服务器实例](/blog/managing-odoo-server-instances)中所描述的查找和安装附加的插件模块。本章中所使用的代码可以从如下GitHub仓库中进行下载：<https://github.com/alanhou/odoo12-cookbook/tree/master/Chapter04/my_library>。
 
 代码实时操作的视频请见：http://t.cn/E9PzDbm
 
@@ -148,10 +149,10 @@ __manifest__.py文件是模块的声明。它包含一个带有模块元数据�
 
 - name：这是该模块的标题。
 - summary：这是一个单行描述的副标题。
-- description：这是一个以普通文本或重构文本（RST）格式编写的长描述。通常放在三个引号中，Python中使用三个引号来界定多行文本。RST的快速入门指南请见http://docutils.sourceforge.net/docs/user/rst/quickstart.html。
+- description：这是一个以普通文本或重构文本（RST）格式编写的长描述。通常放在三个引号中，Python中使用三个引号来界定多行文本。RST的快速入门指南请见<http://docutils.sourceforge.net/docs/user/rst/quickstart.html>。
 - author：是一个作者姓名的字符串。如果有多个作者的话，一般使用逗号来进行分隔，但注意它仍应是一个字符串，而非Python列表。
 - website：这个 URL 可供人们访问来了解模块或作者的更多信息。
-- category：这用于在网络上组织模块。标准的分类名称列表请见https://github.com/odoo/odoo/blob/12.0/odoo/addons/base/data/ir_module_category_data.xml。但也可以定义这些名称以外的分类名称。
+- category：这用于在网络上组织模块。标准的分类名称列表请见<https://github.com/odoo/odoo/blob/12.0/odoo/addons/base/data/ir_module_category_data.xml>。但也可以定义这些名称以外的分类名称。
 - version：这是该模块的版本号。可由Odoo应用商店用于检测已安装模块的新版本。如果版本号没有以Odoo目标版本号（如12.0）开始，会进行自动添加。但是，如果你显式的声明Odoo目标版本号信息量会充足，比如用12.0.1.0.0或12.0.1.0来替代1.0.0或1.0。
 - depends：这是该模块所直接依赖的模块技术名称列表。如果你的模块不依赖于任何其它插件模块，那么应至少添加一个base模块。别忘记包含这个模块所引用的XML ID、视图或模块的定义模块。那样会确保它们以正确的顺序进行加载，避免难以调试的错误。
 - data：这是在模块安装或升级时需加载数据文件的相对路径列表。这些路径相对于模块的根目录。通常，这些是XML和CSV文件，但也可以使用YAML格式的数据文件。这些内容会在[第七章 模块数据](https://alanhou.org/odoo12-module-data/)中深入讨论。
@@ -241,14 +242,14 @@ __manifest__.py文件是模块的声明。它包含一个带有模块元数据�
 
 插件文件以如下目录进行组织：
 
-- **models/**包含后端代码文件，用于创建模型及其业务逻辑。推荐每个模型一个文件并使用与模型相同的名称，例如 library.book模型的对应文件为library_book.py。这些在[第五章 应用模型](/blog/application-models)中会进行深入讲解。
-- **views/**包含用于用户界面的XML文件，包含动作、表单、列表等等。类似于模型，建议每个模型一个文件。网站模块的文件名通常以_template后缀进行结尾。后端视图在[第十章 后端视图](/blog/backend-views)中讲解，网站视图在[第十五章 CMS网站开发](/blog/cms-website-development)中进行讲解。
-- **data/**包含模块初始数据的其它数据文件。数据文件在[第七章 模块数据](/blog/odoo12-module-data)中进行讲解。
-- **demo/**包含带演示数据的数据文件，对于测试、培训或模块评测都非常有用。
-- Odoo会在**i18n/**中查找.pot及.po翻译文件。更多详情参见[第十二章 国际化](/blog/internationalization)。这些文件无需在声明文件中提及。
-- **security/**包含定义访问控制列表的数据文件，通常是一个ir.model.access.csv文件，也可以是一个XML文件，用于定义权限组及行级权限的记录规则。参见[第十一章 权限安全](/blog/access-security)来获取更多内容。
-- **controllers/**包含网站控制器的代码文件，用于为模块提供各种功能。网页控制器在[第十四章 网页服务端开发](/blog/creating-odoo-add-on-modules)中进行讲解。
-- **static/**用于放置所有的网页资源。和其它目录不同，该目录名不只是一种惯例。这一目录中的文件无需用户登录即可对外提供访问。该目录多包含JavaScript、样式表、图像等文件。它们无需在模块声明文件中进行提及，但需要在网页模板中引用。这会在[第十五章 CMS网站开发](/blog/cms-website-development)中进行讨论。
+- `models/`包含后端代码文件，用于创建模型及其业务逻辑。推荐每个模型一个文件并使用与模型相同的名称，例如 library.book模型的对应文件为library_book.py。这些在[第五章 应用模型](/blog/application-models)中会进行深入讲解。
+- `views/`包含用于用户界面的XML文件，包含动作、表单、列表等等。类似于模型，建议每个模型一个文件。网站模块的文件名通常以_template后缀进行结尾。后端视图在[第十章 后端视图](/blog/backend-views)中讲解，网站视图在[第十五章 CMS网站开发](/blog/cms-website-development)中进行讲解。
+- `data/`包含模块初始数据的其它数据文件。数据文件在[第七章 模块数据](/blog/odoo12-module-data)中进行讲解。
+- `demo/`包含带演示数据的数据文件，对于测试、培训或模块评测都非常有用。
+- Odoo会在`i18n/`中查找.pot及.po翻译文件。更多详情参见[第十二章 国际化](/blog/internationalization)。这些文件无需在声明文件中提及。
+- `security/`包含定义访问控制列表的数据文件，通常是一个ir.model.access.csv文件，也可以是一个XML文件，用于定义权限组及行级权限的记录规则。参见[第十一章 权限安全](/blog/access-security)来获取更多内容。
+- `controllers/`包含网站控制器的代码文件，用于为模块提供各种功能。网页控制器在[第十四章 网页服务端开发](/blog/creating-odoo-add-on-modules)中进行讲解。
+- `static/`用于放置所有的网页资源。和其它目录不同，该目录名不只是一种惯例。这一目录中的文件无需用户登录即可对外提供访问。该目录多包含JavaScript、样式表、图像等文件。它们无需在模块声明文件中进行提及，但需要在网页模板中引用。这会在[第十五章 CMS网站开发](/blog/cms-website-development)中进行讨论。
 
 > **小贴士：**在向模块添加新文件时，不要忘记在__manifest__.py（数据文件）或__init__.py（代码文件）文件中进行声明，否则会忽略这些文件而不进行加载。
 
@@ -636,3 +637,4 @@ $ ~/odoo-dev/odoo/odoo-bin scaffold my_module ~/odoo-dev/local-addons
 ```
 $ ~/odoo-dev/odoo/odoo-bin scaffold -t path/to/template my_module
 ```
+:::

@@ -12,6 +12,7 @@ tags: ["odoo", "views", "backend", "form", "kanban", "tree"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下小节：
 
 - 添加菜单项和窗口动作
@@ -44,7 +45,7 @@ image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&c
 
 本章的技术要求包含一个在线Odoo平台。
 
-本章中所使用的所有代码都在可GitHub仓库中下载：https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter10。
+本章中所使用的所有代码都在可GitHub仓库中下载：<https://github.com/PacktPublishing/Odoo-12-Development-Cookbook-Third-Edition/tree/master/Chapter10>。
 
 观看如下视频来查看实时代码操作：https://youtu.be/usr6cshIoy4
 
@@ -719,7 +720,7 @@ filter元素创建一个按钮，将过滤器的domain属性添加到搜索域�
 
 更多有关操作上下文的内容，参见*向表单和动作传递参数 - 上下文*一节。
 
-说重度使用变音语言的用户可能在填写e时想要让Odoo搜索的是e, è, é和ê。PostgreSQL服务中有一项配置称为去重音（unaccent），Odoo 进行了特别的支持，但这在本书讨论的范畴之外。参见https://www.postgresql.org/docs/10/unaccent.html来了解理多有关去生重音的知识。
+说重度使用变音语言的用户可能在填写e时想要让Odoo搜索的是e, è, é和ê。PostgreSQL服务中有一项配置称为去重音（unaccent），Odoo 进行了特别的支持，但这在本书讨论的范畴之外。参见<https://www.postgresql.org/docs/10/unaccent.html>来了解理多有关去生重音的知识。
 
 ## 修改已有视图 - 视图继承
 
@@ -910,7 +911,7 @@ attribute节点，可包含添加和删除属性，其中又包含加入空格�
 
 sheet元素以样式样式化单据的形式渲染，并且最重要的字段应放在用户第一眼看到的地方。使用oe_title和oe_left类来让它们在显著的位置进行渲染（在写本书时样式为以稍微调整的字体大小居左显示）。
 
-如果有涉及用户当前所见记录的其它感兴趣的字段（比如partner表单上的用户发票），把它们放在一个带有oe_right和oe_button_box类的元素中，这会将按钮向右对齐。按钮自身可使用oe_stat_button类来强制按钮的统一样式渲染。也可以通过对icon属性设置font awesome 图标来自定义指定图标类。有关font awesome 的更多内容参见https://fontawesome.com/v4.7.0/icons/。
+如果有涉及用户当前所见记录的其它感兴趣的字段（比如partner表单上的用户发票），把它们放在一个带有oe_right和oe_button_box类的元素中，这会将按钮向右对齐。按钮自身可使用oe_stat_button类来强制按钮的统一样式渲染。也可以通过对icon属性设置font awesome 图标来自定义指定图标类。有关font awesome 的更多内容参见<https://fontawesome.com/v4.7.0/icons/>。
 
 我们可以使用oe_chatter类和Chatter组件来在表单视图的底部获取默认的留言区。这时需要使用mail.thread mixin。我们将在[第二十三章 在Odoo中管理email](/blog/manage-emails-odoo)中进行详细学习。
 
@@ -1415,3 +1416,4 @@ Odoo 12中引入了一种新的视图，名为仪表盘。它用于在同屏中�
 ### 扩展知识....
 
 另一个有用的元素是<widget>标签。通过它可以用户界面中显示你所选的数据。在[第十六章 网页客户端开发](/blog/web-client-development)中，我们将学习如何创建自定义组件。
+:::

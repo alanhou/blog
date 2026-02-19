@@ -12,6 +12,7 @@ tags: ["odoo", "development", "installation", "environment-setup"]
 image: "https://images.unsplash.com/photo-1555066931-4365d14bab8c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080"
 ---
 
+:::zh
 本章中，我们将讲解如下主题：
 
 - Odoo生态系统
@@ -38,7 +39,7 @@ Odoo有两个版本。第一个是社区版，完全开源，第二是企业版�
 
 [![img](http://alanhou.org/homepage/wp-content/uploads/2019/05/2019050403383533.png)](http://alanhou.org/homepage/wp-content/uploads/2019/05/2019050403383533.png)
 
-你可以通过https://www.odoo.com/page/editions查看这两个版本的完整对比。
+你可以通过<https://www.odoo.com/page/editions>查看这两个版本的完整对比。
 
 > ℹ️Odoo有数量庞大的社区开发人员，这也是你在应用商店中看到有大量的第三方应用（模块）的原因。大部分免费应用使用Affero General Public License version 3 (AGPLv3)许可证书。如果你的应用依赖于这些应用就不能使用其自有证书。Odoo自有证书的应用仅能在拥有LGPL或其它自有证书的模块基础上进行开发。
 
@@ -74,19 +75,19 @@ Runbot是Odoo的自动化测试环境。这会从Odoo的Git仓库拉取最新分
 
 Odoo几年前发布了应用商店，当时就获得了成功。现在，那里托管着15,000多个不同的应用。在应用商店中，你可以找到大量的针对不同版本的免费和付费应用。这包含不同垂直业务领域的具体解决方案，如教育、食品行业和医药业。它还包含一些继承了已有Odoo应用或添加了新功能的应用。应用商店还为Odoo网站构建器提供了大量的美观的主题。在[第四章 创建Odoo插件模块](/blog/creating-odoo-add-on-modules)中，我们将学习如何为你的自定义模块设置价格和币种。
 
-可以通过如下链接访问Odoo应用商店：https://www.odoo.com/apps。
+可以通过如下链接访问Odoo应用商店：<https://www.odoo.com/apps>。
 
 ### Odoo社区联盟（OCA）
 
 Odoo社区联盟（OCA）是一个开发/管理Odoo社区模块的非营利组织。所有的OCA模块都开源并由Odoo社区成员维护。在OCA的GitHub中，你会发现针对不同Odoo应用的多个仓库。除Odoo模块外，它还包含很多工具、迁移库、会计本地化等等。
 
-以下是OCA官方GitHub账户的URL：https://github.com/OCA。
+以下是OCA官方GitHub账户的URL：<https://github.com/OCA>。
 
 ### 官方Odoo帮助论坛
 
 Odoo 有一个非常强大的框架，大量的操作只需通过使用/激活选项或遵循指定的模式即可实现。因此，如果你碰到了一些技术问题或是对一些复杂用例不确定，那么你就可以在Odoo官方帮助论坛上询问。这个论坛上有大量活跃的开发人员，包含一些Odoo官方的员工。
 
-在如下 URL 上可以搜索或提交你的问题：https://help.odoo.com/。
+在如下 URL 上可以搜索或提交你的问题：<https://help.odoo.com/>。
 
 ## 通过源码轻松安装Odoo
 
@@ -104,7 +105,7 @@ Odoo 有一个非常强大的框架，大量的操作只需通过使用/激活�
 
 **译者注：**Debian 的安装及 SAMBA配置请参见[Odoo 12开发者指南补充知识](https://alanhou.org/odoo-12-supplement/#installation)
 
-如果你有GitHub账户的话有些操作一定会更容易。如果还没有GitHub账户，请访问https://github.com并创建账户（国内用户也可使用http://gitee.com/）。
+如果你有GitHub账户的话有些操作一定会更容易。如果还没有GitHub账户，请访问<https://github.com>并创建账户（国内用户也可使用<http://gitee.com/>）。
 
 ### 如何安装...
 
@@ -195,7 +196,7 @@ Odoo 有一个非常强大的框架，大量的操作只需通过使用/激活�
 
    **译者注：**初次启动可能会需要添加-i base参数来初始化数据库
 
-10. 在浏览器中访问http://localhost:8069（虚拟机请修改为对应的 IP 地址），并使用admin账户和密码admin来进行登录
+10. 在浏览器中访问<http://localhost:8069（>虚拟机请修改为对应的 IP 地址），并使用admin账户和密码admin来进行登录
 
 [![Odoo 12登录页面](https://alanhou.org/homepage/wp-content/uploads/2019/05/2019050414223842.jpg)](https://alanhou.org/homepage/wp-content/uploads/2019/05/2019050414223842.jpg)
 
@@ -377,7 +378,7 @@ Odoo数据库管理界面提供创建、复制、删除、备份和恢复数据�
 需要执行如下步骤来访问数据库：
 
 1. 进入实例的登录页面（如果已登录请先登出）。
-2. 点击Manage Databases链接。这会导航至http://localhost:8069/web/database/manager（你也可以在浏览器中直接访问这个URL）。
+2. 点击Manage Databases链接。这会导航至<http://localhost:8069/web/database/manager（>你也可以在浏览器中直接访问这个URL）。
 
 #### 设置或修改master密码
 
@@ -598,7 +599,7 @@ $ ./odoo-bin -c myodoo.cfg
 4.  点击Activate the developer mode链接
 5. 等待用户界面重载
 
-> ℹ️**其它方式：**也可以通过编辑 URL 来激活开发者模式。在链接的#号前，插入?debug。例如，如果你的链接是http://localhost:8069/web#menu_id=102&action=94，那么你需要将其修改为http://localhost:8069/web?debug#menu_id=102&action=94。此外，如果你想要使用带静态文件的调试模式，则将 URL修改为http://localhost:8069/web?debug=assets#menu_id=102&action=94
+> ℹ️**其它方式：**也可以通过编辑 URL 来激活开发者模式。在链接的#号前，插入?debug。例如，如果你的链接是<http://localhost:8069/web#menu_id=102&action=94>，那么你需要将其修改为<http://localhost:8069/web?debug#menu_id=102&action=94>。此外，如果你想要使用带静态文件的调试模式，则将 URL修改为http://localhost:8069/web?debug=assets#menu_id=102&action=94
 
 **译者注：**加(with assets)的模式会将静态文件（css, js）分拆每一个具体文件，这将有助于调试，但相对于合并的静态文件而言会损失一些加载速度
 
@@ -692,5 +693,4 @@ $ ./odoo-bin -c myodoo.cfg --stop-after-init -u base
 - 它更新存储在模块数据文件中的数据库记录，尤其是视图。然后递归更新声明依赖这一模块的已安装模块。
 
 因为base模块是所有Odoo模块的隐式依赖，更新它会触发你的实例中所有已安装模块的更新。要更新所有已安装模块，可使用别名 all 来替代 base。
-
- 
+:::
