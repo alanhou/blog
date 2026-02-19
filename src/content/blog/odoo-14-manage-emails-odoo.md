@@ -1,6 +1,6 @@
 ---
 series: "odoo14-cookbook"
-seriesOrder: 21
+seriesOrder: 23
 title:
   en: "Chapter 23: Managing Emails in Odoo"
   zh: "第23章 在Odoo中管理Email"

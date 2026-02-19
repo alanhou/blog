@@ -55,6 +55,9 @@ export default defineConfig({
     '/odoo-14-remote-procedure-calls-odoo': '/blog/odoo-14-remote-procedure-calls-odoo',
     '/odoo-14-performance-optimization': '/blog/odoo-14-performance-optimization',
     '/odoo-14-manage-emails-odoo': '/blog/odoo-14-manage-emails-odoo',
+    '/odoo-14-managing-deploying-testing-odoo-sh': '/blog/odoo-14-managing-deploying-testing-odoo-sh',
+    '/odoo-14-point-sale': '/blog/odoo-14-point-sale',
+    '/odoo-14-iot-box': '/blog/odoo-14-iot-box',
   },
   markdown: {
     remarkPlugins: [remarkMath, remarkDirective, remarkBilingualDirective],
