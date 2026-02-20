@@ -11,6 +11,10 @@ export const seriesNames: Record<string, { en: string; zh: string }> = {
     en: 'Nobel Prize in Economics (1969–2025)',
     zh: '诺贝尔经济学奖（1969–2025）'
   },
+  'odoo12-essentials': {
+    en: 'Odoo 12 Development Essentials',
+    zh: 'Odoo 12开发手册'
+  },
   'odoo12-cookbook': {
     en: 'Odoo 12 Development Cookbook',
     zh: 'Odoo 12开发者指南（Cookbook）第三版'
