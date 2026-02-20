@@ -34,5 +34,9 @@ export const seriesNames: Record<string, { en: string; zh: string }> = {
   'freecodecamp': {
     en: 'freeCodeCamp',
     zh: 'freeCodeCamp'
+  },
+  'python-scripting': {
+    en: 'Mastering Python Scripting for System Administrators',
+    zh: 'Python脚本实战'
   }
 };
