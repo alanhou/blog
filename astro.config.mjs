@@ -93,6 +93,6 @@ export default defineConfig({
   },
   markdown: {
     remarkPlugins: [remarkMath, remarkDirective, remarkBilingualDirective],
-    rehypePlugins: [rehypeKatex],
+    rehypePlugins: [[rehypeKatex, { strict: false }]],
   },
 });
