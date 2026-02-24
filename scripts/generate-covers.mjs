@@ -32,18 +32,20 @@ function parseFrontmatter(content) {
   const match = content.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return null;
   const fm = match[1];
-  const titleMatch = fm.match(/title:\s*\n\s+en:\s*"(.+?)"/);
+  const titleEnMatch = fm.match(/title:\s*\n\s+en:\s*"(.+?)"/);
+  const titleZhMatch = fm.match(/zh:\s*"(.+?)"/);
   const tagsMatch = fm.match(/tags:\s*\[([^\]]+)\]/);
   const imageMatch = fm.match(/image:\s*"?(.+?)"?\s*$/m);
   return {
-    titleEn: titleMatch?.[1] || '',
+    titleEn: titleEnMatch?.[1] || '',
+    titleZh: titleZhMatch?.[1] || '',
     tags: tagsMatch ? tagsMatch[1].split(',').map(t => t.trim().replace(/"/g, '')) : [],
     image: imageMatch?.[1] || '',
     raw: match[0],
   };
 }
 
-async function generateCover(title, tags, slug, fontData) {
+async function generateCover(titleEn, titleZh, tags, slug, fonts) {
   const palette = pickPalette(tags);
   const displayTags = tags.filter(t => t !== 'arxiv').slice(0, 3);
 
@@ -58,7 +60,7 @@ async function generateCover(title, tags, slug, fontData) {
           flexDirection: 'column',
           justifyContent: 'space-between',
           padding: '60px',
-          fontFamily: 'Inter',
+          fontFamily: 'Inter, Noto Sans SC',
           color: 'white',
           backgroundImage: `linear-gradient(135deg, ${palette.from}, ${palette.to})`,
         },
@@ -66,20 +68,27 @@ async function generateCover(title, tags, slug, fontData) {
           {
             type: 'div',
             props: {
-              style: { display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '800px' },
+              style: { display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '1000px' },
               children: [
                 {
                   type: 'div',
                   props: {
-                    style: { fontSize: '20px', opacity: 0.8, letterSpacing: '2px' },
+                    style: { fontSize: '18px', opacity: 0.8, letterSpacing: '2px' },
                     children: 'ARXIV PAPER',
                   },
                 },
                 {
                   type: 'div',
                   props: {
-                    style: { fontSize: '48px', fontWeight: 700, lineHeight: 1.2 },
-                    children: title,
+                    style: { fontSize: '40px', fontWeight: 700, lineHeight: 1.2 },
+                    children: titleEn,
+                  },
+                },
+                {
+                  type: 'div',
+                  props: {
+                    style: { fontSize: '28px', fontWeight: 700, lineHeight: 1.3, opacity: 0.85 },
+                    children: titleZh,
                   },
                 },
               ],
@@ -121,7 +130,7 @@ async function generateCover(title, tags, slug, fontData) {
         ],
       },
     },
-    { width: 1200, height: 630, fonts: [{ name: 'Inter', data: fontData, weight: 700, style: 'normal' }] }
+    { width: 1200, height: 630, fonts }
   );
 
   const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: 1200 } });
@@ -129,7 +138,10 @@ async function generateCover(title, tags, slug, fontData) {
 }
 
 async function main() {
-  const fontData = readFileSync(new URL('./fonts/Inter-Bold.ttf', import.meta.url));
+  const fonts = [
+    { name: 'Inter', data: readFileSync(new URL('./fonts/Inter-Bold.ttf', import.meta.url)), weight: 700, style: 'normal' },
+    { name: 'Noto Sans SC', data: readFileSync(new URL('./fonts/NotoSansSC-Bold.ttf', import.meta.url)), weight: 700, style: 'normal' },
+  ];
 
   if (!existsSync(VISUALS_DIR)) mkdirSync(VISUALS_DIR, { recursive: true });
 
@@ -146,27 +158,29 @@ async function main() {
 
     const slug = basename(file, '.mdx');
     const outPath = join(VISUALS_DIR, `${slug}.png`);
+    const localImage = `/arxiv-visuals/${slug}.png`;
 
-    // Skip if not using arxiv placeholder
-    if (fm.image !== ARXIV_PLACEHOLDER) { skipped++; continue; }
+    // Skip if image is not the arxiv placeholder and not our generated cover
+    if (fm.image !== ARXIV_PLACEHOLDER && fm.image !== localImage) { skipped++; continue; }
 
-    // Skip if cover already generated
-    if (existsSync(outPath)) { skipped++; continue; }
+    // Skip if cover already generated (use --force to regenerate)
+    if (existsSync(outPath) && !process.argv.includes('--force')) { skipped++; continue; }
 
     // Skip if Manim hero exists
     const manimHero = join(VISUALS_DIR, slug, 'HeroScene.png');
     if (existsSync(manimHero)) { skipped++; continue; }
 
-    const png = await generateCover(fm.titleEn, fm.tags, slug, fontData);
+    const png = await generateCover(fm.titleEn, fm.titleZh, fm.tags, slug, fonts);
     writeFileSync(outPath, png);
 
-    // Patch frontmatter
-    const newImage = `/arxiv-visuals/${slug}.png`;
-    const patched = content.replace(
-      /image:\s*"?https:\/\/arxiv\.org\/static\/browse\/0\.3\.4\/images\/arxiv-logo-fb\.png"?/,
-      `image: "${newImage}"`
-    );
-    writeFileSync(file, patched);
+    // Patch frontmatter if still using placeholder
+    if (fm.image === ARXIV_PLACEHOLDER) {
+      const patched = content.replace(
+        /image:\s*"?https:\/\/arxiv\.org\/static\/browse\/0\.3\.4\/images\/arxiv-logo-fb\.png"?/,
+        `image: "${localImage}"`
+      );
+      writeFileSync(file, patched);
+    }
 
     generated++;
     if (generated % 20 === 0) console.log(`  Generated ${generated} covers...`);
