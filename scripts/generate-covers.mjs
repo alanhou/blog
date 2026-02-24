@@ -1,6 +1,5 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join, basename } from 'path';
-import { glob } from 'fs/promises';
 import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
 
@@ -134,8 +133,9 @@ async function main() {
 
   if (!existsSync(VISUALS_DIR)) mkdirSync(VISUALS_DIR, { recursive: true });
 
-  const files = [];
-  for await (const f of glob(join(BLOG_DIR, 'arxiv-*.mdx'))) files.push(f);
+  const files = readdirSync(BLOG_DIR)
+    .filter(f => f.startsWith('arxiv-') && f.endsWith('.mdx'))
+    .map(f => join(BLOG_DIR, f));
 
   let generated = 0, skipped = 0;
 
