@@ -5,12 +5,21 @@ import glob
 import os
 import re
 import sys
+import traceback
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 from openai import OpenAI
+
+from manim_prompts import (
+    CONCEPT_GIF_SYSTEM,
+    CONCEPT_GIF_USER,
+    HERO_IMAGE_SYSTEM,
+    HERO_IMAGE_USER,
+)
+from render_manim import VISUALS_DIR, render_scene, validate_scene_code
 
 BLOG_DIR = Path(__file__).resolve().parent.parent / "src" / "content" / "blog"
 LAST_FETCH_FILE = Path(__file__).resolve().parent / ".last_fetch"
@@ -258,6 +267,101 @@ def sanitize_mdx(content):
     return "\n".join(result)
 
 
+def extract_code_block(text: str) -> str:
+    """Extract Python code from LLM response, stripping markdown fences."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines[-1].strip() == "```":
+            lines = lines[1:-1]
+        else:
+            lines = lines[1:]
+        text = "\n".join(lines)
+    return text.strip()
+
+
+def generate_manim_code(client, model, paper, scene_type: str) -> str | None:
+    """Generate Manim scene code via LLM with 1 retry on validation failure."""
+    if scene_type == "hero":
+        system_prompt = HERO_IMAGE_SYSTEM
+        user_template = HERO_IMAGE_USER
+        class_name = "HeroScene"
+    else:
+        system_prompt = CONCEPT_GIF_SYSTEM
+        user_template = CONCEPT_GIF_USER
+        class_name = "ConceptScene"
+
+    user_prompt = user_template.format(
+        title=paper["title"], summary=paper["summary"][:800],
+    )
+
+    for attempt in range(2):
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
+        content = resp.choices[0].message.content if resp.choices else None
+        if not content:
+            return None
+
+        code = extract_code_block(content)
+        if validate_scene_code(code):
+            # Verify the expected class name exists
+            if f"class {class_name}" in code:
+                return code
+        if attempt == 0:
+            print(f"    Retry {scene_type} code generation (validation failed)")
+
+    return None
+
+
+def generate_paper_visuals(client, model, paper, slug: str) -> dict:
+    """Orchestrate hero PNG + concept GIF generation. Returns dict of paths."""
+    output_dir = VISUALS_DIR / slug
+    results = {}
+
+    # Hero image (static PNG)
+    print(f"  Generating hero image...")
+    hero_code = generate_manim_code(client, model, paper, "hero")
+    if hero_code:
+        path = render_scene(hero_code, "HeroScene", output_dir, "png")
+        if path:
+            results["hero"] = f"/arxiv-visuals/{slug}/HeroScene.png"
+
+    # Concept animation (GIF)
+    print(f"  Generating concept animation...")
+    gif_code = generate_manim_code(client, model, paper, "concept")
+    if gif_code:
+        path = render_scene(gif_code, "ConceptScene", output_dir, "gif")
+        if path:
+            results["concept"] = f"/arxiv-visuals/{slug}/ConceptScene.gif"
+
+    return results
+
+
+def patch_frontmatter_image(mdx: str, image_url: str) -> str:
+    """Replace the frontmatter image: field with a local path."""
+    return re.sub(
+        r'^(image:\s*)"[^"]*"',
+        f'\\1"{image_url}"',
+        mdx,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+
+def insert_after_frontmatter(mdx: str, content: str) -> str:
+    """Insert content after the closing --- of frontmatter."""
+    parts = mdx.split("---", 2)
+    if len(parts) >= 3:
+        return parts[0] + "---" + parts[1] + "---\n\n" + content + parts[2]
+    return mdx
+
+
 def main():
     client, model = get_llm_client()
     last_fetch = load_last_fetch()
@@ -316,6 +420,22 @@ def main():
             content = "\n".join(lines)
 
         content = sanitize_mdx(content)
+
+        # Generate visuals (never blocks text post)
+        try:
+            print(f"  Generating visuals for: {paper['title']}...")
+            visuals = generate_paper_visuals(client, model, paper, slug)
+            if visuals.get("hero"):
+                content = patch_frontmatter_image(content, visuals["hero"])
+                hero_md = f"![Hero diagram]({visuals['hero']})\n\n"
+                content = insert_after_frontmatter(content, hero_md)
+            if visuals.get("concept"):
+                concept_md = f"![Concept animation]({visuals['concept']})\n\n"
+                content = insert_after_frontmatter(content, concept_md)
+        except Exception:
+            print(f"  Visual generation failed, continuing with text-only post:")
+            traceback.print_exc()
+
         filepath.write_text(content + "\n")
         print(f"Wrote {filepath}")
 
