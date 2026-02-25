@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 VISUALS_DIR = Path(__file__).resolve().parent.parent / "public" / "arxiv-visuals"
+FONTS_DIR = Path(__file__).resolve().parent / "fonts"
 RENDER_TIMEOUT = 120
 
 DANGEROUS_NAMES = frozenset({
@@ -71,6 +72,21 @@ def render_scene(scene_code: str, scene_class_name: str, output_dir: Path,
         scene_file = Path(tmpdir) / "scene.py"
         scene_file.write_text(scene_code)
 
+        # Make CJK fonts available to Pango/fontconfig
+        env = None
+        noto_font = FONTS_DIR / "NotoSansSC-Bold.ttf"
+        if noto_font.exists():
+            fc_conf = Path(tmpdir) / "fonts.conf"
+            fc_conf.write_text(
+                '<?xml version="1.0"?>\n'
+                '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+                "<fontconfig>\n"
+                "  <include ignore_missing=\"yes\">/etc/fonts/fonts.conf</include>\n"
+                f"  <dir>{FONTS_DIR}</dir>\n"
+                "</fontconfig>\n"
+            )
+            env = {**__import__("os").environ, "FONTCONFIG_FILE": str(fc_conf)}
+
         cmd = [
             "manim", "render", quality_flag, fmt_flag,
             str(scene_file), scene_class_name,
@@ -79,7 +95,7 @@ def render_scene(scene_code: str, scene_class_name: str, output_dir: Path,
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=RENDER_TIMEOUT,
-                cwd=tmpdir,
+                cwd=tmpdir, env=env,
             )
         except subprocess.TimeoutExpired:
             print(f"  Manim render timed out for {scene_class_name}")

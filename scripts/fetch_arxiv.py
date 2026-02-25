@@ -280,7 +280,13 @@ def extract_code_block(text: str) -> str:
     return text.strip()
 
 
-def generate_manim_code(client, model, paper, scene_type: str) -> str | None:
+def extract_title_zh(mdx_content: str) -> str:
+    """Extract Chinese title from generated MDX frontmatter."""
+    m = re.search(r'^\s*zh:\s*"(.+?)"', mdx_content, re.MULTILINE)
+    return m.group(1) if m else ""
+
+
+def generate_manim_code(client, model, paper, scene_type: str, title_zh: str = "") -> str | None:
     """Generate Manim scene code via LLM with 1 retry on validation failure."""
     if scene_type == "hero":
         system_prompt = HERO_IMAGE_SYSTEM
@@ -292,7 +298,7 @@ def generate_manim_code(client, model, paper, scene_type: str) -> str | None:
         class_name = "ConceptScene"
 
     user_prompt = user_template.format(
-        title=paper["title"], summary=paper["summary"][:800],
+        title=paper["title"], title_zh=title_zh, summary=paper["summary"][:800],
     )
 
     for attempt in range(2):
@@ -319,14 +325,14 @@ def generate_manim_code(client, model, paper, scene_type: str) -> str | None:
     return None
 
 
-def generate_paper_visuals(client, model, paper, slug: str) -> dict:
+def generate_paper_visuals(client, model, paper, slug: str, title_zh: str = "") -> dict:
     """Orchestrate hero PNG + concept GIF generation. Returns dict of paths."""
     output_dir = VISUALS_DIR / slug
     results = {}
 
     # Hero image (static PNG)
     print(f"  Generating hero image...")
-    hero_code = generate_manim_code(client, model, paper, "hero")
+    hero_code = generate_manim_code(client, model, paper, "hero", title_zh=title_zh)
     if hero_code:
         path = render_scene(hero_code, "HeroScene", output_dir, "png")
         if path:
@@ -334,7 +340,7 @@ def generate_paper_visuals(client, model, paper, slug: str) -> dict:
 
     # Concept animation (GIF)
     print(f"  Generating concept animation...")
-    gif_code = generate_manim_code(client, model, paper, "concept")
+    gif_code = generate_manim_code(client, model, paper, "concept", title_zh=title_zh)
     if gif_code:
         path = render_scene(gif_code, "ConceptScene", output_dir, "gif")
         if path:
@@ -424,7 +430,8 @@ def main():
         # Generate visuals (never blocks text post)
         try:
             print(f"  Generating visuals for: {paper['title']}...")
-            visuals = generate_paper_visuals(client, model, paper, slug)
+            title_zh = extract_title_zh(content)
+            visuals = generate_paper_visuals(client, model, paper, slug, title_zh=title_zh)
             if visuals.get("hero"):
                 content = patch_frontmatter_image(content, visuals["hero"])
                 hero_md = f"![Hero diagram]({visuals['hero']})\n\n"
