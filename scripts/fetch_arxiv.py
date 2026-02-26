@@ -249,9 +249,18 @@ IMPORTANT:
 def sanitize_mdx(content):
     """Fix common LLM-generated MDX issues.
 
+    - Collapse multi-line $$...$$ math blocks onto single lines
+      (prevents \\nabla etc. from being split as \\n + abla)
     - Escape bare < followed by digits (MDX parses as JSX)
     - Repair mismatched bold markers (**text* → **text**)
     """
+    # Collapse multi-line $$ blocks onto single lines
+    def _collapse_math(m):
+        inner = m.group(1)
+        return "$$" + " ".join(inner.split()) + "$$"
+
+    content = re.sub(r"\$\$([\s\S]*?)\$\$", _collapse_math, content)
+
     lines = content.split("\n")
     result = []
     in_code_block = False
