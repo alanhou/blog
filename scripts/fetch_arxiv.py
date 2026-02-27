@@ -246,14 +246,56 @@ IMPORTANT:
     return content.strip()
 
 
+def _yaml_double_quote(value: str) -> str:
+    """Safely double-quote a YAML string value, escaping \\ and \"."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _fix_frontmatter_quotes(frontmatter: str) -> str:
+    """Re-quote title/description en/zh values in frontmatter safely.
+
+    Handles values that contain quotes, colons, or other YAML-special chars
+    by extracting the raw value and re-wrapping with proper escaping.
+    """
+    def _requote(m):
+        prefix = m.group(1)  # e.g. "  en: " or "  zh: "
+        raw = m.group(2)
+        # Strip surrounding quotes (ASCII or smart quotes) if present
+        if len(raw) >= 2:
+            first, last = raw[0], raw[-1]
+            if (first == '"' and last == '"') or \
+               (first == '\u201c' and last == '\u201d') or \
+               (first == "'" and last == "'"):
+                raw = raw[1:-1]
+        return prefix + _yaml_double_quote(raw)
+
+    # Match indented en:/zh: lines under title: or description:
+    return re.sub(
+        r'^(  (?:en|zh):\s+)(.+)$',
+        _requote,
+        frontmatter,
+        flags=re.MULTILINE,
+    )
+
+
 def sanitize_mdx(content):
     """Fix common LLM-generated MDX issues.
 
+    - Fix YAML frontmatter quoting for special characters
     - Collapse multi-line $$...$$ math blocks onto single lines
       (prevents \\nabla etc. from being split as \\n + abla)
     - Escape bare < followed by digits (MDX parses as JSX)
     - Repair mismatched bold markers (**text* → **text**)
     """
+    # Fix frontmatter quoting before anything else
+    fm_match = re.match(r'^---\n(.*?\n)---', content, re.DOTALL)
+    if fm_match:
+        original_fm = fm_match.group(1)
+        fixed_fm = _fix_frontmatter_quotes(original_fm)
+        if fixed_fm != original_fm:
+            content = "---\n" + fixed_fm + "---" + content[fm_match.end():]
+
     # Collapse multi-line $$ blocks onto single lines
     def _collapse_math(m):
         inner = m.group(1)
@@ -291,8 +333,11 @@ def extract_code_block(text: str) -> str:
 
 def extract_title_zh(mdx_content: str) -> str:
     """Extract Chinese title from generated MDX frontmatter."""
-    m = re.search(r'^\s*zh:\s*"(.+?)"', mdx_content, re.MULTILINE)
-    return m.group(1) if m else ""
+    m = re.search(r'^\s*zh:\s*"(.+)"', mdx_content, re.MULTILINE)
+    if not m:
+        return ""
+    # Unescape YAML double-quote escapes
+    return m.group(1).replace('\\"', '"').replace('\\\\', '\\')
 
 
 def generate_manim_code(client, model, paper, scene_type: str, title_zh: str = "") -> str | None:
