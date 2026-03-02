@@ -193,19 +193,32 @@ image: "{ARXIV_IMAGE}"
 **Authors**: {authors_str}
 **Categories**: {cats_str}
 
-## Abstract
+## The Gap
 
-[English abstract summary]
+[What is the current frontier in this area? What specific gap, limitation, or unsolved problem does this paper address? Be precise — name the prior state-of-the-art and its shortcomings.]
 
-## Key Contributions
+## The Increment
 
-- [bullet points]
+[One bold "before → after" sentence capturing the shift this paper enables.]
 
-[2-4 more sections analyzing the paper in depth - methodology, results, implications, etc.]
+[Then explain the core mechanism in 2-3 paragraphs. Include a **structural metaphor** — an analogy where parts of the method map to parts of something familiar. The metaphor should make the architecture graspable, not just decorative.]
+
+## Key Concepts
+
+[Pick 1-3 concepts that are essential to understanding this paper. Explain each Feynman-style: start from zero, build up intuition, use a concrete example. Don't assume the reader knows jargon — unpack it.]
+
+## Expert Assessment
+
+[A frank evaluation covering:]
+- **Problem significance**: Is this problem worth solving? How large is the affected community?
+- **Method maturity**: Is this a proof-of-concept or deployment-ready? What are the limitations the authors acknowledge (or should have)?
+- **Experimental rigor**: Are the baselines fair? Are the datasets representative? Any red flags?
+
+**Verdict**: [strong accept / weak accept / borderline / weak reject / strong reject] — [one-sentence justification]
 
 ## Takeaways
 
-[numbered list of key takeaways]
+[Transferable insights — what ideas, techniques, or framings from this paper can be borrowed and applied in other domains? Focus on what a practitioner can steal, not just what the paper concluded.]
 :::
 
 :::zh
@@ -213,25 +226,40 @@ image: "{ARXIV_IMAGE}"
 **作者**: {authors_str}
 **分类**: {cats_str}
 
-## 摘要
+## 缺口
 
-[Chinese abstract summary]
+[当前该领域的前沿在哪里？这篇论文填补了什么具体的空白、局限或未解决的问题？要精准——指出此前最优方法及其不足。]
 
-## 主要贡献
+## 增量
 
-- [bullet points in Chinese]
+[一句大胆的"之前 → 之后"概括本文带来的转变。]
 
-[2-4 more sections in Chinese - same structure as English]
+[然后用2-3段解释核心机制。包含一个**核喻**（结构性比喻）——方法的各组件映射到某个熟悉事物的各部分。比喻要让架构可感知，而非仅做装饰。]
+
+## 关键概念
+
+[选取1-3个理解本文所必需的概念。用费曼式讲解：从零开始，逐步建立直觉，用具体例子说明。不假设读者了解术语——逐一拆解。]
+
+## 专家评审
+
+[坦率评估：]
+- **问题重要性**：这个问题值得解决吗？受影响的群体有多大？
+- **方法成熟度**：这是概念验证还是可部署方案？作者承认（或应该承认）的局限是什么？
+- **实验严谨性**：基线公平吗？数据集有代表性吗？有无值得警惕之处？
+
+**判决**: [强接收 / 弱接收 / 临界 / 弱拒绝 / 强拒绝] — [一句话理由]
 
 ## 要点总结
 
-[numbered list of key takeaways in Chinese]
+[可迁移的洞见——本文中哪些想法、技术或思维框架可以借用到其他领域？聚焦于实践者能"偷"走的东西，而非仅仅论文的结论。]
 :::
 
 IMPORTANT:
-- The Chinese content should be a complete parallel version, not a translation
+- The Chinese content should be a complete parallel composition, NOT a translation of the English
 - Use LaTeX math notation where appropriate ($...$ inline, $$...$$ block)
-- Keep the tone analytical and technical
+- Tone: analytical but accessible — like explaining to a smart colleague over coffee
+- The structural metaphor must be structural (components of the method map to parts of the analogy), not just a vague comparison
+- Expert assessment should be honest and calibrated, not uniformly positive — flag real weaknesses
 - Output ONLY the complete MDX file content, nothing else"""
 
     resp = client.chat.completions.create(
