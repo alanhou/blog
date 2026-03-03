@@ -166,7 +166,7 @@ def generate_blog_post(client, model, paper):
     authors_str = ", ".join(paper["authors"][:10])
     cats_str = ", ".join(paper["categories"][:5])
 
-    prompt = f"""Generate a bilingual (English + Chinese) MDX blog post for this arxiv paper.
+    prompt = f"""You are reading an academic paper and explaining it to a smart colleague over coffee. Your goal: help them understand what gap this paper fills, what's actually new, and whether it's worth their attention.
 
 Paper ID: {paper['id']}
 Title: {paper['title']}
@@ -174,7 +174,7 @@ Authors: {authors_str}
 Categories: {cats_str}
 Abstract: {paper['summary']}
 
-Use EXACTLY this format (no deviations):
+Output a bilingual MDX blog post following this EXACT structure:
 
 ---
 title:
@@ -195,30 +195,63 @@ image: "{ARXIV_IMAGE}"
 
 ## The Gap
 
-[What is the current frontier in this area? What specific gap, limitation, or unsolved problem does this paper address? Be precise — name the prior state-of-the-art and its shortcomings.]
+[Where has existing research reached? What specific boundary or limitation does this paper address? Be precise — name the prior approaches and their shortcomings. Then show the logical path from gap → method → evidence → conclusion using a simple ASCII diagram.]
+
+```
+[ASCII logic topology showing: Problem → Assumption → Method → Evidence → Conclusion]
+[Use only: + - | / \\ > < v ^ * = ~ . : # [ ] ( ) _]
+[NO Unicode box drawing characters]
+```
 
 ## The Increment
 
-[One bold "before → after" sentence capturing the shift this paper enables.]
+**One sentence**: [Before this paper vs after this paper — what changed in the world?]
 
-[Then explain the core mechanism in 2-3 paragraphs. Include a **structural metaphor** — an analogy where parts of the method map to parts of something familiar. The metaphor should make the architecture graspable, not just decorative.]
+### Core Mechanism
 
-## Key Concepts
+[Explain the method's internal structure in 2-3 paragraphs. What are the components? How does data flow? What operations happen?]
 
-[Pick 1-3 concepts that are essential to understanding this paper. Explain each Feynman-style: start from zero, build up intuition, use a concrete example. Don't assume the reader knows jargon — unpack it.]
+```
+[ASCII diagram of method internals: components, data flow, operations]
+[This is the X-ray of how it works inside]
+```
+
+[Now explain using a **structural metaphor**: find something familiar where each part of the method maps to a part of the analogy. Walk through the method using this metaphor so the reader can retell it in their own words. The metaphor must be load-bearing — without it, the reader is back to staring at diagrams.]
+
+### Key Concepts
+
+[Pick 1-3 concepts essential to understanding this paper. For each:]
+- **[Concept name]**: [Explain Feynman-style from zero. Build intuition. Give a concrete example. Don't use jargon to explain jargon.]
+
+## Framework Shift
+
+[Draw a "napkin sketch" comparing the old way vs this paper's way. The goal: let the reader see the gestalt shift at a glance.]
+
+```
+Before (mainstream approach):        After (this paper):
+[ASCII diagram]                      [ASCII diagram]
+[Show structural difference, not feature list]
+```
+
+[One sentence: From X to Y, the core shift is ___.]
 
 ## Expert Assessment
 
-[A frank evaluation covering:]
-- **Problem significance**: Is this problem worth solving? How large is the affected community?
-- **Method maturity**: Is this a proof-of-concept or deployment-ready? What are the limitations the authors acknowledge (or should have)?
-- **Experimental rigor**: Are the baselines fair? Are the datasets representative? Any red flags?
+[You're a senior researcher who's seen thousands of papers. Evaluate honestly in plain language:]
 
-**Verdict**: [strong accept / weak accept / borderline / weak reject / strong reject] — [one-sentence justification]
+**Problem choice**: [Is this a real gap or manufactured? Where does it sit in the field's trajectory?]
+
+**Method maturity**: [Clever insight or brute force? Are there simpler approaches being overlooked?]
+
+**Experimental integrity**: [Are baselines fair? Do the numbers hold up under scrutiny? Any red flags?]
+
+**Writing quality**: [Where did the authors cut corners? Which section, if rewritten, would elevate the whole paper?]
+
+**Verdict**: [strong accept / weak accept / borderline / weak reject / strong reject] — [one-sentence reason]
 
 ## Takeaways
 
-[Transferable insights — what ideas, techniques, or framings from this paper can be borrowed and applied in other domains? Focus on what a practitioner can steal, not just what the paper concluded.]
+[What can a practitioner steal from this paper? Not generic insights — specific ideas, techniques, or framings that transfer to other domains. If there's nothing concrete to take, say so honestly.]
 :::
 
 :::zh
@@ -228,39 +261,74 @@ image: "{ARXIV_IMAGE}"
 
 ## 缺口
 
-[当前该领域的前沿在哪里？这篇论文填补了什么具体的空白、局限或未解决的问题？要精准——指出此前最优方法及其不足。]
+[现有研究到达了什么边界？这篇论文要解决什么具体的局限或问题？要精准——指出此前的方法及其不足。然后用简单的 ASCII 图展示从缺口到方法到证据到结论的逻辑路径。]
+
+```
+[ASCII 逻辑拓扑图：问题 → 假设 → 方法 → 证据 → 结论]
+[只用：+ - | / \\ > < v ^ * = ~ . : # [ ] ( ) _]
+[禁用 Unicode 制表符]
+```
 
 ## 增量
 
-[一句大胆的"之前 → 之后"概括本文带来的转变。]
+**一句话**: [这篇论文之前 vs 之后——世界多了什么？]
 
-[然后用2-3段解释核心机制。包含一个**核喻**（结构性比喻）——方法的各组件映射到某个熟悉事物的各部分。比喻要让架构可感知，而非仅做装饰。]
+### 核心机制
 
-## 关键概念
+[用2-3段解释方法的内部结构。有哪些组件？数据如何流动？发生了什么操作？]
 
-[选取1-3个理解本文所必需的概念。用费曼式讲解：从零开始，逐步建立直觉，用具体例子说明。不假设读者了解术语——逐一拆解。]
+```
+[方法内部的 ASCII 图：组件、数据流、操作]
+[这是方法内部运作的X光片]
+```
+
+[现在用**核喻**（结构性比喻）来解释：找一个熟悉的事物，方法的每个部分都能映射到比喻的某个部分。沿着这个比喻把方法走一遍，让读者能用自己的话复述。核喻必须承重——没有它，读者就回到盯着图发呆的状态。]
+
+### 关键概念
+
+[选1-3个理解本文必需的概念。对每个概念：]
+- **[概念名]**: [费曼式讲解，从零开始。建立直觉。给具体例子。不用术语解释术语。]
+
+## 框架转变
+
+[画一张"餐巾纸速写"对比旧方法和本文方法。目标：让读者一眼看出思维方式的转变。]
+
+```
+之前（主流方法）：                之后（本文方法）：
+[ASCII 图]                        [ASCII 图]
+[展示结构差异，而非功能清单]
+```
+
+[一句话：从 X 到 Y，核心转变是___。]
 
 ## 专家评审
 
-[坦率评估：]
-- **问题重要性**：这个问题值得解决吗？受影响的群体有多大？
-- **方法成熟度**：这是概念验证还是可部署方案？作者承认（或应该承认）的局限是什么？
-- **实验严谨性**：基线公平吗？数据集有代表性吗？有无值得警惕之处？
+[你是见过数千篇论文的资深研究者。用白话坦率评估：]
+
+**选题眼光**: [这是真缺口还是人造缺口？在该领域的发展轨迹中处于什么位置？]
+
+**方法成熟度**: [巧劲还是蛮力？有没有被忽略的更简单方法？]
+
+**实验诚意**: [基线公平吗？数字经得起推敲吗？有无值得警惕之处？]
+
+**写作功力**: [作者在哪里偷懒了？哪一段重写能让整篇论文升一个档次？]
 
 **判决**: [强接收 / 弱接收 / 临界 / 弱拒绝 / 强拒绝] — [一句话理由]
 
 ## 要点总结
 
-[可迁移的洞见——本文中哪些想法、技术或思维框架可以借用到其他领域？聚焦于实践者能"偷"走的东西，而非仅仅论文的结论。]
+[实践者能从这篇论文"偷"走什么？不要泛泛的洞见——要具体的想法、技术或思维框架，能迁移到其他领域的。如果没有具体可取之处，诚实地说没有。]
 :::
 
-IMPORTANT:
-- The Chinese content should be a complete parallel composition, NOT a translation of the English
-- Use LaTeX math notation where appropriate ($...$ inline, $$...$$ block)
-- Tone: analytical but accessible — like explaining to a smart colleague over coffee
-- The structural metaphor must be structural (components of the method map to parts of the analogy), not just a vague comparison
-- Expert assessment should be honest and calibrated, not uniformly positive — flag real weaknesses
-- Output ONLY the complete MDX file content, nothing else"""
+CRITICAL CONSTRAINTS:
+- ASCII diagrams: ONLY use + - | / \\ > < v ^ * = ~ . : # [ ] ( ) _ and spaces
+- NEVER use Unicode box drawing: ─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼ ═ ║ ╔ ╗ ╚ ╝ ● ○ ■ □ ◆ ◇ ▼ ▲ ► ◄ → ← ↑ ↓
+- Chinese paragraphs: Add line breaks after periods (。) to prevent horizontal scrolling
+- Structural metaphor: Must be load-bearing (method components map to analogy parts), not decorative
+- Expert assessment: Be honest and calibrated, not uniformly positive
+- Tone: Like explaining to a colleague over coffee, not writing a review
+- Chinese content: Parallel composition, NOT translation
+- Output ONLY the complete MDX file, nothing else"""
 
     resp = client.chat.completions.create(
         model=model,
@@ -315,6 +383,7 @@ def sanitize_mdx(content):
       (prevents \\nabla etc. from being split as \\n + abla)
     - Escape bare < followed by digits (MDX parses as JSX)
     - Repair mismatched bold markers (**text* → **text**)
+    - Add line breaks after Chinese periods in :::zh sections
     """
     # Fix frontmatter quoting before anything else
     fm_match = re.match(r'^---\n(.*?\n)---', content, re.DOTALL)
@@ -334,15 +403,31 @@ def sanitize_mdx(content):
     lines = content.split("\n")
     result = []
     in_code_block = False
+    in_zh_section = False
+
     for line in lines:
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
+
+        # Track :::zh sections
+        if line.strip() == ":::zh":
+            in_zh_section = True
+        elif line.strip() == ":::" and in_zh_section:
+            in_zh_section = False
+
         if not in_code_block:
             # Escape < followed by a digit (not a valid HTML/JSX tag)
             line = re.sub(r"<(\d)", r"&lt;\1", line)
             # Fix **text* → **text** (bold opened with ** but closed with single *)
             line = re.sub(r"\*\*([^*\n]+)\*(?!\*)", r"**\1**", line)
+
+            # Fix Chinese line breaks in :::zh sections
+            if in_zh_section and len(line) > 100 and not line.startswith('#') and not line.startswith('-') and not line.startswith('**'):
+                # Add line break after Chinese period (but not if followed by **)
+                line = re.sub(r'。(?!\*\*)', '。\n', line)
+
         result.append(line)
+
     return "\n".join(result)
 
 
