@@ -421,10 +421,10 @@ def sanitize_mdx(content):
             # Fix **text* → **text** (bold opened with ** but closed with single *)
             line = re.sub(r"\*\*([^*\n]+)\*(?!\*)", r"**\1**", line)
 
-            # Fix Chinese line breaks in :::zh sections
-            if in_zh_section and len(line) > 100 and not line.startswith('#') and not line.startswith('-') and not line.startswith('**'):
-                # Add line break after Chinese period (but not if followed by **)
-                line = re.sub(r'。(?!\*\*)', '。\n', line)
+            # Fix MDX orphaned punctuation: add space after **text**: and **text**,
+            if in_zh_section:
+                line = re.sub(r'(\*\*[^*]+\*\*):(?! )', r'\1: ', line)
+                line = re.sub(r'(\*\*[^*]+\*\*),(?! )', r'\1, ', line)
 
         result.append(line)
 
