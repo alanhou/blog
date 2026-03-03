@@ -383,7 +383,7 @@ def sanitize_mdx(content):
       (prevents \\nabla etc. from being split as \\n + abla)
     - Escape bare < followed by digits (MDX parses as JSX)
     - Repair mismatched bold markers (**text* → **text**)
-    - Add line breaks after Chinese periods in :::zh sections
+    - Replace ASCII colons with full-width Chinese colons in :::zh sections
     """
     # Fix frontmatter quoting before anything else
     fm_match = re.match(r'^---\n(.*?\n)---', content, re.DOTALL)
@@ -426,9 +426,27 @@ def sanitize_mdx(content):
             if in_zh_section:
                 line = re.sub(r'(\*\*[^*]+\*\*):(?! )', r'\1: ', line)
                 line = re.sub(r'(\*\*[^*]+\*\*),(?! )', r'\1, ', line)
-                # Replace ASCII colons with full-width colons (excluding URLs and code)
-                if not line.strip().startswith('http') and '://' not in line:
-                    line = line.replace(':', '：')
+
+                # Replace ASCII colons with full-width Chinese colons
+                # Skip metadata lines and URLs
+                if not (line.strip().startswith('**论文**:') or
+                       line.strip().startswith('**作者**:') or
+                       line.strip().startswith('**分类**:') or
+                       'http:' in line or 'https:' in line):
+                    # Replace colons not preceded by ** (bold markers)
+                    new_line = ''
+                    i = 0
+                    while i < len(line):
+                        if line[i] == ':':
+                            # Check if preceded by **
+                            if i >= 2 and line[i-2:i] == '**':
+                                new_line += ':'
+                            else:
+                                new_line += '：'
+                        else:
+                            new_line += line[i]
+                        i += 1
+                    line = new_line
 
         result.append(line)
 
