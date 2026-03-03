@@ -422,9 +422,13 @@ def sanitize_mdx(content):
             line = re.sub(r"\*\*([^*\n]+)\*(?!\*)", r"**\1**", line)
 
             # Fix MDX orphaned punctuation: add space after **text**: and **text**,
+            # Replace ASCII colons with full-width colons in Chinese sections
             if in_zh_section:
                 line = re.sub(r'(\*\*[^*]+\*\*):(?! )', r'\1: ', line)
                 line = re.sub(r'(\*\*[^*]+\*\*),(?! )', r'\1, ', line)
+                # Replace ASCII colons with full-width colons (excluding URLs and code)
+                if not line.strip().startswith('http') and '://' not in line:
+                    line = line.replace(':', '：')
 
         result.append(line)
 
