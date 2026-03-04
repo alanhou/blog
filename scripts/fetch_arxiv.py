@@ -428,10 +428,12 @@ def sanitize_mdx(content):
                 line = re.sub(r'(\*\*[^*]+\*\*),(?! )', r'\1, ', line)
 
                 # Replace ASCII colons with full-width Chinese colons
-                # Skip metadata lines and URLs
-                if not (line.strip().startswith('**论文**:') or
-                       line.strip().startswith('**作者**:') or
-                       line.strip().startswith('**分类**:') or
+                # Skip metadata lines, URLs, and ::: directive markers
+                stripped = line.strip()
+                if not (stripped.startswith('**论文**:') or
+                       stripped.startswith('**作者**:') or
+                       stripped.startswith('**分类**:') or
+                       stripped.startswith(':::') or
                        'http:' in line or 'https:' in line):
                     # Replace colons not preceded by ** (bold markers)
                     new_line = ''
