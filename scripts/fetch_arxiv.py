@@ -13,6 +13,12 @@ from pathlib import Path
 import requests
 from openai import OpenAI
 
+try:
+    from anthropic import Anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
 from manim_prompts import (
     CONCEPT_GIF_SYSTEM,
     CONCEPT_GIF_USER,
@@ -32,10 +38,23 @@ def get_llm_client():
     api_key = os.environ.get("LLM_API_KEY")
     base_url = os.environ.get("LLM_BASE_URL")
     model = os.environ.get("LLM_MODEL_NAME")
-    if not all([api_key, base_url, model]):
-        print("Error: LLM_API_KEY, LLM_BASE_URL, and LLM_MODEL_NAME must be set")
+
+    if not all([api_key, model]):
+        print("Error: LLM_API_KEY and LLM_MODEL_NAME must be set")
         sys.exit(1)
-    return OpenAI(api_key=api_key, base_url=base_url), model
+
+    # Detect provider from model name
+    if model.startswith("claude"):
+        if not ANTHROPIC_AVAILABLE:
+            print("Error: anthropic package not installed. Run: pip install anthropic")
+            sys.exit(1)
+        client = Anthropic(api_key=api_key, base_url=base_url) if base_url else Anthropic(api_key=api_key)
+        return client, model, "anthropic"
+    else:
+        if not base_url:
+            print("Error: LLM_BASE_URL must be set for OpenAI-compatible APIs")
+            sys.exit(1)
+        return OpenAI(api_key=api_key, base_url=base_url), model, "openai"
 
 
 def load_last_fetch():
@@ -114,7 +133,26 @@ def slugify(title):
     return slug
 
 
-def select_papers(client, model, papers, count=5):
+def call_llm(client, model, provider, messages, temperature=0.5, max_tokens=4096):
+    """Unified LLM call supporting both Anthropic and OpenAI APIs."""
+    if provider == "anthropic":
+        response = client.messages.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        return response.content[0].text
+    else:  # openai
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature
+        )
+        return response.choices[0].message.content
+
+
+def select_papers(client, model, provider, papers, count=5):
     """Use LLM to select the most interesting papers."""
     paper_list = "\n\n".join(
         f"[{i+1}] ID: {p['id']}\nTitle: {p['title']}\nAbstract: {p['summary'][:500]}"
@@ -132,12 +170,12 @@ Reply with ONLY the numbers of your selected papers, one per line. Example:
 5
 7"""
 
-    resp = client.chat.completions.create(
-        model=model,
+    content = call_llm(
+        client, model, provider,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
+        max_tokens=1024
     )
-    content = resp.choices[0].message.content if resp.choices else None
     if not content:
         print(f"Warning: LLM returned empty response for paper selection, falling back to first {count}")
         return papers[:count]
@@ -160,7 +198,7 @@ Reply with ONLY the numbers of your selected papers, one per line. Example:
     return [papers[i] for i in unique[:count]]
 
 
-def generate_blog_post(client, model, paper):
+def generate_blog_post(client, model, provider, paper):
     """Use LLM to generate a full bilingual MDX blog post."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     authors_str = ", ".join(paper["authors"][:10])
@@ -330,12 +368,12 @@ CRITICAL CONSTRAINTS:
 - Chinese content: Parallel composition, NOT translation
 - Output ONLY the complete MDX file, nothing else"""
 
-    resp = client.chat.completions.create(
-        model=model,
+    content = call_llm(
+        client, model, provider,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.5,
+        max_tokens=8192
     )
-    content = resp.choices[0].message.content if resp.choices else None
     if not content:
         print(f"Warning: LLM returned empty response for post generation ({paper['id']})")
         return None
@@ -477,7 +515,7 @@ def extract_title_zh(mdx_content: str) -> str:
     return m.group(1).replace('\\"', '"').replace('\\\\', '\\')
 
 
-def generate_manim_code(client, model, paper, scene_type: str, title_zh: str = "") -> str | None:
+def generate_manim_code(client, model, provider, paper, scene_type: str, title_zh: str = "") -> str | None:
     """Generate Manim scene code via LLM with 1 retry on validation failure."""
     if scene_type == "hero":
         system_prompt = HERO_IMAGE_SYSTEM
@@ -493,15 +531,27 @@ def generate_manim_code(client, model, paper, scene_type: str, title_zh: str = "
     )
 
     for attempt in range(2):
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-        )
-        content = resp.choices[0].message.content if resp.choices else None
+        if provider == "anthropic":
+            # Anthropic doesn't support system messages in the same way
+            # Prepend system prompt to user message
+            combined_prompt = f"{system_prompt}\n\n{user_prompt}"
+            content = call_llm(
+                client, model, provider,
+                messages=[{"role": "user", "content": combined_prompt}],
+                temperature=0.3,
+                max_tokens=2048
+            )
+        else:
+            content = call_llm(
+                client, model, provider,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=2048
+            )
+
         if not content:
             return None
 
@@ -516,14 +566,14 @@ def generate_manim_code(client, model, paper, scene_type: str, title_zh: str = "
     return None
 
 
-def generate_paper_visuals(client, model, paper, slug: str, title_zh: str = "") -> dict:
+def generate_paper_visuals(client, model, provider, paper, slug: str, title_zh: str = "") -> dict:
     """Orchestrate hero PNG + concept GIF generation. Returns dict of paths."""
     output_dir = VISUALS_DIR / slug
     results = {}
 
     # Hero image (static PNG)
     print(f"  Generating hero image...")
-    hero_code = generate_manim_code(client, model, paper, "hero", title_zh=title_zh)
+    hero_code = generate_manim_code(client, model, provider, paper, "hero", title_zh=title_zh)
     if hero_code:
         path = render_scene(hero_code, "HeroScene", output_dir, "png")
         if path:
@@ -531,7 +581,7 @@ def generate_paper_visuals(client, model, paper, slug: str, title_zh: str = "") 
 
     # Concept animation (GIF)
     print(f"  Generating concept animation...")
-    gif_code = generate_manim_code(client, model, paper, "concept", title_zh=title_zh)
+    gif_code = generate_manim_code(client, model, provider, paper, "concept", title_zh=title_zh)
     if gif_code:
         path = render_scene(gif_code, "ConceptScene", output_dir, "gif")
         if path:
@@ -560,9 +610,10 @@ def insert_after_frontmatter(mdx: str, content: str) -> str:
 
 
 def main():
-    client, model = get_llm_client()
+    client, model, provider = get_llm_client()
     last_fetch = load_last_fetch()
     print(f"Last fetch: {last_fetch.isoformat()}")
+    print(f"Using {provider} provider with model: {model}")
 
     # Fetch recent papers
     print("Fetching recent papers from arxiv...")
@@ -587,7 +638,7 @@ def main():
 
     # Select most interesting papers
     print("Selecting most interesting papers via LLM...")
-    selected = select_papers(client, model, papers, count=min(5, len(papers)))
+    selected = select_papers(client, model, provider, papers, count=min(5, len(papers)))
     print(f"Selected {len(selected)} papers:")
     for p in selected:
         print(f"  - {p['title']}")
@@ -602,7 +653,7 @@ def main():
             continue
 
         print(f"Generating post for: {paper['title']}...")
-        content = generate_blog_post(client, model, paper)
+        content = generate_blog_post(client, model, provider, paper)
         if not content:
             continue
 
@@ -622,7 +673,7 @@ def main():
         try:
             print(f"  Generating visuals for: {paper['title']}...")
             title_zh = extract_title_zh(content)
-            visuals = generate_paper_visuals(client, model, paper, slug, title_zh=title_zh)
+            visuals = generate_paper_visuals(client, model, provider, paper, slug, title_zh=title_zh)
             if visuals.get("hero"):
                 content = patch_frontmatter_image(content, visuals["hero"])
                 hero_md = f"![Hero diagram]({visuals['hero']})\n\n"

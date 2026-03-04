@@ -112,16 +112,18 @@ npm run preview  # preview the built site locally
 ### arXiv Pipeline (optional)
 
 ```bash
-pip install requests openai manim
+pip install requests openai anthropic manim
 
 export LLM_API_KEY="your-key"
-export LLM_BASE_URL="https://api.example.com/v1"
-export LLM_MODEL_NAME="your-model"
+export LLM_BASE_URL="https://api.example.com/v1"  # Optional for Claude, required for OpenAI-compatible APIs
+export LLM_MODEL_NAME="claude-sonnet-4-6"  # or "gpt-4", etc.
 
 python scripts/fetch_arxiv.py
 ```
 
-The pipeline works with any OpenAI-compatible API endpoint.
+The pipeline supports both:
+- **Claude** (Anthropic API): Set `LLM_MODEL_NAME` to any model starting with "claude" (e.g., `claude-sonnet-4-6`, `claude-opus-4-6`). `LLM_BASE_URL` is optional.
+- **OpenAI-compatible APIs**: Set `LLM_MODEL_NAME` to your model name and `LLM_BASE_URL` to your endpoint (e.g., `https://api.openai.com/v1`).
 
 ## Acknowledgments
 
