@@ -1,0 +1,346 @@
+---
+title:
+  en: "Helios: Making 14B Video Models Run at 19.5 FPS Without the Usual Tricks"
+  zh: "Helios: 让140亿参数视频模型跑到19.5帧每秒,不靠常规加速术"
+description:
+  en: "A 14B autoregressive diffusion model that generates minute-long videos in real-time on a single H100, solving drift without heuristics and achieving efficiency without standard acceleration techniques."
+  zh: "一个140亿参数的自回归扩散模型,在单张H100上实时生成分钟级视频,不用启发式方法解决漂移,不靠标准加速技术实现效率。"
+date: 2026-03-05
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/helios-real-real-time-long-video/HeroScene.png"
+---
+
+![Concept animation](/arxiv-visuals/helios-real-real-time-long-video/ConceptScene.gif)
+
+
+
+![Hero diagram](/arxiv-visuals/helios-real-real-time-long-video/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2603.04379](https://arxiv.org/abs/2603.04379)
+**Authors**: Shenghai Yuan, Yuanyang Yin, Zongjian Li, Xinwei Huang, Xiao Yang, Li Yuan
+**Categories**: cs.CV
+
+## The Gap
+
+Video generation models face a trilemma: you can have quality, you can have speed, or you can have length — pick two. Models like Sora and Gen-3 produce impressive results but require massive compute and still struggle with minute-long videos. Autoregressive approaches (CogVideoX, MovieGen) generate long sequences but drift into repetitive or incoherent content after 10-20 seconds. The field patches this with band-aids: self-forcing (feeding ground truth periodically), error banks (storing corrections), keyframe sampling (anchoring to reference frames). Meanwhile, real-time generation demands KV-cache, sparse attention, or quantization — all trading quality for speed.
+
+The boundary is clear: no one has built a large-scale model (10B+ parameters) that generates minute-long videos at real-time speeds without quality-degrading acceleration tricks or drift-preventing heuristics. The assumption has been that you need these crutches at scale.
+
+```
+Problem: Large models can't do quality + speed + length simultaneously
+   |
+   v
+Assumption: Drift is inherent to autoregression; speed requires shortcuts
+   |
+   v
+Method: Train to expect drift; compress context radically; optimize infrastructure
+   |
+   v
+Evidence: 14B model @ 19.5 FPS, minute-long videos, no drift heuristics
+   |
+   v
+Conclusion: The trilemma was a training + engineering problem, not fundamental
+```
+
+## The Increment
+
+**One sentence**: Before Helios, you chose between quality (slow, large models) and speed (fast, small models) for long videos; after Helios, a 14B model runs faster than 1.3B models while generating coherent minute-long sequences.
+
+### Core Mechanism
+
+Helios is a 14B parameter autoregressive diffusion transformer. It generates video frame-by-frame, where each new frame is conditioned on compressed representations of all previous frames plus the current noisy frame being denoised. The architecture uses a unified input representation that handles text-to-video, image-to-video, and video-to-video in one model.
+
+The anti-drift strategy is counterintuitive: instead of preventing drift during inference, they simulate it during training. They deliberately inject corrupted frames, repetitive patterns, and accumulated errors into training sequences, forcing the model to learn recovery mechanisms. This is paired with architectural choices that eliminate repetitive motion at its source — specifically, they avoid certain temporal attention patterns that create feedback loops.
+
+For efficiency, they compress historical context aggressively (reducing it to a tiny latent representation) and compress the noisy frame being processed. They also cut sampling steps from 50+ to around 10 through distillation. Infrastructure optimizations include custom memory management that fits four 14B models in 80GB of VRAM and kernel-level optimizations for the diffusion process.
+
+```
+Input (text/image/video)
+   |
+   v
+[Encoder] --> Compressed Context (tiny)
+   |
+   v
+[Autoregressive Loop]
+   |
+   +---> Generate Frame t
+   |        |
+   |        v
+   |     [Diffusion Transformer 14B]
+   |        |
+   |        +---> Compressed History (frames 1...t-1)
+   |        +---> Noisy Frame t (compressed)
+   |        +---> Condition (text/image)
+   |        |
+   |        v
+   |     Denoised Frame t (10 steps, not 50)
+   |        |
+   +--------+ (feed back as history)
+   |
+   v
+Output Video (up to 60+ seconds)
+```
+
+Think of Helios like a relay race where each runner (frame generation) carries a compressed memory capsule instead of a full backpack. Traditional autoregressive models are like runners carrying every previous runner's gear — they slow down and eventually collapse under the weight (drift). Helios trains its runners to expect that sometimes they'll receive a damaged capsule (simulated drift during training), so they learn to correct course rather than amplify errors. The compression is like distilling a novel into a one-page summary before passing it forward — you lose detail but keep the plot coherent. The infrastructure optimizations are like redesigning the track surface and shoes: not changing the race strategy, but making every step cheaper.
+
+### Key Concepts
+
+- **Autoregressive Drift**: Imagine playing telephone with 100 people, but each person must also describe everyone before them. By person 20, the message is garbled, and by person 50, it's nonsense. In video generation, each new frame depends on all previous frames. Small errors compound: a slightly off hand position becomes a warped hand, then a blob, then the model "gives up" and generates repetitive patterns (like a stuck record) because that's the lowest-error option. Traditional fixes are like having person 10, 20, 30 whisper the original message again (self-forcing) — it works but breaks the flow.
+
+- **Context Compression**: You're writing a story one sentence at a time, but you can only remember the last 5 sentences. To keep the plot coherent, you write a one-sentence summary after each paragraph and keep that instead of the full text. Helios does this with video frames: instead of storing all previous frames (memory explosion), it compresses them into a tiny latent code that captures "a person is walking left, background is a park, lighting is sunset" without pixel-level detail. The trick is making this lossy compression preserve what matters for coherence while discarding what doesn't.
+
+- **Drift Simulation Training**: Most models are trained on clean, perfect sequences. It's like learning to drive only on empty roads — you panic when you encounter real traffic. Helios deliberately corrupts training data: it injects frames with errors, repetitive patterns, and accumulated noise, then trains the model to recover. This is like practicing driving in a simulator that throws random obstacles at you. When real drift happens during inference, the model recognizes the pattern and corrects it, rather than amplifying it into catastrophic failure.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+Training:                            Training:
+[Clean Data] --> [Model]             [Clean + Corrupted Data]
+                                          |
+Inference:                                v
+[Frame 1] --> [Frame 2] --> ...      [Model learns recovery]
+     |            |
+     v            v                   Inference:
+  (drift)      (more drift)           [Frame 1] --> [Frame 2] --> ...
+     |            |                        |            |
+     v            v                        v            v
+[Heuristic Fix] [Heuristic Fix]       (drift detected & corrected)
+
+Memory: O(n) frames stored            Memory: O(1) compressed context
+Speed: KV-cache, sparse attn          Speed: Radical compression + infra
+```
+
+From "prevent drift with inference-time patches" to "train the model to expect and correct drift," the core shift is treating robustness as a learned capability rather than an external constraint.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The video generation field has been stuck in a local optimum where everyone accepts that large models need heuristics for long videos and acceleration tricks for speed. The problem sits at the intersection of three active research threads (long-context generation, efficient transformers, diffusion acceleration), making it timely and high-impact if solved.
+
+**Method maturity**: Mix of clever insight and engineering muscle. The drift simulation training is genuinely smart — it's a simple idea that others missed because they were focused on inference-time fixes. The context compression is more brute force: they're betting that aggressive lossy compression won't hurt quality, which is empirically validated but not deeply understood. The infrastructure optimizations are pure engineering grind, not novel research, but they're necessary to make the claims credible.
+
+**Experimental integrity**: The baselines seem fair, but there's a red flag: they claim to match "a strong baseline" without naming it explicitly in the abstract. The paper needs to be clearer about what they're comparing against. The 19.5 FPS claim is impressive but hardware-specific (H100) — it's not clear how this scales to consumer GPUs. The minute-long generation claim needs more scrutiny: are they cherry-picking examples, or is this consistent across diverse prompts?
+
+**Writing quality**: The abstract oversells ("first 14B model," "real real-time") in a way that feels like marketing. The technical sections likely have the depth, but the framing is breathless. The paper would benefit from a sober "limitations" section discussing failure modes, compute requirements, and where the method still struggles. The infrastructure optimizations are mentioned but not detailed — this feels like they're hiding complexity.
+
+**Verdict**: Weak accept — the drift simulation training is a transferable insight, and the engineering achievement is impressive, but the paper needs more honest evaluation and clearer baselines.
+
+## Takeaways
+
+The drift simulation training strategy is immediately stealable: if you're building any autoregressive system (text, audio, video), explicitly corrupt your training data to match inference-time failure modes. This is a general principle: train on the distribution you'll see at test time, including the errors.
+
+The context compression approach is a reminder that you don't always need full fidelity. If you're building a system with long-range dependencies, ask: what's the minimal information needed to maintain coherence? Often it's much less than you think.
+
+The infrastructure claim (four 14B models in 80GB) suggests there's low-hanging fruit in memory optimization that most researchers ignore. If you're training large models, it's worth investing in custom memory management rather than accepting framework defaults.
+
+The broader lesson: sometimes the "necessary" heuristics in your field aren't necessary — they're just patches over training distribution mismatch. Look for places where inference-time fixes could be replaced by training-time simulation.
+:::
+
+:::zh
+**论文**: [2603.04379](https://arxiv.org/abs/2603.04379)
+**作者**: Shenghai Yuan, Yuanyang Yin, Zongjian Li, Xinwei Huang, Xiao Yang, Li Yuan
+**分类**: cs.CV
+
+## 缺口
+
+视频生成模型面临三难困境：质量、速度、长度,三选二。
+
+Sora和Gen-3这类模型效果惊艳,但需要海量算力,生成分钟级视频仍然吃力。
+
+自回归方法(CogVideoX、MovieGen)能生成长序列,但10到20秒后就开始漂移,陷入重复或混乱。
+
+业界用创可贴修补：自强制(定期喂入真实帧)、错误库(存储修正)、关键帧采样(锚定参考帧)。
+
+与此同时,实时生成需要KV缓存、稀疏注意力或量化——都是用质量换速度。
+
+边界很清楚：没人造出过大规模模型(100亿+参数),能在实时速度下生成分钟级视频,既不用降质加速术,也不用防漂移启发式。
+
+业界假设是：这个规模下必须依赖这些拐杖。
+
+```
+问题:大模型无法同时做到质量+速度+长度
+   |
+   v
+假设:漂移是自回归固有的;速度必须走捷径
+   |
+   v
+方法:训练时预期漂移;激进压缩上下文;优化基础设施
+   |
+   v
+证据:140亿模型跑19.5帧每秒,分钟级视频,无漂移启发式
+   |
+   v
+结论:三难困境是训练+工程问题,不是根本限制
+```
+
+## 增量
+
+**一句话**: Helios之前,长视频要在质量(慢、大模型)和速度(快、小模型)之间二选一;Helios之后,140亿参数模型比13亿模型还快,还能生成连贯的分钟级序列。
+
+### 核心机制
+
+Helios是140亿参数的自回归扩散Transformer。
+
+它逐帧生成视频,每个新帧依赖所有历史帧的压缩表示,加上当前正在去噪的噪声帧。
+
+架构用统一输入表示,一个模型搞定文生视频、图生视频、视频续写。
+
+防漂移策略反直觉：不是推理时防止漂移,而是训练时模拟漂移。
+
+他们故意往训练序列里注入损坏帧、重复模式、累积误差,逼模型学会恢复机制。
+
+这配合架构选择,从源头消除重复运动——具体来说,避免某些会产生反馈回路的时序注意力模式。
+
+效率方面,他们激进压缩历史上下文(缩减到极小的潜在表示),也压缩正在处理的噪声帧。
+
+还通过蒸馏把采样步数从50+砍到10左右。
+
+基础设施优化包括定制内存管理(80GB显存塞进四个140亿模型)和扩散过程的内核级优化。
+
+```
+输入(文本/图像/视频)
+   |
+   v
+[编码器] --> 压缩上下文(极小)
+   |
+   v
+[自回归循环]
+   |
+   +---> 生成第t帧
+   |        |
+   |        v
+   |     [扩散Transformer 140亿参数]
+   |        |
+   |        +---> 压缩历史(第1到t-1帧)
+   |        +---> 噪声帧t(压缩后)
+   |        +---> 条件(文本/图像)
+   |        |
+   |        v
+   |     去噪后的帧t(10步,不是50步)
+   |        |
+   +--------+ (反馈回历史)
+   |
+   v
+输出视频(最长60+秒)
+```
+
+把Helios想象成接力赛,每个跑者(帧生成)携带压缩记忆胶囊,而不是完整背包。
+
+传统自回归模型像跑者背着所有前任的装备——越跑越慢,最终在重压下崩溃(漂移)。
+
+Helios训练跑者预期有时会收到损坏的胶囊(训练时模拟漂移),所以他们学会纠正路线,而不是放大错误。
+
+压缩就像把小说浓缩成一页摘要再传递——丢失细节但保持情节连贯。
+
+基础设施优化像重新设计跑道表面和跑鞋：不改变比赛策略,但让每一步都更便宜。
+
+### 关键概念
+
+- **自回归漂移**: 想象100人传话,但每人还得描述所有前面的人。
+
+到第20人,信息已经失真,到第50人,完全是胡话。
+
+视频生成中,每个新帧依赖所有历史帧。
+
+小错误复合：手的位置稍微偏了,变成扭曲的手,然后是一团模糊,然后模型"放弃"生成重复模式(像卡住的唱片),因为那是最低错误选项。
+
+传统修复像让第10、20、30人再悄悄说一遍原话(自强制)——有效但打断流程。
+
+- **上下文压缩**: 你一次写一句话,但只能记住最后5句。
+
+为了保持情节连贯,每段后写一句总结,保留总结而不是全文。
+
+Helios对视频帧做同样的事：不存储所有历史帧(内存爆炸),而是压缩成极小的潜在编码,捕捉"一个人向左走,背景是公园,光线是日落",不保留像素级细节。
+
+诀窍是让这种有损压缩保留对连贯性重要的东西,丢弃不重要的。
+
+- **漂移模拟训练**: 大多数模型在干净、完美的序列上训练。
+
+就像只在空路上学开车——遇到真实交通就慌了。
+
+Helios故意破坏训练数据：注入带错误的帧、重复模式、累积噪声,然后训练模型恢复。
+
+这像在模拟器里练车,模拟器随机扔障碍物给你。
+
+推理时真的漂移发生,模型识别出模式并纠正,而不是放大成灾难性失败。
+
+## 框架转变
+
+```
+之前(主流方法):                  之后(本文方法):
+
+训练:                            训练:
+[干净数据] --> [模型]             [干净+损坏数据]
+                                      |
+推理:                                 v
+[帧1] --> [帧2] --> ...          [模型学会恢复]
+   |          |
+   v          v                   推理:
+(漂移)    (更多漂移)              [帧1] --> [帧2] --> ...
+   |          |                       |          |
+   v          v                       v          v
+[启发式修复][启发式修复]          (检测并纠正漂移)
+
+内存:O(n)帧存储                  内存:O(1)压缩上下文
+速度:KV缓存、稀疏注意力          速度:激进压缩+基础设施
+```
+
+从"用推理时补丁防止漂移"到"训练模型预期并纠正漂移",核心转变是把鲁棒性当作学习能力,而不是外部约束。
+
+## 专家评审
+
+**选题眼光**: 这是真缺口。
+
+视频生成领域卡在局部最优：大家都接受大模型需要启发式处理长视频,需要加速技巧提速。
+
+问题位于三条活跃研究线的交叉点(长上下文生成、高效Transformer、扩散加速),如果解决了,时机好、影响大。
+
+**方法成熟度**: 巧劲和工程肌肉的混合。
+
+漂移模拟训练是真聪明——简单想法,别人没想到因为都盯着推理时修复。
+
+上下文压缩更像蛮力：他们赌激进的有损压缩不会伤质量,经验上验证了但没深入理解。
+
+基础设施优化是纯工程打磨,不是新颖研究,但对可信度必要。
+
+**实验诚意**: 基线看起来公平,但有个红旗：他们声称匹配"强基线"但摘要里没明说是谁。
+
+论文需要更清楚地说明对比对象。
+
+19.5帧每秒的声称很惊艳但硬件特定(H100)——不清楚在消费级GPU上如何扩展。
+
+分钟级生成声称需要更多审视：是挑选样例,还是在多样提示下一致?
+
+**写作功力**: 摘要过度推销("首个140亿模型"、"真·实时"),感觉像营销。
+
+技术章节可能有深度,但框架太激动。
+
+论文需要冷静的"局限性"章节,讨论失败模式、算力需求、方法仍然挣扎的地方。
+
+基础设施优化提到了但没细节——感觉在隐藏复杂性。
+
+**判决**: 弱接收——漂移模拟训练是可迁移的洞见,工程成就令人印象深刻,但论文需要更诚实的评估和更清晰的基线。
+
+## 要点总结
+
+漂移模拟训练策略可以立刻偷走：如果你在构建任何自回归系统(文本、音频、视频),显式破坏训练数据以匹配推理时的失败模式。
+
+这是通用原则：在测试时会看到的分布上训练,包括错误。
+
+上下文压缩方法提醒我们不总是需要完全保真。
+
+如果你在构建有长程依赖的系统,问：维持连贯性需要的最小信息是什么?通常比你想的少得多。
+
+基础设施声称(80GB塞四个140亿模型)暗示内存优化有大多数研究者忽略的低垂果实。
+
+如果你在训练大模型,值得投资定制内存管理,而不是接受框架默认值。
+
+更广泛的教训：有时你领域里"必要的"启发式并不必要——它们只是训练分布不匹配的补丁。
+
+寻找推理时修复可以被训练时模拟替代的地方。
+
+:::
