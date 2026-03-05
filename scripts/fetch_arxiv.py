@@ -10,6 +10,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import time
+
 import requests
 from openai import OpenAI
 
@@ -133,23 +135,36 @@ def slugify(title):
     return slug
 
 
-def call_llm(client, model, provider, messages, temperature=0.5, max_tokens=4096):
-    """Unified LLM call supporting both Anthropic and OpenAI APIs."""
-    if provider == "anthropic":
-        response = client.messages.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
-        return response.content[0].text
-    else:  # openai
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature
-        )
-        return response.choices[0].message.content
+def call_llm(client, model, provider, messages, temperature=0.5, max_tokens=4096, retries=3):
+    """Unified LLM call supporting both Anthropic and OpenAI APIs with retry logic."""
+    for attempt in range(retries):
+        try:
+            if provider == "anthropic":
+                response = client.messages.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                return response.content[0].text
+            else:  # openai
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature
+                )
+                return response.choices[0].message.content
+        except Exception as e:
+            err_str = str(e)
+            # Retry on transient errors (timeouts, server errors, rate limits)
+            is_transient = any(code in err_str for code in ["524", "529", "500", "502", "503", "429", "overloaded"])
+            if is_transient and attempt < retries - 1:
+                wait = 2 ** (attempt + 1)
+                print(f"  LLM call failed (attempt {attempt + 1}/{retries}): {err_str[:120]}")
+                print(f"  Retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+            raise
 
 
 def select_papers(client, model, provider, papers, count=5):
@@ -653,7 +668,12 @@ def main():
             continue
 
         print(f"Generating post for: {paper['title']}...")
-        content = generate_blog_post(client, model, provider, paper)
+        try:
+            content = generate_blog_post(client, model, provider, paper)
+        except Exception:
+            print(f"  Blog post generation failed, skipping:")
+            traceback.print_exc()
+            continue
         if not content:
             continue
 
