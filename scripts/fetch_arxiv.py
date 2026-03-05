@@ -40,13 +40,22 @@ def get_llm_client():
     api_key = os.environ.get("LLM_API_KEY")
     base_url = os.environ.get("LLM_BASE_URL")
     model = os.environ.get("LLM_MODEL_NAME")
+    provider = os.environ.get("LLM_PROVIDER", "").lower()
 
     if not all([api_key, model]):
         print("Error: LLM_API_KEY and LLM_MODEL_NAME must be set")
         sys.exit(1)
 
-    # Detect provider from model name
-    if model.startswith("claude"):
+    # Auto-detect provider: explicit env var > base_url implies openai > model name
+    if not provider:
+        if base_url:
+            provider = "openai"
+        elif model.startswith("claude"):
+            provider = "anthropic"
+        else:
+            provider = "openai"
+
+    if provider == "anthropic":
         if not ANTHROPIC_AVAILABLE:
             print("Error: anthropic package not installed. Run: pip install anthropic")
             sys.exit(1)
