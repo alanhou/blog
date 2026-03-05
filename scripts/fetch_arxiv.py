@@ -160,8 +160,13 @@ def call_llm(client, model, provider, messages, temperature=0.5, max_tokens=4096
                 response = client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    temperature=temperature
+                    temperature=temperature,
+                    max_tokens=max_tokens
                 )
+                # Debug: check response type
+                if isinstance(response, str):
+                    print(f"  WARNING: OpenAI client returned string instead of object")
+                    return response
                 return response.choices[0].message.content
         except Exception as e:
             err_str = str(e)
