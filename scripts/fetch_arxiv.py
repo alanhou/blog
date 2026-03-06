@@ -91,8 +91,30 @@ def fetch_recent_papers(categories, max_results=20):
         "sortBy": "submittedDate",
         "sortOrder": "descending",
     }
-    resp = requests.get(ARXIV_API_URL, params=params, timeout=30)
-    resp.raise_for_status()
+
+    # Retry logic for rate limiting
+    max_retries = 3
+    retry_delay = 5  # seconds
+
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(ARXIV_API_URL, params=params, timeout=30)
+            resp.raise_for_status()
+            break  # Success, exit retry loop
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:  # Rate limit
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (attempt + 1)
+                    print(f"Rate limited by arxiv API. Waiting {wait_time} seconds before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(wait_time)
+                else:
+                    print("Max retries reached. Arxiv API rate limit exceeded.")
+                    raise
+            else:
+                raise
+        except Exception as e:
+            print(f"Error fetching papers: {e}")
+            raise
 
     ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
     root = ET.fromstring(resp.text)
