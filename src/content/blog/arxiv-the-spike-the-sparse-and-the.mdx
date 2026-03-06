@@ -1,0 +1,394 @@
+---
+title:
+  en: "Why Transformers Have Weird Spikes and Attention Sinks: It's the Architecture, Not the Data"
+  zh: "Transformer 为什么会出现激活尖峰和注意力汇聚:架构使然,非数据所致"
+description:
+  en: "This paper dissects two mysterious Transformer behaviors—massive activation spikes and attention sinks—showing they're architectural artifacts of pre-norm design that serve distinct functions: global implicit parameters vs local attention modulation."
+  zh: "本文解剖了 Transformer 的两个神秘现象——巨大激活尖峰和注意力汇聚点——揭示它们是 pre-norm 架构的副产物,分别承担全局隐式参数和局部注意力调制的不同功能。"
+date: 2026-03-06
+tags: ["arxiv", "ai", "cs.ai", "cs.cl"]
+image: "/arxiv-visuals/the-spike-the-sparse-and-the/HeroScene.png"
+---
+
+![Concept animation](/arxiv-visuals/the-spike-the-sparse-and-the/ConceptScene.gif)
+
+
+
+![Hero diagram](/arxiv-visuals/the-spike-the-sparse-and-the/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2603.05498](https://arxiv.org/abs/2603.05498)
+**Authors**: Shangwen Sun, Alfredo Canziani, Yann LeCun, Jiachen Zhu
+**Categories**: cs.AI, cs.CL
+
+## The Gap
+
+Researchers have noticed two weird things happening in Transformers for years. First, massive activations: a few tokens suddenly spike to extreme values in specific channels, orders of magnitude larger than everything else. Second, attention sinks: certain tokens (often the first token or special tokens) hoover up attention mass from all other tokens, even when they're semantically irrelevant. Prior work from Dettmers et al. (2022) and Xiao et al. (2023) documented that these phenomena co-occur and often involve the same tokens, but nobody knew why they happen together or what they actually do.
+
+The gap is causal understanding. We observe correlation but lack mechanism. Are these bugs or features? Do they cause each other, or does something else cause both? Without answers, we can't predict when they'll appear, can't design around them, and can't tell if fixing one breaks the other.
+
+```
+Observation: Spikes + Sinks co-occur in same tokens
+      |
+      v
+Question: Why together? What do they do?
+      |
+      v
+Hypothesis: Pre-norm architecture causes both
+      |
+      v
+Method: Ablate pre-norm, measure decoupling
+      |
+      v
+Evidence: Phenomena separate when pre-norm removed
+      |
+      v
+Conclusion: Architectural artifact with distinct functions
+```
+
+## The Increment
+
+**One sentence**: Before, we knew spikes and sinks co-occur but not why; after, we know pre-norm architecture causes both, and they serve different purposes—spikes as global implicit parameters, sinks as local attention modulators.
+
+### Core Mechanism
+
+The paper doesn't propose a new method—it's a dissection. The authors systematically ablate architectural components to isolate what causes each phenomenon. They start with standard pre-norm Transformers (LayerNorm before attention/FFN), then switch to post-norm (LayerNorm after), and measure how spikes and sinks behave.
+
+For massive activations, they track activation magnitudes across layers and find that in pre-norm models, certain tokens develop extreme values that persist through the network, creating near-constant hidden states. These act like implicit bias terms—the model learns to encode information in these persistent spikes rather than in the dynamic token representations.
+
+For attention sinks, they analyze attention weight distributions and discover that in pre-norm models, specific tokens accumulate attention mass across heads. But this isn't about semantic importance—it's a structural role. Heads use these sink tokens to modulate their outputs: when a head doesn't need to attend to anything specific, it dumps attention mass into the sink, effectively turning itself off for that position.
+
+```
+Pre-norm Transformer flow:
+
+Token embeddings
+      |
+      v
+[LayerNorm] <--- Pre-norm here
+      |
+      v
+[Attention] ----> Some tokens become sinks
+      |           (accumulate attention mass)
+      v
+[Residual +]
+      |
+      v
+[LayerNorm] <--- Pre-norm here too
+      |
+      v
+[FFN] ---------> Some channels spike
+      |           (extreme activations)
+      v
+[Residual +]
+      |
+      v
+Next layer (spikes persist, sinks continue)
+```
+
+Think of it like a city's infrastructure. Massive activations are like water towers—they sit at fixed locations (specific tokens/channels) and maintain constant pressure (persistent values) across the entire system (all layers). They're not part of the dynamic flow; they're infrastructure that other components rely on. Attention sinks are like traffic roundabouts—they're designated spots where traffic (attention mass) can be redirected when it doesn't need to go anywhere specific. A car (attention head) that doesn't need to reach a particular destination just circles the roundabout (dumps attention into the sink) until it's needed elsewhere. The pre-norm configuration is the zoning law that requires both water towers and roundabouts to be built in specific locations—change the zoning (switch to post-norm), and suddenly you don't need either.
+
+### Key Concepts
+
+- **Massive Activations**: Imagine you're building a neural network to predict the next word. Normally, each token's representation changes as it flows through layers—"cat" might start as a generic noun, then become "small animal," then "pet that meows." But massive activations are different. A few tokens develop extreme values in specific channels (say, channel 247 spikes to 1000 while everything else is around 10) and these values barely change across layers. It's like the model carved out a few slots to store constant information—not dynamic, context-dependent features, but fixed reference points. Why? Because in pre-norm architectures, the residual connections allow these extreme values to bypass normalization and persist. The model learns to exploit this: instead of encoding everything in the dynamic token representations, it stashes some information in these persistent spikes, effectively using them as extra parameters.
+
+- **Attention Sinks**: In a normal attention mechanism, each token attends to other tokens based on relevance—"cat" attends strongly to "furry" and "meows." But attention sinks break this pattern. Certain tokens (often the first token or BOS) attract massive attention from all other tokens, regardless of semantic content. If you look at the attention weights, you'll see 30-40% of the mass going to the sink token, even when it's completely irrelevant to the query. This isn't a bug—it's a feature. Attention heads use sinks as a "null" option. When a head doesn't need to attend to anything specific for a particular query, it dumps attention mass into the sink, effectively producing a near-zero output (since the sink token's value is constant and uninformative). It's a way for heads to turn themselves off selectively, without having to learn complex gating mechanisms.
+
+- **Pre-norm vs Post-norm**: This is about where you put LayerNorm in the Transformer block. Pre-norm means you normalize before the attention/FFN operation; post-norm means you normalize after. Sounds trivial, but it changes everything. In pre-norm, the residual connection adds the output directly to the input without normalization, allowing extreme values to accumulate and persist. In post-norm, normalization happens after the residual add, squashing extreme values back to a reasonable range. Pre-norm became popular because it's easier to train (more stable gradients), but it has this side effect: it creates architectural niches where spikes and sinks can emerge. The model learns to exploit these niches because they're useful—spikes as implicit parameters, sinks as attention modulators. Switch to post-norm, and these niches disappear, so the phenomena decouple.
+
+## Framework Shift
+
+```
+Before (mainstream view):          After (this paper):
+
+Spikes + Sinks = Mystery           Spikes + Sinks = Architecture
+                                   
+  [Token] ---> [???] ---> Spike      [Token] ---> [Pre-norm] 
+     |                                  |              |
+     +--------> [???] ---> Sink         |              v
+                                        |         [Residual]
+Co-occur but why?                       |              |
+                                        |              v
+                                        +-----> Spike persists
+                                        |
+                                        +-----> Sink accumulates
+                                        
+                                   Distinct functions:
+                                   Spike = global parameter
+                                   Sink = local modulator
+```
+
+From "these are correlated mysteries" to "these are architectural affordances with separate jobs," the core shift is understanding causality—pre-norm creates the conditions, and the model learns to exploit them for different purposes.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap, not manufactured. Massive activations and attention sinks have been observed for years and cause practical headaches (quantization breaks, inference optimization fails). Understanding their origin and function is foundational work. It sits at the intersection of interpretability and architecture design—exactly where the field needs clarity.
+
+**Method maturity**: This is clever forensic work, not brute force. The ablation strategy is simple but effective: change one architectural choice (pre-norm to post-norm) and watch the phenomena decouple. The experiments are clean and the logic is tight. However, the paper could have pushed further—what about other architectural variants (RMSNorm, different residual patterns)? The scope feels slightly narrow.
+
+**Experimental integrity**: Baselines are fair and the measurements are solid. The authors test across multiple model sizes and datasets, which is good. One concern: the functional claims (spikes as implicit parameters, sinks as attention modulators) are supported by correlation and ablation, but not by direct causal intervention. What happens if you manually inject spikes or remove sinks? The paper stops short of that level of proof.
+
+**Writing quality**: The paper is well-structured and the main narrative is clear. However, the related work section is thin—it mentions prior observations but doesn't engage deeply with the mechanistic interpretability literature. The discussion of "why the model learns to exploit these niches" is hand-wavy. A deeper dive into the optimization dynamics would elevate the paper significantly.
+
+**Verdict**: weak accept — Solid empirical work that clarifies an important mystery, but stops short of full mechanistic understanding and could explore architectural variants more thoroughly.
+
+## Takeaways
+
+If you're building or optimizing Transformers, here's what to steal:
+
+1. **Pre-norm creates architectural niches**: If you're seeing weird outliers or attention patterns, check your normalization placement. Pre-norm is easier to train but creates these side effects. Post-norm avoids them but requires more careful initialization.
+
+2. **Spikes are implicit parameters**: If you're doing quantization or pruning, don't treat all activations equally. Those extreme spikes in a few channels are carrying persistent information across layers—they're more like model parameters than dynamic activations. Quantize them differently or risk breaking the model.
+
+3. **Sinks are attention modulators**: If you're analyzing attention patterns, don't assume high attention mass means semantic relevance. Sinks are structural—they're where heads dump attention when they want to produce near-zero output. This matters for interpretability: a head attending to the first token might not be "looking at context," it might just be turning itself off.
+
+4. **Decoupling phenomena requires architectural change**: If you want to eliminate spikes or sinks, tweaking hyperparameters won't cut it. You need to change the architecture (e.g., switch to post-norm). This is a design choice with trade-offs—stability vs side effects.
+:::
+
+:::zh
+**论文**: [2603.05498](https://arxiv.org/abs/2603.05498)
+**作者**: Shangwen Sun, Alfredo Canziani, Yann LeCun, Jiachen Zhu
+**分类**: cs.AI, cs.CL
+
+## 缺口
+
+研究者多年来注意到 Transformer 中的两个怪现象。
+
+第一,巨大激活：少数 token 在特定通道突然飙升到极端数值,比其他所有值大几个数量级。
+
+第二,注意力汇聚：某些 token(通常是首 token 或特殊 token)吸走所有其他 token 的注意力质量,即使它们在语义上毫不相关。
+
+Dettmers 等人(2022)和 Xiao 等人(2023)的先前工作记录了这两个现象共现且常涉及相同 token,但没人知道它们为何一起出现或实际作用是什么。
+
+缺口在于因果理解。
+
+我们观察到相关性但缺乏机制。
+
+这是 bug 还是 feature?
+它们互为因果,还是有共同原因?
+没有答案,我们无法预测它们何时出现,无法围绕它们设计,也无法判断修复一个是否会破坏另一个。
+
+```
+观察: 尖峰 + 汇聚 在相同 token 共现
+      |
+      v
+问题: 为何一起?它们做什么?
+      |
+      v
+假设: Pre-norm 架构导致两者
+      |
+      v
+方法: 消融 pre-norm,测量解耦
+      |
+      v
+证据: 移除 pre-norm 后现象分离
+      |
+      v
+结论: 架构副产物,功能不同
+```
+
+## 增量
+
+**一句话**: 之前我们知道尖峰和汇聚共现但不知为何;
+之后我们知道 pre-norm 架构导致两者,且它们服务不同目的——尖峰作为全局隐式参数,汇聚作为局部注意力调制器。
+
+### 核心机制
+
+这篇论文不提出新方法——它是一次解剖。
+
+作者系统性地消融架构组件以隔离每个现象的成因。
+
+他们从标准 pre-norm Transformer(LayerNorm 在 attention/FFN 之前)开始,然后切换到 post-norm(LayerNorm 在之后),测量尖峰和汇聚如何表现。
+
+对于巨大激活,他们跨层追踪激活幅度,发现在 pre-norm 模型中,某些 token 发展出极端值并在网络中持续存在,创造近乎恒定的隐藏状态。
+
+这些像隐式偏置项——模型学会在这些持久尖峰中编码信息,而非在动态 token 表示中。
+
+对于注意力汇聚,他们分析注意力权重分布,发现在 pre-norm 模型中,特定 token 跨头累积注意力质量。
+
+但这与语义重要性无关——这是结构性角色。
+
+头使用这些汇聚 token 来调制输出：当一个头不需要关注任何特定内容时,它把注意力质量倾倒进汇聚点,有效地为该位置关闭自己。
+
+```
+Pre-norm Transformer 流程:
+
+Token 嵌入
+      |
+      v
+[LayerNorm] <--- Pre-norm 在这里
+      |
+      v
+[Attention] ----> 某些 token 成为汇聚点
+      |           (累积注意力质量)
+      v
+[残差 +]
+      |
+      v
+[LayerNorm] <--- Pre-norm 也在这里
+      |
+      v
+[FFN] ---------> 某些通道尖峰
+      |           (极端激活)
+      v
+[残差 +]
+      |
+      v
+下一层(尖峰持续,汇聚继续)
+```
+
+把它想象成城市基础设施。
+
+巨大激活像水塔——它们位于固定位置(特定 token/通道)并在整个系统(所有层)维持恒定压力(持久值)。
+
+它们不是动态流的一部分;
+它们是其他组件依赖的基础设施。
+
+注意力汇聚像交通环岛——它们是指定地点,当交通(注意力质量)不需要去任何特定地方时可以重定向。
+
+一辆车(注意力头)如果不需要到达特定目的地,就绕环岛(把注意力倾倒进汇聚点)直到需要去别处。
+
+Pre-norm 配置是要求在特定位置建造水塔和环岛的分区法——改变分区(切换到 post-norm),突然你两者都不需要了。
+
+### 关键概念
+
+- **巨大激活**: 想象你在构建一个预测下一个词的神经网络。
+
+通常,每个 token 的表示在流经层时会变化——"猫"可能从通用名词开始,然后变成"小动物",再变成"会喵喵叫的宠物"。
+
+但巨大激活不同。
+
+少数 token 在特定通道发展出极端值(比如通道 247 飙升到 1000 而其他都在 10 左右),这些值跨层几乎不变。
+
+就像模型刻出几个槽位来存储恒定信息——不是动态的、依赖上下文的特征,而是固定参考点。
+
+为什么?
+因为在 pre-norm 架构中,残差连接允许这些极端值绕过归一化并持续存在。
+
+模型学会利用这一点：不是在动态 token 表示中编码所有内容,而是把一些信息藏在这些持久尖峰中,有效地把它们用作额外参数。
+
+- **注意力汇聚**: 在正常注意力机制中,每个 token 基于相关性关注其他 token——"猫"强烈关注"毛茸茸"和"喵喵叫"。
+
+但注意力汇聚打破这种模式。
+
+某些 token(通常是首 token 或 BOS)吸引所有其他 token 的大量注意力,无论语义内容如何。
+
+如果你看注意力权重,会看到 30-40% 的质量流向汇聚 token,即使它与查询完全无关。
+
+这不是 bug——这是 feature。
+
+注意力头使用汇聚点作为"空"选项。
+
+当一个头对特定查询不需要关注任何特定内容时,它把注意力质量倾倒进汇聚点,有效地产生近零输出(因为汇聚 token 的值是恒定且无信息的)。
+
+这是头选择性关闭自己的方式,无需学习复杂的门控机制。
+
+- **Pre-norm vs Post-norm**: 这关乎你在 Transformer 块中哪里放 LayerNorm。
+
+Pre-norm 意味着在 attention/FFN 操作之前归一化;
+post-norm 意味着之后归一化。
+
+听起来微不足道,但它改变一切。
+
+在 pre-norm 中,残差连接直接把输出加到输入上而不归一化,允许极端值累积并持续。
+
+在 post-norm 中,归一化发生在残差加之后,把极端值压回合理范围。
+
+Pre-norm 变得流行因为它更易训练(梯度更稳定),但它有这个副作用：它创造架构生态位,尖峰和汇聚可以在其中出现。
+
+模型学会利用这些生态位因为它们有用——尖峰作为隐式参数,汇聚作为注意力调制器。
+
+切换到 post-norm,这些生态位消失,所以现象解耦。
+
+## 框架转变
+
+```
+之前(主流观点):                之后(本文):
+
+尖峰 + 汇聚 = 谜团             尖峰 + 汇聚 = 架构
+                                   
+  [Token] ---> [???] ---> 尖峰    [Token] ---> [Pre-norm] 
+     |                                |              |
+     +--------> [???] ---> 汇聚       |              v
+                                      |         [残差]
+共现但为何?                           |              |
+                                      |              v
+                                      +-----> 尖峰持续
+                                      |
+                                      +-----> 汇聚累积
+                                        
+                                   不同功能:
+                                   尖峰 = 全局参数
+                                   汇聚 = 局部调制器
+```
+
+从"这些是相关的谜团"到"这些是有独立工作的架构可供性",核心转变是理解因果关系——pre-norm 创造条件,模型学会为不同目的利用它们。
+
+## 专家评审
+
+**选题眼光**: 这是真缺口,非人造。
+
+巨大激活和注意力汇聚被观察多年并造成实际麻烦(量化失效,推理优化失败)。
+
+理解它们的起源和功能是基础性工作。
+
+它位于可解释性和架构设计的交叉点——正是该领域需要清晰度的地方。
+
+**方法成熟度**: 这是巧妙的取证工作,非蛮力。
+
+消融策略简单但有效：改变一个架构选择(pre-norm 到 post-norm)并观察现象解耦。
+
+实验干净,逻辑严密。
+
+然而,论文本可推进更远——其他架构变体(RMSNorm,不同残差模式)如何?
+范围感觉略窄。
+
+**实验诚意**: 基线公平,测量扎实。
+
+作者跨多个模型大小和数据集测试,这很好。
+
+一个担忧：功能性声明(尖峰作为隐式参数,汇聚作为注意力调制器)由相关性和消融支持,但非直接因果干预。
+
+如果你手动注入尖峰或移除汇聚会怎样?
+论文止步于那个证明层级。
+
+**写作功力**: 论文结构良好,主叙事清晰。
+
+然而,相关工作部分单薄——它提及先前观察但未深入接触机制可解释性文献。
+
+关于"为何模型学会利用这些生态位"的讨论含糊。
+
+对优化动力学的更深挖掘会显著提升论文。
+
+**判决**: 弱接收 — 扎实的实证工作澄清了重要谜团,但止步于完整机制理解且本可更彻底探索架构变体。
+
+## 要点总结
+
+如果你在构建或优化 Transformer,这里是可偷的东西：
+
+1. **Pre-norm 创造架构生态位**: 如果你看到怪异离群值或注意力模式,检查你的归一化位置。
+
+Pre-norm 更易训练但创造这些副作用。
+
+Post-norm 避免它们但需要更仔细的初始化。
+
+2. **尖峰是隐式参数**: 如果你在做量化或剪枝,不要平等对待所有激活。
+
+少数通道中的那些极端尖峰跨层携带持久信息——它们更像模型参数而非动态激活。
+
+以不同方式量化它们,否则有破坏模型的风险。
+
+3. **汇聚是注意力调制器**: 如果你在分析注意力模式,不要假设高注意力质量意味着语义相关性。
+
+汇聚是结构性的——它们是头想产生近零输出时倾倒注意力的地方。
+
+这对可解释性重要：一个关注首 token 的头可能不是"看上下文",它可能只是在关闭自己。
+
+4. **解耦现象需要架构改变**: 如果你想消除尖峰或汇聚,调整超参数不够。
+
+你需要改变架构(例如切换到 post-norm)。
+
+这是有权衡的设计选择——稳定性 vs 副作用。
+
+:::
