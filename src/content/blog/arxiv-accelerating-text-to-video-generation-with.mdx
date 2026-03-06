@@ -1,0 +1,408 @@
+---
+title:
+  en: "CalibAtt: Making Video Generation 1.6x Faster by Learning Which Attention to Skip"
+  zh: "CalibAtt:通过学习跳过哪些注意力让视频生成快1.6倍"
+description:
+  en: "A training-free method that speeds up text-to-video diffusion models by identifying and skipping redundant attention computations through offline calibration."
+  zh: "一种无需训练的方法,通过离线校准识别并跳过冗余的注意力计算,从而加速文本到视频的扩散模型。"
+date: 2026-03-06
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/accelerating-text-to-video-generation-with/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/accelerating-text-to-video-generation-with/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2603.05503](https://arxiv.org/abs/2603.05503)
+**Authors**: Shai Yehezkel, Shahar Yadin, Noam Elata, Yaron Ostrovsky-Berman, Bahjat Kawar
+**Categories**: cs.CV
+
+## The Gap
+
+Text-to-video diffusion models like Wan 2.1 and Mochi 1 produce stunning results, but they're painfully slow. The bottleneck? Spatiotemporal attention in their transformer backbones, which computes relationships between every token pair across space and time. Prior acceleration methods either require expensive retraining (pruning, distillation) or apply generic sparsity patterns that don't adapt to the specific model and input characteristics. The field has reached a point where we can generate high-quality videos, but waiting minutes for a single clip makes iteration unbearable.
+
+```
+Problem: Video diffusion too slow
+   |
+   v
+Observation: Many attention scores are consistently near-zero
+   |                    across different inputs
+   v
+Assumption: These low-score patterns are predictable
+   |          and can be identified offline
+   v
+Method: CalibAtt - offline calibration finds stable
+   |     sparsity patterns, compile into fast ops
+   v
+Evidence: 1.58x speedup on Wan 2.1 14B, quality preserved
+   |
+   v
+Conclusion: Input-stable sparsity exists and is exploitable
+```
+
+## The Increment
+
+**One sentence**: Before CalibAtt, you either retrained models for speed or applied blind sparsity; after CalibAtt, you run a one-time calibration that learns which attention connections each model actually needs, then skip the rest at inference without quality loss.
+
+### Core Mechanism
+
+CalibAtt has two phases. First, an offline calibration pass runs the model on a small set of diverse prompts and records attention scores at every layer, head, and diffusion timestep. It analyzes these scores at the block level (groups of tokens) rather than individual tokens, identifying which block-to-block connections consistently produce negligible attention weights. It also detects repetition patterns—cases where multiple query blocks attend to the same key blocks with similar patterns, allowing computation reuse.
+
+The calibration compiles these findings into optimized attention kernels for each layer-head-timestep combination. Some connections are marked for dense computation (input-dependent, high-variance scores), others for skipping (consistently low scores), and some for reuse (repetitive patterns). This compilation step is crucial—it translates statistical observations into hardware-efficient operations.
+
+At inference time, CalibAtt loads these precompiled patterns. For each attention operation, it computes only the selected dense connections and skips the rest. The skipping isn't just masking—it's actual computation avoidance through kernel fusion and memory access optimization. The method is training-free; no model weights change.
+
+```
+Offline Calibration:                 Inference:
+                                     
+[Diverse prompts]                    [User prompt]
+       |                                   |
+       v                                   v
++-------------+                      +-------------+
+| Run model   |                      | Load model  |
+| Record all  |                      | + patterns  |
+| attn scores |                      +-------------+
++-------------+                            |
+       |                                   v
+       v                              For each layer:
++-------------+                       +-------------+
+| Analyze at  |                       | Compute     |
+| block level |                       | selected    |
++-------------+                       | connections |
+       |                              | Skip others |
+       v                              +-------------+
++-------------+                            |
+| Find stable |                            v
+| low-score & |                      [Generated video]
+| repetition  |
+| patterns    |
++-------------+
+       |
+       v
++-------------+
+| Compile to  |
+| optimized   |
+| kernels     |
++-------------+
+```
+
+Think of CalibAtt like optimizing a delivery route. Standard attention is like a delivery driver who visits every single address in the city every day, even the ones that never order anything. CalibAtt's calibration phase is like analyzing a month of delivery data to find patterns: "These 20 addresses never order, these 10 always order the same thing on the same day, and these 5 have unpredictable orders." The compilation step creates three route types: skip the never-orderers entirely, batch-deliver to the predictable ones, and visit the unpredictable ones individually. At inference (actual delivery day), the driver follows these optimized routes. The calibration data is the historical orders, the patterns are the route rules, and the compiled kernels are the actual optimized route maps the driver uses.
+
+### Key Concepts
+
+- **Block-level sparsity**: Instead of deciding whether token A should attend to token B (which would require analyzing billions of pairs), CalibAtt groups tokens into blocks and decides whether block A should attend to block B. Imagine you're organizing a conference: instead of tracking every possible one-on-one conversation between 1000 attendees, you organize people into 10 interest groups and decide which groups should have joint sessions. This reduces the decision space from 1M pairs to 100 pairs while capturing the essential interaction structure. In video generation, spatial blocks might be 8x8 pixel patches, and temporal blocks might be 4-frame chunks. If a background sky block consistently doesn't attend to a foreground character block across different videos, that entire block-to-block connection can be skipped.
+
+- **Input-stable patterns**: Not all sparsity is equal. Some attention connections have low scores for one input but high scores for another—these are input-dependent and must be computed. But CalibAtt discovered that many connections have consistently low scores across diverse inputs. These are input-stable. It's like finding that certain ingredient combinations never work in cooking, regardless of the specific recipe. If garlic and chocolate consistently taste bad together across 100 different dishes, you can safely skip trying that combination in dish 101. CalibAtt's calibration identifies these stable patterns by measuring score variance across calibration samples—low mean and low variance means safe to skip.
+
+- **Repetition exploitation**: In transformer attention, different query tokens often compute nearly identical attention patterns over the keys. CalibAtt detects when multiple query blocks produce similar attention distributions and reuses the computation. Concretely, if query blocks Q1, Q2, Q3 all attend to the same key blocks with similar weights, compute the attention for Q1 fully, then copy and slightly adjust for Q2 and Q3 instead of recomputing from scratch. This is like a teacher grading essays: if five students wrote nearly identical answers, you carefully grade the first one, then quickly verify the others match rather than re-reading each word-by-word.
+
+## Framework Shift
+
+```
+Before (standard attention):         After (CalibAtt):
+
+Every layer, every step:             Calibration (once):
+                                     +------------------+
++------------------+                 | Analyze patterns |
+| Compute all      |                 | across samples   |
+| token-to-token   |                 +------------------+
+| attention scores |                          |
++------------------+                          v
+        |                            +------------------+
+        v                            | Compile sparse   |
++------------------+                 | attention ops    |
+| Apply softmax    |                 +------------------+
+| to all scores    |                 
++------------------+                 Inference (fast):
+        |                            +------------------+
+        v                            | Load patterns    |
++------------------+                 +------------------+
+| Weighted sum     |                          |
+| over all values  |                          v
++------------------+                 +------------------+
+                                     | Compute selected |
+(Compute everything,                 | connections only |
+ every time)                         +------------------+
+                                              |
+                                              v
+                                     +------------------+
+                                     | Skip & reuse     |
+                                     | where possible   |
+                                     +------------------+
+                                     
+                                     (Pay once, save forever)
+```
+
+From "compute everything every time" to "learn once what to skip, then skip it forever," the core shift is trading upfront analysis cost for perpetual inference savings.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. Video generation models are genuinely bottlenecked by attention, and the problem will only worsen as models scale. The observation that sparsity patterns are input-stable is non-obvious and valuable. It sits at a sweet spot in the field's trajectory—models are mature enough that acceleration matters, but not so optimized that low-hanging fruit is gone.
+
+**Method maturity**: This is clever insight, not brute force. The key innovation is recognizing that block-level patterns are stable across inputs, which isn't obvious from prior work on dynamic sparsity. However, the method does require offline calibration, which adds deployment friction. A simpler approach might be online adaptation, but that would sacrifice the compilation optimization. The block-level granularity is well-chosen—coarser than token-level (enabling hardware efficiency) but finer than layer-level (preserving flexibility).
+
+**Experimental integrity**: The baselines are fair—they compare against other training-free methods and show results on multiple models (Wan 2.1, Mochi 1) at various resolutions. The 1.58x speedup is end-to-end, not just attention-layer speedup, which is honest. However, I'd want to see more analysis of failure cases. What happens when the calibration set doesn't cover the input distribution well? The paper shows quality metrics (FVD, text alignment) are preserved, but doesn't deeply probe edge cases. The calibration cost isn't thoroughly discussed—how many samples and how long?
+
+**Writing quality**: The paper is clear on the method but light on intuition. The related work section efficiently positions the contribution, but the method section could use more visual aids showing actual sparsity patterns discovered. The ablation studies are solid, but the paper would benefit from a "when does this fail?" section. The experimental setup is well-documented, but the calibration procedure details are scattered.
+
+**Verdict**: weak accept — Solid contribution with practical impact, but needs more analysis of calibration robustness and failure modes.
+
+## Takeaways
+
+The transferable idea here is **input-stable pattern mining for inference optimization**. This applies beyond video generation: any model with repeated computations across diverse inputs can benefit. Specifically:
+
+1. **Block-level analysis over token-level**: When optimizing attention or other pairwise operations, analyze at a coarser granularity than the finest level. This reduces search space and enables hardware-efficient skipping.
+
+2. **Offline calibration as a deployment strategy**: For models where inference cost dominates training cost, spending compute once to analyze patterns can pay off indefinitely. This is especially relevant for foundation models that serve many users.
+
+3. **Variance as a sparsity signal**: Low mean + low variance across diverse inputs = safe to skip. This heuristic works for any operation where you're deciding what to compute.
+
+The specific technique of compiling patterns into optimized kernels per layer/head/timestep is also stealable—it's essentially JIT compilation for neural network inference based on empirical statistics rather than static analysis.
+
+:::
+
+:::zh
+**论文**: [2603.05503](https://arxiv.org/abs/2603.05503)
+**作者**: Shai Yehezkel, Shahar Yadin, Noam Elata, Yaron Ostrovsky-Berman, Bahjat Kawar
+**分类**: cs.CV
+
+## 缺口
+
+文本生成视频的扩散模型(如Wan 2.1和Mochi 1)效果惊艳,但速度慢得让人抓狂。
+
+瓶颈在哪?
+
+时空注意力机制——它要计算每对token在空间和时间上的关系。
+
+之前的加速方法要么需要昂贵的重训练(剪枝、蒸馏),要么套用通用的稀疏模式,不能适应特定模型和输入的特点。
+
+现在我们能生成高质量视频了,但等几分钟才出一个片段,迭代起来简直要命。
+
+```
+问题: 视频扩散模型太慢
+   |
+   v
+观察: 很多注意力分数在不同输入下
+   |  始终接近零
+   v
+假设: 这些低分模式是可预测的
+   |    可以离线识别
+   v
+方法: CalibAtt - 离线校准找到稳定的
+   |   稀疏模式,编译成快速操作
+   v
+证据: 在Wan 2.1 14B上提速1.58倍,质量保持
+   |
+   v
+结论: 输入稳定的稀疏性存在且可利用
+```
+
+## 增量
+
+**一句话**: CalibAtt之前,你要么重训模型换速度,要么盲目套用稀疏性;CalibAtt之后,你跑一次校准就能学到每个模型真正需要哪些注意力连接,然后在推理时跳过其余部分且不损失质量。
+
+### 核心机制
+
+CalibAtt分两个阶段。
+
+第一阶段是离线校准,用一小批多样化的提示词跑模型,记录每一层、每个注意力头、每个扩散时间步的注意力分数。
+
+它在块级别(token组)而非单个token上分析这些分数,识别哪些块到块的连接始终产生可忽略的注意力权重。
+
+它还检测重复模式——多个查询块以相似模式关注相同的键块,这样就能复用计算。
+
+校准过程把这些发现编译成针对每个层-头-时间步组合的优化注意力核函数。
+
+有些连接标记为密集计算(输入相关、高方差分数),有些标记为跳过(始终低分),有些标记为复用(重复模式)。
+
+这个编译步骤很关键——它把统计观察转化为硬件高效的操作。
+
+推理时,CalibAtt加载这些预编译模式。
+
+对每个注意力操作,它只计算选中的密集连接,跳过其余部分。
+
+这个跳过不是简单的掩码——而是通过核函数融合和内存访问优化真正避免计算。
+
+方法无需训练,模型权重不变。
+
+```
+离线校准:                         推理:
+                                     
+[多样化提示词]                    [用户提示词]
+       |                                |
+       v                                v
++-------------+                   +-------------+
+| 运行模型    |                   | 加载模型    |
+| 记录所有    |                   | + 模式      |
+| 注意力分数  |                   +-------------+
++-------------+                         |
+       |                                v
+       v                           对每一层:
++-------------+                    +-------------+
+| 在块级别    |                    | 计算选中的  |
+| 分析        |                    | 连接        |
++-------------+                    | 跳过其他    |
+       |                           +-------------+
+       v                                |
++-------------+                         v
+| 找到稳定的  |                   [生成的视频]
+| 低分和重复  |
+| 模式        |
++-------------+
+       |
+       v
++-------------+
+| 编译成优化  |
+| 核函数      |
++-------------+
+```
+
+把CalibAtt想象成优化送货路线。
+
+标准注意力就像快递员每天都要访问城里的每个地址,即使那些从不下单的地址也要去。
+
+CalibAtt的校准阶段就像分析一个月的送货数据找规律："这20个地址从不下单,这10个总在同一天订同样的东西,这5个订单不可预测。"编译步骤创建三种路线：完全跳过从不下单的,批量送给可预测的,单独访问不可预测的。
+
+推理时(实际送货日),快递员按这些优化路线走。
+
+校准数据是历史订单,模式是路线规则,编译的核函数是快递员实际使用的优化路线图。
+
+### 关键概念
+
+- **块级稀疏性**: CalibAtt不是判断token A是否应该关注token B(这需要分析数十亿对),而是把token分组成块,判断块A是否应该关注块B。
+
+想象你在组织会议：与其追踪1000个参会者之间每一次可能的一对一对话,不如把人分成10个兴趣小组,决定哪些小组应该联合开会。
+
+这把决策空间从100万对减少到100对,同时捕捉到本质的交互结构。
+
+在视频生成中,空间块可能是8x8像素块,时间块可能是4帧块。
+
+如果背景天空块在不同视频中始终不关注前景人物块,那整个块到块的连接就能跳过。
+
+- **输入稳定模式**: 不是所有稀疏性都一样。
+
+有些注意力连接对一个输入分数低,对另一个输入分数高——这些是输入相关的,必须计算。
+
+但CalibAtt发现很多连接在不同输入下分数始终很低。
+
+这些是输入稳定的。
+
+就像发现某些食材组合在烹饪中永远不搭,无论具体菜谱如何。
+
+如果大蒜和巧克力在100道不同菜里始终难吃,你就能放心地在第101道菜里跳过这个组合。
+
+CalibAtt的校准通过测量校准样本间的分数方差来识别这些稳定模式——低均值加低方差意味着可以安全跳过。
+
+- **重复利用**: 在transformer注意力中,不同的查询token常常计算出几乎相同的注意力模式。
+
+CalibAtt检测多个查询块何时产生相似的注意力分布,然后复用计算。
+
+具体来说,如果查询块Q1、Q2、Q3都以相似权重关注相同的键块,就完整计算Q1的注意力,然后复制并稍微调整给Q2和Q3,而不是从头重算。
+
+这就像老师批改作文：如果五个学生写了几乎相同的答案,你仔细批改第一份,然后快速验证其他份是否匹配,而不是逐字重读每一份。
+
+## 框架转变
+
+```
+之前(标准注意力):                之后(CalibAtt):
+
+每一层,每一步:                   校准(一次性):
+                                 +------------------+
++------------------+              | 跨样本分析模式   |
+| 计算所有         |              +------------------+
+| token到token的   |                       |
+| 注意力分数       |                       v
++------------------+              +------------------+
+        |                         | 编译稀疏         |
+        v                         | 注意力操作       |
++------------------+              +------------------+
+| 对所有分数       |              
+| 应用softmax      |              推理(快速):
++------------------+              +------------------+
+        |                         | 加载模式         |
+        v                         +------------------+
++------------------+                       |
+| 对所有值         |                       v
+| 加权求和         |              +------------------+
++------------------+              | 只计算选中的     |
+                                  | 连接             |
+(每次都计算所有)                  +------------------+
+                                           |
+                                           v
+                                  +------------------+
+                                  | 在可能的地方     |
+                                  | 跳过和复用       |
+                                  +------------------+
+                                  
+                                  (付费一次,永久节省)
+```
+
+从"每次都计算所有"到"学一次该跳过什么,然后永远跳过",核心转变是用前期分析成本换取永久的推理节省。
+
+## 专家评审
+
+**选题眼光**: 这是真缺口。
+
+视频生成模型确实被注意力卡住了,随着模型规模扩大问题只会更严重。
+
+稀疏模式输入稳定这个观察不明显且有价值。
+
+它处在领域发展轨迹的甜蜜点——模型足够成熟所以加速很重要,但还没优化到低垂果实都没了。
+
+**方法成熟度**: 这是巧劲,不是蛮力。
+
+关键创新是认识到块级模式在输入间是稳定的,这从之前关于动态稀疏性的工作中看不出来。
+
+但方法确实需要离线校准,这增加了部署摩擦。
+
+更简单的方法可能是在线自适应,但那会牺牲编译优化。
+
+块级粒度选得好——比token级粗(实现硬件效率)但比层级细(保留灵活性)。
+
+**实验诚意**: 基线公平——他们和其他无训练方法比较,在多个模型(Wan 2.1、Mochi 1)和不同分辨率上展示结果。
+
+1.58倍加速是端到端的,不只是注意力层加速,这很诚实。
+
+但我想看更多失败案例分析。
+
+当校准集覆盖不好输入分布时会怎样?
+
+论文展示了质量指标(FVD、文本对齐)保持不变,但没有深入探究边缘情况。
+
+校准成本讨论不够——需要多少样本、多长时间?
+
+**写作功力**: 论文方法讲得清楚但直觉不足。
+
+相关工作部分高效地定位了贡献,但方法部分可以用更多视觉辅助展示实际发现的稀疏模式。
+
+消融研究扎实,但论文会受益于一个"什么时候会失败?"的章节。
+
+实验设置文档完善,但校准过程细节比较分散。
+
+**判决**: 弱接收 — 扎实的贡献有实际影响,但需要更多关于校准鲁棒性和失败模式的分析。
+
+## 要点总结
+
+这里可迁移的想法是**为推理优化挖掘输入稳定模式**。
+
+这超越了视频生成：任何在不同输入间有重复计算的模型都能受益。
+
+具体来说：
+
+1. **块级分析优于token级**: 优化注意力或其他成对操作时,在比最细粒度更粗的层次上分析。
+
+这减少搜索空间并实现硬件高效的跳过。
+
+2. **离线校准作为部署策略**: 对于推理成本主导训练成本的模型,花一次计算分析模式可以无限期回本。
+
+这对服务很多用户的基础模型尤其相关。
+
+3. **方差作为稀疏性信号**: 低均值+跨不同输入的低方差=可以安全跳过。
+
+这个启发式适用于任何你要决定计算什么的操作。
+
+把模式编译成每层/每头/每时间步的优化核函数这个具体技术也能偷——它本质上是基于经验统计而非静态分析的神经网络推理JIT编译。
+
+:::

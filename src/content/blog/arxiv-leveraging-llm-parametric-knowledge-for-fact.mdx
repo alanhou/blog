@@ -1,0 +1,404 @@
+---
+title:
+  en: "Fact-Checking Without Retrieval: Tapping Into What LLMs Already Know"
+  zh: "无需检索的事实核查:挖掘大模型的内在知识"
+description:
+  en: "This paper challenges the retrieval-first paradigm in fact-checking by showing LLMs can verify claims using their internal representations, introducing INTRA method that achieves SOTA through representation interactions."
+  zh: "本文挑战事实核查中检索优先的范式,证明大模型可用内部表征验证声明,提出INTRA方法通过表征交互达到最优性能。"
+date: 2026-03-06
+tags: ["arxiv", "ai", "cs.cl", "cs.ai"]
+image: "/arxiv-visuals/leveraging-llm-parametric-knowledge-for-fact/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/leveraging-llm-parametric-knowledge-for-fact/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2603.05471](https://arxiv.org/abs/2603.05471)
+**Authors**: Artem Vazhentsev, Maria Marina, Daniil Moskovskiy, Sergey Pletenev, Mikhail Seleznyov, Mikhail Salnikov, Elena Tutubalina, Vasily Konovalov, Irina Nikishina, Alexander Panchenko
+**Categories**: cs.CL, cs.AI
+
+## The Gap
+
+Current fact-checking systems follow a two-stage pipeline: retrieve external evidence from Wikipedia or the web, then use an LLM to verify if the claim matches the evidence. This approach inherits all the failure modes of retrieval — missing documents, outdated indexes, query-document mismatch — while ignoring that the LLM already encoded vast factual knowledge during pretraining. RAG-based methods like FactScore and FActScore treat the model as a dumb verifier that can't reason without external crutches, even though these same models can answer trivia questions and explain complex concepts from memory.
+
+The boundary being pushed: can we fact-check claims using only what's already inside the model's parameters, without touching external databases?
+
+```
+Problem: Retrieval bottleneck in fact-checking
+   |
+   v
+Assumption: LLMs encode verifiable knowledge in internal representations
+   |
+   v
+Method: Probe hidden states instead of output logits
+   |
+   v
+Evidence: 9 datasets, representation-based > logit-based
+   |
+   v
+Conclusion: Retrieval-free fact-checking is viable and generalizes better
+```
+
+## The Increment
+
+**One sentence**: Before this paper, fact-checking meant "retrieve then verify"; after, we can verify directly from model internals, faster and more robust to distribution shift.
+
+### Core Mechanism
+
+INTRA (INTernal Representation Analysis) works by treating the LLM as a black box with observable internal states. When you feed a claim like "Paris is the capital of Germany" into the model, each transformer layer produces a hidden representation — a vector encoding what the model "thinks" at that processing stage. Instead of waiting for the final output token probabilities (which are optimized for generation, not verification), INTRA trains lightweight classifiers on these intermediate representations.
+
+The key insight: different layers encode different types of knowledge. Early layers capture surface patterns, middle layers encode semantic relationships, and late layers prepare for generation. By extracting representations from multiple layers and training a probe to classify "true" vs "false" based on these vectors, INTRA learns to read the model's internal "confidence" about factual claims. The method also introduces interaction terms — it doesn't just look at layer 12 and layer 24 separately, but computes how they relate (via element-wise products), capturing whether different reasoning stages agree or conflict.
+
+The architecture has three components: (1) a frozen LLM that processes claims, (2) representation extractors that pull hidden states from selected layers, and (3) a trainable classifier head (logistic regression or shallow MLP) that maps these representations to verification decisions. Crucially, the LLM weights never update — you're just learning to interpret what's already there.
+
+```
+Claim: "Paris is capital of Germany"
+   |
+   v
++---------------------------+
+|   Frozen LLM (e.g. Llama) |
+|                           |
+|  Layer 8:  [h_8 vector]   |---+
+|  Layer 16: [h_16 vector]  |---+---> Representation
+|  Layer 24: [h_24 vector]  |---+     Extractor
++---------------------------+       |
+                                    v
+                            +----------------+
+                            | Interactions:  |
+                            | h_8 * h_16     |
+                            | h_16 * h_24    |
+                            | Concatenate    |
+                            +----------------+
+                                    |
+                                    v
+                            +----------------+
+                            | Classifier     |
+                            | (LogReg/MLP)   |
+                            +----------------+
+                                    |
+                                    v
+                              [FALSE: 0.92]
+```
+
+Think of INTRA like reading someone's facial expressions instead of waiting for them to speak. When you ask a friend "Is Paris in Germany?", you don't need to hear their answer — you can see the confusion or certainty in their face immediately. The LLM's hidden layers are like micro-expressions at different moments: the initial reaction (early layers), the processing of implications (middle layers), and the preparation to respond (late layers). INTRA trains a "facial expression reader" that looks at these micro-expressions across multiple moments and learns patterns like "when layer 12 shows high activation in dimension 847 AND layer 20 shows low activation in dimension 1203, the model knows this claim is false." The interaction terms capture whether the expressions are consistent — if early layers look confident but late layers look uncertain, that's a red flag.
+
+### Key Concepts
+
+- **Parametric knowledge vs retrieval-augmented knowledge**: Imagine you're taking a test. Parametric knowledge is what you memorized and can recall from your brain. Retrieval-augmented knowledge is when you're allowed to use your textbook during the test. Current fact-checking systems always open the textbook (retrieve from Wikipedia), even for questions you already know. This paper asks: what if we just test what you memorized first? The LLM's parameters (billions of numbers learned during training) encode facts like "Paris is France's capital" implicitly. You don't need to retrieve a Wikipedia article about Paris if the model already "knows" this from seeing it thousands of times during pretraining. The trade-off: parametric knowledge can be outdated (training data has a cutoff date) and might hallucinate, but it's instant and doesn't fail when retrieval breaks.
+
+- **Hidden representations vs output logits**: When an LLM generates text, the final step is converting a hidden vector into probabilities over vocabulary tokens (logits). Most fact-checking methods look at these logits — does the model assign high probability to "true" or "false"? But logits are optimized for fluent generation, not truthfulness. Hidden representations are the intermediate vectors inside the model before this final conversion. Think of it like this: logits are what someone says out loud, but hidden representations are their internal thoughts before speaking. A person might confidently say something false (high logit for wrong answer) while their internal reasoning is confused (messy hidden representation). By probing hidden states, you access the "thinking process" rather than just the polished output. This paper shows that hidden representations are more reliable signals for fact verification.
+
+- **Interaction between layers**: Neural networks process information hierarchically — early layers detect simple patterns, later layers combine them into complex concepts. In fact-checking, layer 5 might encode "Paris is a city", layer 15 might encode "Germany is a country", and layer 25 might encode "capitals are in their respective countries". The interaction term (element-wise multiplication of layer 5 and layer 15 representations) captures whether these two pieces of knowledge are being activated together consistently. If the model activates "Paris" neurons and "Germany" neurons simultaneously but NOT the "capital-of" relationship neurons, the interaction term will show this mismatch. It's like checking if different parts of your brain agree — if your visual cortex sees a cat but your language center is preparing to say "dog", the interaction reveals the inconsistency.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+Claim                                Claim
+  |                                    |
+  v                                    v
++-------------+                      +-------------+
+| Retrieval   |                      |   LLM       |
+| System      |                      | (frozen)    |
++-------------+                      +-------------+
+  |                                    |
+  v                                    v
+Evidence docs                        Hidden states
+  |                                  (h_8, h_16, h_24...)
+  v                                    |
++-------------+                        v
+| LLM reads   |                      +-------------+
+| evidence    |                      | Probe       |
+| and judges  |                      | classifier  |
++-------------+                      +-------------+
+  |                                    |
+  v                                    v
+Verdict                              Verdict
+
+External dependency                  Self-contained
+Fails if retrieval fails             Always available
+Slow (retrieve + verify)             Fast (one forward pass)
+```
+
+From "trust but verify externally" to "trust the model's internal knowledge", the core shift is treating the LLM as a knowledge base itself rather than just a reasoning engine that needs external facts.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap, not manufactured. The field has been so focused on RAG that we've ignored the elephant in the room — these models already know a lot. The timing is right: as LLMs get larger and more capable, their parametric knowledge becomes more reliable, making retrieval-free approaches viable. It sits at an interesting inflection point where model scale meets practical deployment constraints (retrieval is expensive and fragile).
+
+**Method maturity**: INTRA is more clever insight than brute force. The interaction terms are elegant — they add minimal parameters but capture non-linear relationships between layers. However, I'm skeptical about one thing: the paper doesn't deeply explore which layers matter most or why. The method feels like "try all layer combinations and see what works", which is fine for a first paper but leaves theoretical understanding thin. A simpler approach might be: just use the last layer representation with a better probe architecture. The authors don't convincingly rule this out.
+
+**Experimental integrity**: The baselines are fair and comprehensive — 18 methods is thorough. The generalization tests (long-tail knowledge, multilingual, different claim sources) are exactly what you'd want to see. One red flag: the paper doesn't report computational costs clearly. How much does training the probe cost? How does inference speed compare to retrieval-based methods? These numbers matter for practical adoption. Also, the datasets are mostly short factoid claims. What happens with complex, multi-hop reasoning claims? The paper hints at this with "long-form generation" but doesn't stress-test it enough.
+
+**Writing quality**: The abstract and intro are strong, but the method section is dense and could use more intuition-building before diving into formulas. The related work section is thorough but reads like a literature dump — it would benefit from a clear taxonomy of approaches rather than a chronological list. If I were rewriting one section, it'd be the results: the tables are overwhelming with too many numbers. A clearer narrative about which findings matter most would elevate the whole paper.
+
+**Verdict**: Weak accept — solid contribution that opens a new research direction, but the method feels somewhat incremental (probing isn't new, the innovation is applying it systematically to fact-checking) and the evaluation could be more rigorous on computational costs and complex reasoning.
+
+## Takeaways
+
+For practitioners, here's what's immediately useful:
+
+1. **Probe hidden states, not just logits**: If you're building any kind of truthfulness detector or quality filter for LLM outputs, don't just look at output probabilities. Extract hidden representations from multiple layers and train a lightweight classifier. This transfers beyond fact-checking — it works for detecting hallucinations, measuring uncertainty, or filtering low-quality generations.
+
+2. **Interaction terms are cheap and effective**: Element-wise multiplication of representations from different layers adds almost no parameters but captures non-linear relationships. This trick applies anywhere you have hierarchical features — not just LLMs, but any deep network where you want to check if different processing stages agree.
+
+3. **Retrieval-free as a first-pass filter**: You don't have to choose between retrieval and parametric knowledge. Use INTRA-style methods as a fast first pass: if the model's internal representations show high confidence, skip retrieval. Only retrieve for uncertain cases. This hybrid approach could dramatically reduce retrieval costs in production systems.
+
+4. **Generalization matters more than in-distribution performance**: The paper's emphasis on testing across different claim sources, languages, and knowledge distributions is a template for how to evaluate any ML system meant for real-world deployment. Don't just report accuracy on your test set — show robustness to distribution shift.
+
+The core transferable idea: when you have a pretrained model, its internal states often contain richer signals than its outputs. Learn to read those signals.
+:::
+
+:::zh
+**论文**: [2603.05471](https://arxiv.org/abs/2603.05471)
+**作者**: Artem Vazhentsev, Maria Marina, Daniil Moskovskiy, Sergey Pletenev, Mikhail Seleznyov, Mikhail Salnikov, Elena Tutubalina, Vasily Konovalov, Irina Nikishina, Alexander Panchenko
+**分类**: cs.CL, cs.AI
+
+## 缺口
+
+当前的事实核查系统遵循两阶段流程：先从维基百科或网络检索外部证据,再用大模型验证声明是否与证据匹配。
+
+这种方法继承了检索的所有失效模式——文档缺失、索引过时、查询与文档不匹配——同时忽略了大模型在预训练期间已经编码了大量事实知识。
+
+基于RAG的方法如FactScore把模型当作没有外部支撑就无法推理的愚蠢验证器,尽管这些模型能从记忆中回答冷知识问题和解释复杂概念。
+
+正在突破的边界：我们能否仅用模型参数内部已有的知识来核查声明,而不触碰外部数据库?
+
+```
+问题: 事实核查中的检索瓶颈
+   |
+   v
+假设: 大模型在内部表征中编码了可验证的知识
+   |
+   v
+方法: 探测隐藏状态而非输出logits
+   |
+   v
+证据: 9个数据集,基于表征 > 基于logits
+   |
+   v
+结论: 无检索事实核查可行且泛化更好
+```
+
+## 增量
+
+**一句话**: 这篇论文之前,事实核查意味着"检索后验证";之后,我们可以直接从模型内部验证,更快且对分布偏移更鲁棒。
+
+### 核心机制
+
+INTRA(内部表征分析)的工作方式是把大模型当作一个可观察内部状态的黑盒。
+
+当你向模型输入"巴黎是德国首都"这样的声明时,每个transformer层都会产生一个隐藏表征——一个向量,编码了模型在该处理阶段的"想法"。
+
+INTRA不等待最终的输出token概率(这些概率是为生成优化的,不是为验证),而是在这些中间表征上训练轻量级分类器。
+
+关键洞察：不同层编码不同类型的知识。
+
+早期层捕获表面模式,中间层编码语义关系,后期层为生成做准备。
+
+通过从多个层提取表征并训练探针根据这些向量分类"真"与"假",INTRA学会读取模型对事实声明的内部"置信度"。
+
+该方法还引入交互项——它不只是单独看第12层和第24层,而是计算它们如何关联(通过逐元素乘积),捕获不同推理阶段是否一致或冲突。
+
+架构有三个组件：(1)处理声明的冻结大模型,(2)从选定层提取隐藏状态的表征提取器,(3)将这些表征映射到验证决策的可训练分类器头(逻辑回归或浅层MLP)。
+
+关键是,大模型权重从不更新——你只是在学习解读已经存在的东西。
+
+```
+声明: "巴黎是德国首都"
+   |
+   v
++---------------------------+
+|   冻结的大模型(如Llama)    |
+|                           |
+|  第8层:  [h_8向量]         |---+
+|  第16层: [h_16向量]        |---+---> 表征
+|  第24层: [h_24向量]        |---+     提取器
++---------------------------+       |
+                                    v
+                            +----------------+
+                            | 交互项:        |
+                            | h_8 * h_16     |
+                            | h_16 * h_24    |
+                            | 拼接           |
+                            +----------------+
+                                    |
+                                    v
+                            +----------------+
+                            | 分类器         |
+                            | (LogReg/MLP)   |
+                            +----------------+
+                                    |
+                                    v
+                              [假: 0.92]
+```
+
+把INTRA想象成读取某人的面部表情而不是等他们开口说话。
+
+当你问朋友"巴黎在德国吗?",你不需要听他们的答案——你能立即从他们脸上看到困惑或确定。
+
+大模型的隐藏层就像不同时刻的微表情：初始反应(早期层)、对含义的处理(中间层)、准备回应(后期层)。
+
+INTRA训练一个"面部表情阅读器",观察这些跨多个时刻的微表情,学习这样的模式："当第12层在维度847显示高激活且第20层在维度1203显示低激活时,模型知道这个声明是假的。"
+
+交互项捕获表情是否一致——如果早期层看起来自信但后期层看起来不确定,那就是个危险信号。
+
+### 关键概念
+
+- **参数化知识 vs 检索增强知识**: 想象你在考试。
+
+参数化知识是你记住并能从大脑回忆的东西。
+
+检索增强知识是考试时允许你使用教科书。
+
+当前的事实核查系统总是打开教科书(从维基百科检索),即使是你已经知道的问题。
+
+本文问：如果我们先测试你记住的东西呢?
+
+大模型的参数(训练期间学到的数十亿个数字)隐式编码了"巴黎是法国首都"这样的事实。
+
+如果模型在预训练期间看过数千次,你不需要检索关于巴黎的维基百科文章。
+
+权衡：参数化知识可能过时(训练数据有截止日期)且可能产生幻觉,但它是即时的,不会在检索失败时崩溃。
+
+- **隐藏表征 vs 输出logits**: 当大模型生成文本时,最后一步是将隐藏向量转换为词汇表token的概率(logits)。
+
+大多数事实核查方法看这些logits——模型是否为"真"或"假"分配高概率?
+
+但logits是为流畅生成优化的,不是为真实性。
+
+隐藏表征是模型内部在最终转换之前的中间向量。
+
+想象一下：logits是某人大声说的话,但隐藏表征是他们说话前的内部想法。
+
+一个人可能自信地说出错误的东西(错误答案的高logit),而他们的内部推理是混乱的(混乱的隐藏表征)。
+
+通过探测隐藏状态,你访问的是"思考过程"而不仅仅是润色后的输出。
+
+本文表明隐藏表征是事实验证更可靠的信号。
+
+- **层间交互**: 神经网络分层处理信息——早期层检测简单模式,后期层将它们组合成复杂概念。
+
+在事实核查中,第5层可能编码"巴黎是一个城市",第15层可能编码"德国是一个国家",第25层可能编码"首都在各自国家内"。
+
+交互项(第5层和第15层表征的逐元素乘法)捕获这两条知识是否被一致地激活。
+
+如果模型同时激活"巴黎"神经元和"德国"神经元,但没有激活"首都关系"神经元,交互项会显示这种不匹配。
+
+这就像检查你大脑的不同部分是否一致——如果你的视觉皮层看到一只猫,但你的语言中枢准备说"狗",交互揭示了这种不一致。
+
+## 框架转变
+
+```
+之前(主流方法):                  之后(本文方法):
+
+声明                              声明
+  |                                 |
+  v                                 v
++-------------+                   +-------------+
+| 检索系统    |                   |   大模型    |
+|             |                   | (冻结)      |
++-------------+                   +-------------+
+  |                                 |
+  v                                 v
+证据文档                          隐藏状态
+  |                               (h_8, h_16, h_24...)
+  v                                 |
++-------------+                     v
+| 大模型读取  |                   +-------------+
+| 证据并判断  |                   | 探针分类器  |
++-------------+                   +-------------+
+  |                                 |
+  v                                 v
+判决                              判决
+
+外部依赖                          自包含
+检索失败则失败                    始终可用
+慢(检索+验证)                     快(一次前向传播)
+```
+
+从"信任但外部验证"到"信任模型的内部知识",核心转变是把大模型当作知识库本身,而不仅仅是需要外部事实的推理引擎。
+
+## 专家评审
+
+**选题眼光**: 这是真缺口,不是人造的。
+
+该领域如此专注于RAG,以至于我们忽略了房间里的大象——这些模型已经知道很多。
+
+时机恰当：随着大模型变得更大更强,它们的参数化知识变得更可靠,使无检索方法可行。
+
+它处于一个有趣的拐点,模型规模遇上实际部署约束(检索昂贵且脆弱)。
+
+**方法成熟度**: INTRA更多是巧妙洞察而非蛮力。
+
+交互项很优雅——它们增加最少的参数但捕获层间的非线性关系。
+
+然而,我对一件事持怀疑态度：论文没有深入探索哪些层最重要或为什么。
+
+该方法感觉像"尝试所有层组合看什么有效",这对第一篇论文来说没问题,但理论理解薄弱。
+
+一个更简单的方法可能是：只用最后一层表征配合更好的探针架构。
+
+作者没有令人信服地排除这一点。
+
+**实验诚意**: 基线公平且全面——18种方法很彻底。
+
+泛化测试(长尾知识、多语言、不同声明来源)正是你想看到的。
+
+一个危险信号：论文没有清楚报告计算成本。
+
+训练探针的成本是多少?
+
+推理速度与基于检索的方法相比如何?
+
+这些数字对实际采用很重要。
+
+此外,数据集大多是短事实声明。
+
+复杂的多跳推理声明会怎样?
+
+论文用"长形式生成"暗示了这一点,但没有充分压力测试。
+
+**写作功力**: 摘要和引言很强,但方法部分密集,在深入公式之前可以多建立直觉。
+
+相关工作部分很彻底,但读起来像文献堆砌——如果有清晰的方法分类而不是按时间顺序列表会更好。
+
+如果我重写一个部分,会是结果：表格数字太多令人不知所措。
+
+关于哪些发现最重要的更清晰叙述会提升整篇论文。
+
+**判决**: 弱接收——开辟新研究方向的扎实贡献,但方法感觉有些增量(探测不是新的,创新是系统地应用于事实核查),评估在计算成本和复杂推理上可以更严格。
+
+## 要点总结
+
+对实践者来说,这些是立即有用的：
+
+1. **探测隐藏状态,不只是logits**: 如果你在构建任何类型的大模型输出真实性检测器或质量过滤器,不要只看输出概率。
+
+从多个层提取隐藏表征并训练轻量级分类器。
+
+这超越事实核查——它适用于检测幻觉、测量不确定性或过滤低质量生成。
+
+2. **交互项便宜且有效**: 不同层表征的逐元素乘法几乎不增加参数但捕获非线性关系。
+
+这个技巧适用于任何有分层特征的地方——不只是大模型,而是任何你想检查不同处理阶段是否一致的深度网络。
+
+3. **无检索作为第一遍过滤器**: 你不必在检索和参数化知识之间选择。
+
+使用INTRA风格的方法作为快速第一遍：如果模型的内部表征显示高置信度,跳过检索。
+
+只对不确定的情况检索。
+
+这种混合方法可以大幅降低生产系统中的检索成本。
+
+4. **泛化比分布内性能更重要**: 论文强调跨不同声明来源、语言和知识分布测试,是如何评估任何用于现实世界部署的机器学习系统的模板。
+
+不要只报告测试集上的准确率——展示对分布偏移的鲁棒性。
+
+核心可迁移思想：当你有预训练模型时,其内部状态通常包含比输出更丰富的信号。
+
+学会读取这些信号。
+:::
