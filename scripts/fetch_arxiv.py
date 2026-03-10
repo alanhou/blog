@@ -417,7 +417,9 @@ CRITICAL CONSTRAINTS:
 - Expert assessment: Be honest and calibrated, not uniformly positive
 - Tone: Like explaining to a colleague over coffee, not writing a review
 - Chinese content: Parallel composition, NOT translation
-- Output ONLY the complete MDX file, nothing else"""
+- Output ONLY the complete MDX file, nothing else
+- DO NOT include <thinking> tags or any other XML tags in your output
+- Start your response directly with the --- frontmatter delimiter"""
 
     content = call_llm(
         client, model, provider,
@@ -428,6 +430,9 @@ CRITICAL CONSTRAINTS:
     if not content:
         print(f"Warning: LLM returned empty response for post generation ({paper['id']})")
         return None
+
+    # Strip thinking tags if present
+    content = strip_thinking_tags(content)
     return content.strip()
 
 
@@ -555,6 +560,18 @@ def extract_code_block(text: str) -> str:
             lines = lines[1:]
         text = "\n".join(lines)
     return text.strip()
+
+
+def strip_thinking_tags(text: str) -> str:
+    """Remove <thinking>...</thinking> tags from LLM output."""
+    text = text.strip()
+    # Remove thinking tags at the beginning
+    if text.startswith("<thinking>"):
+        end_tag = "</thinking>"
+        end_idx = text.find(end_tag)
+        if end_idx != -1:
+            text = text[end_idx + len(end_tag):].strip()
+    return text
 
 
 def extract_title_zh(mdx_content: str) -> str:

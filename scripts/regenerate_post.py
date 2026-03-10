@@ -8,7 +8,7 @@ import requests
 from fetch_arxiv import (
     get_llm_client, generate_blog_post, generate_paper_visuals,
     slugify, sanitize_mdx, extract_title_zh, patch_frontmatter_image,
-    insert_after_frontmatter, BLOG_DIR, ARXIV_API_URL
+    insert_after_frontmatter, strip_thinking_tags, BLOG_DIR, ARXIV_API_URL
 )
 
 client, model, provider = get_llm_client()
