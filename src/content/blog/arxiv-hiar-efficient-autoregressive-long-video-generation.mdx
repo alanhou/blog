@@ -1,0 +1,362 @@
+---
+title:
+  en: "HiAR: Reversing the Order of Video Generation to Fix Error Accumulation"
+  zh: "HiAR：反转视频生成顺序以解决误差累积问题"
+description:
+  en: "A hierarchical autoregressive diffusion framework that generates long videos by denoising all blocks simultaneously at each step, conditioning on same-noise-level context to prevent quality degradation."
+  zh: "一种分层自回归扩散框架，通过在每个去噪步骤同时处理所有视频块，并基于相同噪声水平的上下文进行条件化，从而防止长视频生成中的质量退化。"
+date: 2026-03-10
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/hiar-efficient-autoregressive-long-video-generation/HeroScene.png"
+---
+
+![Concept animation](/arxiv-visuals/hiar-efficient-autoregressive-long-video-generation/ConceptScene.gif)
+
+
+
+![Hero diagram](/arxiv-visuals/hiar-efficient-autoregressive-long-video-generation/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2603.08703](https://arxiv.org/abs/2603.08703)
+**Authors**: Kai Zou, Dian Zheng, Hongbo Liu, Tiankai Hang, Bin Liu, Nenghai Yu
+**Categories**: cs.CV
+
+## The Gap
+
+Autoregressive diffusion models can theoretically generate infinite-length videos by producing one block at a time, conditioning on previous blocks. The problem: existing methods fully denoise each block before moving to the next. This creates a vicious cycle—clean context carries prediction errors with high certainty, which compounds across blocks, causing progressive quality degradation (temporal drift). Prior work (VideoPoet, Tora, etc.) tries to maintain continuity by conditioning on highly denoised contexts, but this actually makes error propagation worse because mistakes are baked in with full confidence.
+
+The core tension: you need temporal continuity (requires conditioning on previous blocks) but you also need to prevent error accumulation (which conditioning on clean blocks exacerbates).
+
+```
+Problem: AR video generation with clean context
+    |
+    v
+Observation: Bidirectional diffusion maintains coherence 
+             at shared noise levels
+    |
+    v
+Hypothesis: Same-noise-level conditioning provides 
+            sufficient signal without error propagation
+    |
+    v
+Method: Hierarchical denoising across all blocks 
+        simultaneously at each step
+    |
+    v
+Evidence: Best VBench score, lowest temporal drift,
+          1.8x speedup with pipeline parallelism
+    |
+    v
+Conclusion: Reversing generation order (denoise-then-generate
+            → generate-then-denoise) solves AR degradation
+```
+
+## The Increment
+
+**One sentence**: Before HiAR, autoregressive video generation meant completing each block fully before starting the next; after HiAR, all blocks are generated simultaneously at each denoising level, conditioning on equally-noisy context.
+
+### Core Mechanism
+
+HiAR inverts the conventional generation order. Instead of: denoise block 1 completely → denoise block 2 completely → denoise block 3 completely, it does: denoise all blocks one step → denoise all blocks another step → repeat. At each denoising timestep t, every block conditions on the previous block at the same noise level t, not at a fully clean state.
+
+The architecture has three key components: (1) a causal attention mechanism that lets each block attend to previous blocks at the current noise level, (2) a hierarchical denoising schedule that processes all blocks in parallel at each step, and (3) a forward-KL regularizer during distillation that prevents the model from collapsing into low-motion outputs.
+
+Data flows like this: at timestep t, block i receives noisy input at level t and attends to block i-1 also at noise level t. The model predicts the denoising direction for all blocks simultaneously. As t decreases (noise reduces), all blocks gradually become cleaner together, maintaining temporal coherence because they're always conditioned on context at matching noise levels.
+
+```
+Conventional AR:
+Block 1: [noise=100] -> [noise=0] DONE
+                                    |
+Block 2:              [noise=100] -+-> [noise=0] DONE
+                                                   |
+Block 3:                            [noise=100] --+-> [noise=0]
+
+HiAR (Hierarchical):
+Step t=100: [Block1:100] -> [Block2:100] -> [Block3:100]
+              |               |               |
+Step t=75:  [Block1:75]  -> [Block2:75]  -> [Block3:75]
+              |               |               |
+Step t=50:  [Block1:50]  -> [Block2:50]  -> [Block3:50]
+              |               |               |
+Step t=0:   [Block1:0]   -> [Block2:0]   -> [Block3:0]
+            (arrows show causal conditioning at same noise level)
+```
+
+Think of it like developing photographs in a darkroom. The old way: you fully develop photo 1, then use it as reference to develop photo 2, then use photo 2 to develop photo 3. Any mistake in photo 1 gets copied with full confidence into photo 2, then amplified into photo 3. HiAR's way: you develop all photos simultaneously, gradually increasing exposure. At each exposure level, photo 2 looks at the partially-developed photo 1 (at the same exposure level). Mistakes in photo 1 are still fuzzy and uncertain, so they don't propagate with full force. By the time everything is fully developed, the errors have been smoothed out across the gradual process rather than locked in early.
+
+### Key Concepts
+
+- **Same-noise-level conditioning**: In diffusion models, noise level represents uncertainty. When block 2 conditions on block 1 at noise level 100, it's saying "here's a rough sketch of what came before." When it conditions on block 1 at noise level 0 (fully clean), it's saying "this is exactly what came before, trust it completely." The insight: rough sketches provide enough signal for temporal continuity but don't force the model to trust and propagate errors. Imagine writing a story chapter-by-chapter. If you edit chapter 1 to perfection before writing chapter 2, any plot holes in chapter 1 become canon. If you draft all chapters roughly first, then refine them together, you can fix inconsistencies across the whole story.
+
+- **Hierarchical denoising**: Instead of a flat sequence (denoise A, denoise B, denoise C), you have nested loops: outer loop over noise levels, inner loop over blocks. This creates a hierarchy where the coarse structure (high noise) is established across all blocks first, then fine details (low noise) are filled in. It's like sculpting: you rough out the entire figure before adding facial details, rather than completing the head perfectly before touching the torso.
+
+- **Forward-KL regularization**: During distillation (compressing many denoising steps into fewer steps), the standard reverse-KL objective has a mode-seeking behavior—it prefers to generate one safe, low-motion output rather than risk diverse motions. Forward-KL is mode-covering—it penalizes the model for missing any mode of the true distribution. The paper uses forward-KL in bidirectional attention mode (where future context is visible) to teach the model about motion diversity, then switches to causal mode (no future context) for actual inference. It's like learning to drive: you practice with an instructor who can see ahead (bidirectional), but you drive alone (causal) after training.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+Autoregressive Generation:           Hierarchical Generation:
+
+t=T  [###] clean                     t=T  [~~~] [~~~] [~~~]
+      |                                    \  |  /
+t=0  [~~~] noisy                     t=T/2 [::] [::] [::] 
+      |                                     \  |  /
+      v                                t=0  [###][###][###]
+t=T  [###] clean                           (all blocks denoise
+      |                                     together at each
+t=0  [~~~] noisy                            noise level)
+      |
+      v
+t=T  [###] clean
+      |
+t=0  [~~~] noisy
+
+(sequential: finish                  (parallel: all blocks
+ each block before                    progress together,
+ starting next)                       condition on same-
+                                      noise-level context)
+```
+
+From sequential completion to parallel progression, the core shift is conditioning on uncertainty rather than certainty.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. Error accumulation in autoregressive generation is well-documented (not just in video—language models face it too). The paper correctly identifies that the standard solution (condition on clean context) actually worsens the problem. The insight about same-noise-level conditioning is borrowed from bidirectional diffusion but applied cleverly to the AR setting. It sits at the intersection of two active areas: long-form generation and diffusion model efficiency.
+
+**Method maturity**: The core idea is elegant—reverse the loop order. But the execution has some brute force elements. The forward-KL regularizer feels like a patch for a symptom (low-motion collapse during distillation) rather than addressing the root cause. Why does distillation amplify this shortcut? The paper doesn't dig deep. Also, the method requires training from scratch with the hierarchical structure; it's not clear if existing AR diffusion models could be adapted. The pipeline parallelism speedup is nice but not groundbreaking (1.8x for 4 steps).
+
+**Experimental integrity**: Baselines are reasonable (Tora, Pyramid Flow, etc.). VBench is a comprehensive benchmark. The temporal drift metric directly measures the problem they claim to solve, which is good. However, the paper doesn't show failure cases or discuss when HiAR might struggle. The distillation experiments are somewhat isolated—would be stronger to show the forward-KL trick works across different distillation methods. The ablations are thorough but mostly confirm expected results.
+
+**Writing quality**: The abstract and introduction are clear. The method section gets dense quickly—Figure 2 tries to show everything at once and ends up confusing. The bidirectional diffusion motivation (Section 3.1) could be tightened; it takes too long to get to the punchline. The distillation section (3.3) feels tacked on, like a separate paper. If I were rewriting, I'd restructure Section 3 to lead with the hierarchical denoising insight, show the architecture, then discuss distillation as an extension rather than a core component.
+
+**Verdict**: weak accept — Solid idea with clear motivation and good results, but the execution has rough edges and the distillation component feels orthogonal to the main contribution.
+
+## Takeaways
+
+The transferable insight: when doing autoregressive generation with iterative refinement (diffusion, iterative decoding, etc.), condition on context at the same refinement level as the current output, not on fully refined context. This prevents error propagation while maintaining coherence. You could apply this to: (1) autoregressive image generation with diffusion, (2) iterative text refinement models, (3) any sequential generation task where you have a notion of "partial completion."
+
+The pipeline parallelism trick: if your generation process has nested loops (outer: refinement level, inner: sequence position), you can parallelize the inner loop and pipeline the outer loop. This is architecture-specific but worth considering for inference optimization.
+
+The forward-KL regularization during distillation: if your distillation collapses to low-variance outputs, try training with bidirectional context (where you can compute forward-KL) then deploying causally. This is a bit hacky but might work for other mode-collapse issues in distillation.
+:::
+
+:::zh
+**论文**: [2603.08703](https://arxiv.org/abs/2603.08703)
+**作者**: Kai Zou, Dian Zheng, Hongbo Liu, Tiankai Hang, Bin Liu, Nenghai Yu
+**分类**: cs.CV
+
+## 缺口
+
+自回归扩散模型理论上可以通过逐块生成来产生无限长度的视频，每次基于前面的块进行条件化。
+
+问题在于：现有方法在生成下一块之前会完全去噪当前块。
+
+这造成了恶性循环——干净的上下文以高确定性传播预测误差，误差在块之间复合，导致渐进式质量退化（时间漂移）。
+
+先前工作（VideoPoet、Tora等）试图通过基于高度去噪的上下文来保持连续性，但这实际上使误差传播更严重，因为错误以完全的置信度被固化。
+
+核心矛盾：你需要时间连续性（需要基于前面的块进行条件化），但也需要防止误差累积（而基于干净块的条件化会加剧这个问题）。
+
+```
+问题：使用干净上下文的自回归视频生成
+    |
+    v
+观察：双向扩散在共享噪声水平下保持一致性
+    |
+    v
+假设：相同噪声水平的条件化提供足够信号
+      且不会传播误差
+    |
+    v
+方法：在每个步骤同时对所有块进行分层去噪
+    |
+    v
+证据：最佳VBench分数，最低时间漂移，
+      流水线并行带来1.8倍加速
+    |
+    v
+结论：反转生成顺序（先去噪再生成 → 先生成再去噪）
+      解决了自回归退化问题
+```
+
+## 增量
+
+**一句话**: HiAR之前，自回归视频生成意味着完全完成每个块后再开始下一个；HiAR之后，所有块在每个去噪水平同时生成，基于同样噪声的上下文进行条件化。
+
+### 核心机制
+
+HiAR反转了传统的生成顺序。
+
+不再是：完全去噪块1 → 完全去噪块2 → 完全去噪块3，而是：所有块去噪一步 → 所有块再去噪一步 → 重复。
+
+在每个去噪时间步t，每个块基于前一个块在相同噪声水平t的状态进行条件化，而不是基于完全干净的状态。
+
+架构有三个关键组件：（1）因果注意力机制，让每个块关注当前噪声水平的前面块，（2）分层去噪调度，在每步并行处理所有块，（3）蒸馏期间的前向KL正则化器，防止模型坍缩到低运动输出。
+
+数据流动方式：在时间步t，块i接收噪声水平为t的输入，并关注同样在噪声水平t的块i-1。
+
+模型同时预测所有块的去噪方向。
+
+随着t减小（噪声降低），所有块一起逐渐变清晰，保持时间一致性，因为它们总是基于匹配噪声水平的上下文进行条件化。
+
+```
+传统自回归：
+块1: [噪声=100] -> [噪声=0] 完成
+                              |
+块2:              [噪声=100] -+-> [噪声=0] 完成
+                                             |
+块3:                            [噪声=100] --+-> [噪声=0]
+
+HiAR（分层）：
+步骤t=100: [块1:100] -> [块2:100] -> [块3:100]
+             |            |            |
+步骤t=75:  [块1:75]  -> [块2:75]  -> [块3:75]
+             |            |            |
+步骤t=50:  [块1:50]  -> [块2:50]  -> [块3:50]
+             |            |            |
+步骤t=0:   [块1:0]   -> [块2:0]   -> [块3:0]
+          (箭头表示相同噪声水平的因果条件化)
+```
+
+可以把它想象成在暗房里冲洗照片。
+
+旧方法：你完全冲洗照片1，然后用它作为参考冲洗照片2，再用照片2冲洗照片3。
+
+照片1中的任何错误都会以完全的置信度复制到照片2，然后放大到照片3。
+
+HiAR的方法：你同时冲洗所有照片，逐渐增加曝光。
+
+在每个曝光水平，照片2看着部分冲洗的照片1（在相同曝光水平）。
+
+照片1中的错误仍然是模糊和不确定的，所以它们不会以全力传播。
+
+当所有照片都完全冲洗时，误差已经在渐进过程中被平滑掉，而不是早期就被锁定。
+
+### 关键概念
+
+- **相同噪声水平条件化**: 在扩散模型中，噪声水平代表不确定性。
+
+当块2基于噪声水平100的块1进行条件化时，它在说"这是之前内容的粗略草图"。
+
+当它基于噪声水平0（完全干净）的块1进行条件化时，它在说"这正是之前的内容，完全相信它"。
+
+洞察：粗略草图提供足够的信号来保持时间连续性，但不会强制模型信任和传播误差。
+
+想象逐章写故事。
+
+如果你在写第2章之前把第1章编辑到完美，第1章中的任何情节漏洞都会成为正典。
+
+如果你先粗略起草所有章节，然后一起完善它们，你可以修复整个故事中的不一致之处。
+
+- **分层去噪**: 不是平面序列（去噪A，去噪B，去噪C），而是嵌套循环：外循环遍历噪声水平，内循环遍历块。
+
+这创建了一个层次结构，其中粗略结构（高噪声）首先在所有块上建立，然后填充精细细节（低噪声）。
+
+就像雕刻：你先粗略勾勒整个人物，然后再添加面部细节，而不是在触碰躯干之前完美完成头部。
+
+- **前向KL正则化**: 在蒸馏期间（将许多去噪步骤压缩为更少步骤），标准的反向KL目标具有模式寻求行为——它更喜欢生成一个安全的低运动输出，而不是冒险生成多样化的运动。
+
+前向KL是模式覆盖的——它惩罚模型遗漏真实分布的任何模式。
+
+论文在双向注意力模式（未来上下文可见）中使用前向KL来教模型运动多样性，然后切换到因果模式（无未来上下文）进行实际推理。
+
+就像学开车：你和能看到前方的教练一起练习（双向），但训练后你独自驾驶（因果）。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+
+自回归生成：                      分层生成：
+
+t=T  [###] 干净                   t=T  [~~~] [~~~] [~~~]
+      |                                 \  |  /
+t=0  [~~~] 噪声                   t=T/2 [::] [::] [::] 
+      |                                  \  |  /
+      v                             t=0  [###][###][###]
+t=T  [###] 干净                         (所有块在每个
+      |                                  噪声水平一起
+t=0  [~~~] 噪声                          去噪)
+      |
+      v
+t=T  [###] 干净
+      |
+t=0  [~~~] 噪声
+
+(顺序：在开始下一个                (并行：所有块一起
+ 之前完成每个块)                    进展，基于相同
+                                    噪声水平的上下文
+                                    进行条件化)
+```
+
+从顺序完成到并行进展，核心转变是基于不确定性而非确定性进行条件化。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实的缺口。
+
+自回归生成中的误差累积有充分记录（不仅在视频中——语言模型也面临这个问题）。
+
+论文正确识别出标准解决方案（基于干净上下文进行条件化）实际上使问题恶化。
+
+关于相同噪声水平条件化的洞察借鉴自双向扩散，但巧妙地应用于自回归设置。
+
+它位于两个活跃领域的交叉点：长形式生成和扩散模型效率。
+
+**方法成熟度**: 核心思想很优雅——反转循环顺序。
+
+但执行有一些蛮力元素。
+
+前向KL正则化器感觉像是对症状（蒸馏期间的低运动坍缩）的补丁，而不是解决根本原因。
+
+为什么蒸馏会放大这个捷径？论文没有深入挖掘。
+
+此外，该方法需要使用分层结构从头训练；不清楚现有的自回归扩散模型是否可以适配。
+
+流水线并行加速很好，但不是突破性的（4步1.8倍）。
+
+**实验诚意**: 基线合理（Tora、Pyramid Flow等）。
+
+VBench是一个综合基准。
+
+时间漂移指标直接衡量他们声称要解决的问题，这很好。
+
+然而，论文没有展示失败案例或讨论HiAR可能遇到困难的情况。
+
+蒸馏实验有些孤立——如果能展示前向KL技巧在不同蒸馏方法中有效会更有力。
+
+消融实验很彻底，但大多确认了预期结果。
+
+**写作功力**: 摘要和引言清晰。
+
+方法部分很快变得密集——图2试图一次展示所有内容，结果令人困惑。
+
+双向扩散动机（第3.1节）可以收紧；花太长时间才到达重点。
+
+蒸馏部分（3.3）感觉是附加的，像一篇单独的论文。
+
+如果我重写，我会重组第3节，先引出分层去噪洞察，展示架构，然后将蒸馏作为扩展讨论，而不是核心组件。
+
+**判决**: 弱接收 — 扎实的想法，动机清晰，结果良好，但执行有粗糙边缘，蒸馏组件感觉与主要贡献正交。
+
+## 要点总结
+
+可迁移的洞察：在使用迭代细化（扩散、迭代解码等）进行自回归生成时，基于与当前输出相同细化水平的上下文进行条件化，而不是基于完全细化的上下文。
+
+这可以防止误差传播，同时保持一致性。
+
+你可以将其应用于：（1）使用扩散的自回归图像生成，（2）迭代文本细化模型，（3）任何具有"部分完成"概念的顺序生成任务。
+
+流水线并行技巧：如果你的生成过程有嵌套循环（外层：细化水平，内层：序列位置），你可以并行化内层循环并流水线化外层循环。
+
+这是特定于架构的，但值得考虑用于推理优化。
+
+蒸馏期间的前向KL正则化：如果你的蒸馏坍缩到低方差输出，尝试使用双向上下文训练（可以计算前向KL），然后因果部署。
+
+这有点取巧，但可能适用于蒸馏中的其他模式坍缩问题。
+
+:::
