@@ -15,7 +15,7 @@ client, model, provider = get_llm_client()
 print(f"Using {provider} provider with model: {model}")
 
 # Fetch paper from arxiv
-arxiv_id = "2603.05494"
+arxiv_id = "2603.08706"
 print(f"Fetching paper {arxiv_id} from arxiv...")
 resp = requests.get(f"{ARXIV_API_URL}?id_list={arxiv_id}", timeout=30)
 resp.raise_for_status()

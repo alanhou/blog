@@ -554,10 +554,12 @@ def extract_code_block(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
-        if lines[-1].strip() == "```":
-            lines = lines[1:-1]
-        else:
+        # Remove first line (```python or ```)
+        if lines[0].strip().startswith("```"):
             lines = lines[1:]
+        # Remove last line if it's ```
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
         text = "\n".join(lines)
     return text.strip()
 
@@ -623,13 +625,22 @@ def generate_manim_code(client, model, provider, paper, scene_type: str, title_z
         if not content:
             return None
 
+        # Strip thinking tags first, then extract code block
+        content = strip_thinking_tags(content)
         code = extract_code_block(content)
+
         if validate_scene_code(code):
             # Verify the expected class name exists
             if f"class {class_name}" in code:
                 return code
+            else:
+                print(f"    {scene_type} code missing class {class_name}")
+        else:
+            print(f"    {scene_type} code failed validation")
+
         if attempt == 0:
-            print(f"    Retry {scene_type} code generation (validation failed)")
+            print(f"    Retry {scene_type} code generation")
+            print(f"    Generated code preview: {code[:200]}...")
 
     return None
 
