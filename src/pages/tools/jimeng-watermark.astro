@@ -345,31 +345,26 @@ import Layout from '../../layouts/Layout.astro';
 
 <script>
 // Watermark removal constants
-const ALPHA_THRESHOLD = 0.01;
-const MAX_ALPHA = 0.95;
-const LOGO_VALUE = 255;
-
 // Watermark configuration for 即梦AI
-// The watermark spans most of the bottom of the image
-// It's typically around 1400-1500px wide and 200-250px tall
+// The watermark is 551x182 pixels in the bottom right corner
 const WATERMARK_CONFIG = {
-  logoHeight: 300,  // Process larger region to ensure we get it all
-  marginBottom: 50,
+  logoWidth: 551,
+  logoHeight: 182,
 };
+
+const BRIGHTNESS_THRESHOLD = 180;
 
 function detectWatermarkPosition(w: number, h: number) {
   return {
-    x: 0,
-    y: h - WATERMARK_CONFIG.marginBottom - WATERMARK_CONFIG.logoHeight,
-    width: w,
+    x: w - WATERMARK_CONFIG.logoWidth,
+    y: h - WATERMARK_CONFIG.logoHeight,
+    width: WATERMARK_CONFIG.logoWidth,
     height: WATERMARK_CONFIG.logoHeight,
   };
 }
 
-function estimateAlphaFromBrightness(imageData: ImageData, x: number, y: number, width: number, height: number): Float32Array {
-  const alphaMap = new Float32Array(width * height);
-  const minBrightness = 180;  // Higher threshold to focus on bright white text
-  const maxBrightness = 255;
+function detectWatermarkMask(imageData: ImageData, x: number, y: number, width: number, height: number): Uint8Array {
+  const mask = new Uint8Array(width * height);
 
   for (let row = 0; row < height; row++) {
     for (let col = 0; col < width; col++) {
@@ -381,22 +376,64 @@ function estimateAlphaFromBrightness(imageData: ImageData, x: number, y: number,
       const b = imageData.data[imgIdx + 2];
       const brightness = (r + g + b) / 3;
 
-      // Only process bright pixels (the white text)
-      let alpha = 0;
-      if (brightness > minBrightness) {
-        alpha = (brightness - minBrightness) / (maxBrightness - minBrightness);
-        alpha = Math.max(0, Math.min(1, alpha));
-      }
-
-      alphaMap[row * width + col] = alpha;
+      // Mark as watermark if brightness is above threshold
+      mask[row * width + col] = brightness > BRIGHTNESS_THRESHOLD ? 1 : 0;
     }
   }
 
-  return alphaMap;
+  return mask;
 }
 
-function removeWatermark(imageData: ImageData, alphaMap: Float32Array, position: { x: number; y: number; width: number; height: number }) {
+function removeWatermark(imageData: ImageData, mask: Uint8Array, position: { x: number; y: number; width: number; height: number }) {
   const { x, y, width, height } = position;
+  const data = imageData.data;
+
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const maskIdx = row * width + col;
+
+      if (mask[maskIdx] === 1) {
+        // This is a watermark pixel, replace with nearby darker pixels
+        const imgIdx = ((y + row) * imageData.width + (x + col)) * 4;
+
+        // Get a larger 15x15 window around this pixel
+        const rowMin = Math.max(0, row - 7);
+        const rowMax = Math.min(height, row + 8);
+        const colMin = Math.max(0, col - 7);
+        const colMax = Math.min(width, col + 8);
+
+        const rValues: number[] = [];
+        const gValues: number[] = [];
+        const bValues: number[] = [];
+
+        // Collect non-watermark pixels in the window
+        for (let wy = rowMin; wy < rowMax; wy++) {
+          for (let wx = colMin; wx < colMax; wx++) {
+            const wMaskIdx = wy * width + wx;
+            if (mask[wMaskIdx] === 0) {
+              const wImgIdx = ((y + wy) * imageData.width + (x + wx)) * 4;
+              rValues.push(data[wImgIdx]);
+              gValues.push(data[wImgIdx + 1]);
+              bValues.push(data[wImgIdx + 2]);
+            }
+          }
+        }
+
+        // Replace with median of nearby non-watermark pixels
+        if (rValues.length > 0) {
+          rValues.sort((a, b) => a - b);
+          gValues.sort((a, b) => a - b);
+          bValues.sort((a, b) => a - b);
+
+          const mid = Math.floor(rValues.length / 2);
+          data[imgIdx] = rValues[mid];
+          data[imgIdx + 1] = gValues[mid];
+          data[imgIdx + 2] = bValues[mid];
+        }
+      }
+    }
+  }
+}
 
   for (let row = 0; row < height; row++) {
     for (let col = 0; col < width; col++) {
@@ -510,9 +547,9 @@ async function processImage(file: File) {
 
     const imageData = cleanCtx.getImageData(0, 0, w, h);
     const position = detectWatermarkPosition(w, h);
-    const alphaMap = estimateAlphaFromBrightness(imageData, position.x, position.y, position.width, position.height);
+    const mask = detectWatermarkMask(imageData, position.x, position.y, position.width, position.height);
 
-    removeWatermark(imageData, alphaMap, position);
+    removeWatermark(imageData, mask, position);
     cleanCtx.putImageData(imageData, 0, 0);
 
     // Generate all format versions

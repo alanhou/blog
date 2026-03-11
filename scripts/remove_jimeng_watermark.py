@@ -12,51 +12,38 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-# Watermark detection parameters (may need tuning)
-# 即梦AI watermark spans most of the bottom of the image
-# It's typically around 1400-1500px wide and 200-250px tall
+# Watermark detection parameters
+# 即梦AI watermark is 551x182 pixels in the bottom right corner
 WATERMARK_CONFIG = {
-    "logo_height": 300,  # Process larger region to ensure we get it all
-    "margin_bottom": 50,
+    "logo_width": 551,
+    "logo_height": 182,
 }
 
-# Alpha blending parameters
-ALPHA_THRESHOLD = 0.01
-MAX_ALPHA = 0.95
-LOGO_VALUE = 255.0  # Assuming white watermark
+# Brightness threshold for detecting watermark pixels
+BRIGHTNESS_THRESHOLD = 180
 
 
-def estimate_alpha_from_brightness(region: np.ndarray, min_brightness: float = 180, max_brightness: float = 255) -> np.ndarray:
-    """Estimate alpha channel from brightness.
+def estimate_alpha_from_brightness(region: np.ndarray, brightness_threshold: float = 180) -> np.ndarray:
+    """Detect watermark pixels based on brightness.
 
-    This assumes the watermark is lighter than the background.
-    Higher brightness = higher alpha (more watermark).
-
-    We use a higher threshold (180) to focus on the bright white text
-    rather than the darker background of the watermark.
+    Returns a binary mask where True indicates watermark pixels (bright pixels).
     """
     brightness = region.mean(axis=2)
-
-    # Only process bright pixels (the white text)
-    alpha = np.zeros_like(brightness)
-    bright_mask = brightness > min_brightness
-    alpha[bright_mask] = (brightness[bright_mask] - min_brightness) / (max_brightness - min_brightness)
-
-    return np.clip(alpha, 0, 1)
+    return brightness > brightness_threshold
 
 
 def detect_watermark_region(image: Image.Image) -> dict:
     """Detect the watermark region in the image.
 
-    For 即梦AI, the watermark spans the entire bottom of the image.
+    For 即梦AI, the watermark is 551x182 pixels in the bottom right corner.
     """
     width, height = image.size
     config = WATERMARK_CONFIG
 
     return {
-        "x": 0,
-        "y": height - config["margin_bottom"] - config["logo_height"],
-        "width": width,
+        "x": width - config["logo_width"],
+        "y": height - config["logo_height"],
+        "width": config["logo_width"],
         "height": config["logo_height"],
     }
 
@@ -64,11 +51,12 @@ def detect_watermark_region(image: Image.Image) -> dict:
 def remove_watermark(image: Image.Image, background_estimate: str = "local") -> Image.Image:
     """Remove the 即梦AI watermark from an image.
 
+    Uses a simple inpainting approach: replaces bright watermark pixels
+    with the median of nearby darker pixels.
+
     Args:
         image: Input image with watermark
-        background_estimate: Method to estimate background
-            - "local": Use surrounding pixels to estimate background
-            - "brightness": Use brightness-based alpha estimation
+        background_estimate: Unused, kept for compatibility
 
     Returns:
         Image with watermark removed
@@ -76,39 +64,44 @@ def remove_watermark(image: Image.Image, background_estimate: str = "local") -> 
     width, height = image.size
     pos = detect_watermark_region(image)
 
-    img_array = np.asarray(image.convert("RGB"), dtype=np.float32)
+    img_array = np.asarray(image.convert("RGB"), dtype=np.uint8)
     result = img_array.copy()
 
     x, y, w, h = pos["x"], pos["y"], pos["width"], pos["height"]
-    region = result[y : y + h, x : x + w, :]
+    region = result[y : y + h, x : x + w, :].copy()
 
-    if background_estimate == "brightness":
-        # Method 1: Estimate alpha from brightness
-        alpha_map = estimate_alpha_from_brightness(region)
-    else:
-        # Method 2: Estimate background from surrounding pixels
-        # This is more sophisticated but requires more computation
-        # For now, fall back to brightness method
-        alpha_map = estimate_alpha_from_brightness(region)
+    # Detect watermark pixels (bright pixels)
+    watermark_mask = estimate_alpha_from_brightness(region.astype(np.float32))
+    brightness = region.mean(axis=2)
 
-    # Broadcast alpha to (h, w, 1) for per-channel operation
-    alpha = alpha_map[:, :, np.newaxis]
+    print(f"Removing {watermark_mask.sum()} watermark pixels...")
 
-    # Build mask: only process pixels above threshold
-    mask = alpha_map >= ALPHA_THRESHOLD
+    # Replace watermark pixels with nearby darker pixels
+    for row in range(h):
+        for col in range(w):
+            if watermark_mask[row, col]:
+                # Get a larger 15x15 window to find more non-watermark pixels
+                row_min = max(0, row - 7)
+                row_max = min(h, row + 8)
+                col_min = max(0, col - 7)
+                col_max = min(w, col + 8)
 
-    # Clamp alpha for division safety
-    alpha_clamped = np.clip(alpha, 0.0, MAX_ALPHA)
-    one_minus_alpha = 1.0 - alpha_clamped
+                window = region[row_min:row_max, col_min:col_max, :]
+                window_mask = watermark_mask[row_min:row_max, col_min:col_max]
 
-    # Reverse alpha blending: original = (watermarked - alpha * LOGO_VALUE) / (1 - alpha)
-    restored = (region - alpha_clamped * LOGO_VALUE) / one_minus_alpha
+                # Get non-watermark pixels in the window
+                dark_mask = ~window_mask
 
-    # Apply only where alpha is significant
-    mask_3d = mask[:, :, np.newaxis]
-    region[:] = np.where(mask_3d, np.clip(np.round(restored), 0, 255), region)
+                if dark_mask.any():
+                    for c in range(3):
+                        dark_values = window[:, :, c][dark_mask]
+                        if len(dark_values) > 0:
+                            # Use median to avoid outliers
+                            region[row, col, c] = np.median(dark_values)
 
-    return Image.fromarray(result.astype(np.uint8), "RGB")
+    result[y : y + h, x : x + w, :] = region
+
+    return Image.fromarray(result, "RGB")
 
 
 def process_file(input_path: str | Path, output_path: str | Path | None = None) -> Path:
