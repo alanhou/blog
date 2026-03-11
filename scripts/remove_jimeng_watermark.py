@@ -13,11 +13,11 @@ import numpy as np
 from PIL import Image
 
 # Watermark detection parameters (may need tuning)
+# 即梦AI watermark spans most of the bottom of the image
+# It's typically around 1400-1500px wide and 200-250px tall
 WATERMARK_CONFIG = {
-    "logo_width": 200,
-    "logo_height": 60,
-    "margin_right": 20,
-    "margin_bottom": 20,
+    "logo_height": 300,  # Process larger region to ensure we get it all
+    "margin_bottom": 50,
 }
 
 # Alpha blending parameters
@@ -26,29 +26,37 @@ MAX_ALPHA = 0.95
 LOGO_VALUE = 255.0  # Assuming white watermark
 
 
-def estimate_alpha_from_brightness(region: np.ndarray, min_brightness: float = 100, max_brightness: float = 255) -> np.ndarray:
+def estimate_alpha_from_brightness(region: np.ndarray, min_brightness: float = 180, max_brightness: float = 255) -> np.ndarray:
     """Estimate alpha channel from brightness.
 
     This assumes the watermark is lighter than the background.
     Higher brightness = higher alpha (more watermark).
+
+    We use a higher threshold (180) to focus on the bright white text
+    rather than the darker background of the watermark.
     """
     brightness = region.mean(axis=2)
-    alpha = np.clip((brightness - min_brightness) / (max_brightness - min_brightness), 0, 1)
-    return alpha
+
+    # Only process bright pixels (the white text)
+    alpha = np.zeros_like(brightness)
+    bright_mask = brightness > min_brightness
+    alpha[bright_mask] = (brightness[bright_mask] - min_brightness) / (max_brightness - min_brightness)
+
+    return np.clip(alpha, 0, 1)
 
 
 def detect_watermark_region(image: Image.Image) -> dict:
     """Detect the watermark region in the image.
 
-    For 即梦AI, the watermark is typically in the bottom-right corner.
+    For 即梦AI, the watermark spans the entire bottom of the image.
     """
     width, height = image.size
     config = WATERMARK_CONFIG
 
     return {
-        "x": width - config["margin_right"] - config["logo_width"],
+        "x": 0,
         "y": height - config["margin_bottom"] - config["logo_height"],
-        "width": config["logo_width"],
+        "width": width,
         "height": config["logo_height"],
     }
 
