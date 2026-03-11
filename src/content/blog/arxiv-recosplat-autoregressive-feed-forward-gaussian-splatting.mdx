@@ -1,0 +1,334 @@
+---
+title:
+  en: "ReCoSplat: Teaching 3D Reconstruction to Self-Correct Through Visual Feedback"
+  zh: "ReCoSplat：通过视觉反馈让3D重建学会自我纠错"
+description:
+  en: "An autoregressive Gaussian Splatting model that uses render-and-compare feedback to handle pose prediction errors in online novel view synthesis."
+  zh: "一个自回归高斯溅射模型，通过渲染-比较反馈机制处理在线新视角合成中的位姿预测误差。"
+date: 2026-03-11
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2603.09968](https://arxiv.org/abs/2603.09968)
+**Authors**: Freeman Cheng, Botao Ye, Xueting Li, Junqi You, Fangneng Zhan, Ming-Hsuan Yang
+**Categories**: cs.CV
+
+## The Gap
+
+Existing online novel view synthesis methods face a training-inference dilemma. Feed-forward approaches like pixelSplat assemble local Gaussians using camera poses, which scales better than predicting in canonical space. But here's the catch: training with ground-truth poses gives stable gradients, while inference uses predicted poses that inevitably contain errors. This distribution mismatch causes reconstruction quality to degrade when the model encounters pose prediction errors it never saw during training.
+
+Prior work either accepts this mismatch (training with GT poses, hoping for generalization) or trains end-to-end with predicted poses (unstable, harder to converge). Neither approach directly addresses the core issue: the model has no mechanism to compensate for pose errors once they occur.
+
+```
+Problem: Training-inference pose distribution mismatch
+   |
+   v
+Assumption: Visual feedback can compensate for pose errors
+   |
+   v
+Method: Render-and-Compare (ReCo) module
+   |
+   +---> Render current reconstruction from predicted view
+   +---> Compare with incoming observation
+   +---> Use difference as conditioning signal
+   |
+   v
+Evidence: SOTA on RealEstate10K, ACID, Tanks&Temples
+   |
+   v
+Conclusion: Visual feedback bridges training-inference gap
+```
+
+## The Increment
+
+**One sentence**: Before ReCoSplat, models trained on perfect poses failed when given imperfect ones; after ReCoSplat, models use visual feedback to self-correct pose errors during reconstruction.
+
+### Core Mechanism
+
+ReCoSplat is an autoregressive transformer that processes observations sequentially. At each step, it receives an image and (optionally) camera parameters, predicts the camera pose if needed, then generates local 3D Gaussians for that view. These Gaussians accumulate into a growing scene representation.
+
+The key innovation is the Render-and-Compare (ReCo) module. Before processing a new observation, ReCo renders the current reconstruction from the predicted camera viewpoint. This rendered image is compared with the actual incoming observation, producing a difference map. This difference map becomes an additional conditioning signal fed into the transformer, alongside the observation itself.
+
+```
+Input Stream:  [Img_t] ---> Pose Predictor ---> [Pose_t]
+                 |                                  |
+                 v                                  v
+Current Scene: [Gaussians_1...t-1] ---> Render --> [Rendered_t]
+                                            |
+                                            v
+                                    Compare with [Img_t]
+                                            |
+                                            v
+                                      [Difference Map]
+                                            |
+                                            v
+Transformer: [Img_t] + [Difference Map] --> [New Gaussians_t]
+                                                    |
+                                                    v
+                                            Add to Scene
+```
+
+Think of ReCoSplat like a GPS navigation system with visual confirmation. Traditional approaches are like following GPS directions blindly—if the GPS drifts (pose error), you end up in the wrong place. ReCoSplat adds "looking out the window": it checks what the scene should look like from the predicted position (renders), compares it with what it actually sees (incoming image), and uses the mismatch to correct its understanding. If the GPS says you're at an intersection but you see a park, that visual discrepancy tells you the GPS is wrong and helps you recalibrate.
+
+The ReCo module acts as the "looking out the window" component. When pose predictions drift, the rendered view won't match the actual observation. This mismatch provides a training signal that teaches the model to compensate for pose errors. During training, even with ground-truth poses, the model learns to use visual feedback. At inference, when poses are predicted and imperfect, the visual feedback mechanism kicks in to stabilize reconstruction.
+
+### Key Concepts
+
+- **Render-and-Compare (ReCo)**: Imagine you're assembling a 3D puzzle but your position sensor is slightly off. Instead of trusting the sensor blindly, you render what you think you should see from your current position, then compare it with what you actually see. The difference tells you how wrong your position estimate is. ReCo does exactly this: it renders the current 3D reconstruction from the predicted camera pose, compares the rendering with the actual incoming image, and uses the visual discrepancy as a correction signal. This creates a feedback loop where visual evidence compensates for pose prediction errors. Concrete example: if the pose predictor thinks the camera moved 2 meters left but actually moved 1.5 meters, the rendered view will be slightly off. The difference map highlights this mismatch, allowing the model to adjust its reconstruction accordingly.
+
+- **Training-Inference Distribution Mismatch**: During training, you have perfect camera poses from ground truth. The model learns to assemble Gaussians assuming poses are accurate. But at inference, poses come from a predictor that makes errors. The model now faces inputs (imperfect poses) it never saw during training—like training a driver on smooth roads then putting them on a bumpy one. ReCoSplat solves this by making visual feedback (ReCo) part of training, so the model learns to handle pose uncertainty from the start.
+
+- **KV Cache Compression**: Transformers remember previous tokens using key-value (KV) caches. For 100-frame sequences, this memory explodes. ReCoSplat uses a hybrid strategy: (1) early transformer layers see truncated history (only recent frames matter for low-level features), (2) later layers use chunk-level selective retention (keep important chunks, discard redundant ones). This cuts KV cache by 90%+ while maintaining reconstruction quality. Think of it like taking notes: you don't transcribe everything verbatim (truncation), and you highlight key points while summarizing the rest (selective retention).
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (ReCoSplat):
+
+Training:                              Training:
+  GT Pose --> Model --> Gaussians        GT Pose --> Model --> Gaussians
+                                                      ^
+                                                      |
+                                              ReCo Feedback
+                                              (visual check)
+
+Inference:                             Inference:
+  Pred Pose --> Model --> Gaussians      Pred Pose --> Model --> Gaussians
+  (mismatch!)                                         ^
+                                                      |
+                                              ReCo Feedback
+                                              (compensates error)
+```
+
+From blind pose trust to visual feedback loop, the core shift is making the model aware of its own reconstruction quality through rendering.
+
+## Expert Assessment
+
+**Problem choice**: This is a genuine gap. The training-inference mismatch in pose-conditioned models is well-known but rarely addressed directly. Most papers either ignore it or use end-to-end training (which is unstable). ReCoSplat tackles it head-on with a principled solution. The problem sits at the intersection of feed-forward efficiency and robustness—a sweet spot for practical impact.
+
+**Method maturity**: The ReCo module is clever, not brute force. It's conceptually simple (render and compare) but addresses the root cause rather than symptoms. The KV cache compression is practical engineering. However, I wonder if simpler approaches exist—could pose refinement networks or uncertainty-aware pose prediction achieve similar results with less machinery? The paper doesn't explore these alternatives thoroughly.
+
+**Experimental integrity**: Baselines are fair, covering both canonical-space methods (pixelSplat) and pose-free approaches (DUSt3R). Results are strong across multiple datasets (RealEstate10K, ACID, Tanks&Temples). The ablations clearly show ReCo's contribution. One minor flag: the paper doesn't deeply analyze failure cases or discuss when ReCo might struggle (e.g., textureless scenes where visual comparison is ambiguous).
+
+**Writing quality**: The abstract and method sections are clear. However, the related work section feels rushed—it lists prior work without clearly positioning ReCoSplat's unique contribution. The ablation study could be more thorough: what happens with different rendering resolutions for ReCo? How sensitive is the method to the quality of the pose predictor? Rewriting Section 4.3 (ablations) with deeper analysis would elevate the paper.
+
+**Verdict**: weak accept — Addresses a real problem with a principled solution and strong empirical results, though the novelty is incremental and some design choices lack deeper justification.
+
+## Takeaways
+
+The render-and-compare feedback loop is the transferable idea here. Anytime you have a model making predictions that affect downstream processing, consider adding a "sanity check" module that renders/simulates the prediction's consequences and compares with ground truth. This pattern applies beyond 3D reconstruction: in robotics (predict action, simulate outcome, compare with sensor feedback), in generative models (predict next token, render full sequence, check coherence), or in planning systems (predict trajectory, simulate physics, compare with constraints).
+
+The KV cache compression strategy is also practical: early layers get truncated history, late layers get selective retention. This hierarchical memory management could apply to any long-sequence transformer task where different layers need different temporal contexts.
+
+Finally, the training-inference mismatch framing is useful. When your training data has privileged information (like GT poses) that won't be available at inference, don't just hope for generalization—explicitly train the model to handle the degraded inputs it will actually see.
+:::
+
+:::zh
+**论文**: [2603.09968](https://arxiv.org/abs/2603.09968)
+**作者**: Freeman Cheng, Botao Ye, Xueting Li, Junqi You, Fangneng Zhan, Ming-Hsuan Yang
+**分类**: cs.CV
+
+## 缺口
+
+现有的在线新视角合成方法面临一个训练-推理困境。
+
+像pixelSplat这样的前馈方法使用相机位姿来组装局部高斯，比在规范空间预测更具扩展性。
+
+但问题来了：用真实位姿训练能得到稳定梯度，而推理时用的是预测位姿，必然包含误差。
+
+这种分布不匹配导致模型遇到训练时从未见过的位姿预测误差时，重建质量就会下降。
+
+之前的工作要么接受这种不匹配（用真实位姿训练，寄希望于泛化），要么用预测位姿端到端训练（不稳定，难收敛）。
+
+两种方法都没有直接解决核心问题：模型没有机制来补偿位姿误差一旦发生。
+
+```
+问题：训练-推理位姿分布不匹配
+   |
+   v
+假设：视觉反馈可以补偿位姿误差
+   |
+   v
+方法：渲染-比较（ReCo）模块
+   |
+   +---> 从预测视角渲染当前重建
+   +---> 与输入观测比较
+   +---> 用差异作为条件信号
+   |
+   v
+证据：在RealEstate10K、ACID、Tanks&Temples上达到SOTA
+   |
+   v
+结论：视觉反馈弥合训练-推理差距
+```
+
+## 增量
+
+**一句话**：ReCoSplat之前，在完美位姿上训练的模型遇到不完美位姿就失效；ReCoSplat之后，模型用视觉反馈在重建过程中自我纠正位姿误差。
+
+### 核心机制
+
+ReCoSplat是一个自回归transformer，顺序处理观测。
+
+每一步，它接收一张图像和（可选的）相机参数，如果需要就预测相机位姿，然后为该视角生成局部3D高斯。
+
+这些高斯累积成不断增长的场景表示。
+
+关键创新是渲染-比较（ReCo）模块。
+
+在处理新观测之前，ReCo从预测的相机视角渲染当前重建。
+
+这张渲染图像与实际输入的观测比较，产生差异图。
+
+这个差异图成为额外的条件信号，与观测本身一起输入transformer。
+
+```
+输入流：  [图像_t] ---> 位姿预测器 ---> [位姿_t]
+            |                              |
+            v                              v
+当前场景：[高斯_1...t-1] ---> 渲染 --> [渲染图_t]
+                                  |
+                                  v
+                          与[图像_t]比较
+                                  |
+                                  v
+                            [差异图]
+                                  |
+                                  v
+Transformer：[图像_t] + [差异图] --> [新高斯_t]
+                                          |
+                                          v
+                                    添加到场景
+```
+
+把ReCoSplat想象成带视觉确认的GPS导航系统。
+
+传统方法像盲目跟随GPS指令——如果GPS漂移（位姿误差），你就会走错地方。
+
+ReCoSplat加上了"看窗外"：它检查从预测位置看场景应该是什么样（渲染），与实际看到的比较（输入图像），用不匹配来修正理解。
+
+如果GPS说你在十字路口但你看到的是公园，这个视觉差异告诉你GPS错了，帮你重新校准。
+
+ReCo模块充当"看窗外"的组件。
+
+当位姿预测漂移时，渲染视图不会匹配实际观测。
+
+这种不匹配提供训练信号，教模型补偿位姿误差。
+
+训练时，即使用真实位姿，模型也学会使用视觉反馈。
+
+推理时，当位姿是预测的且不完美时，视觉反馈机制启动来稳定重建。
+
+### 关键概念
+
+- **渲染-比较（ReCo）**：想象你在组装3D拼图，但位置传感器有点偏。
+
+与其盲目相信传感器，你渲染从当前位置应该看到的东西，然后与实际看到的比较。
+
+差异告诉你位置估计有多错。
+
+ReCo正是这样做的：从预测的相机位姿渲染当前3D重建，将渲染与实际输入图像比较，用视觉差异作为修正信号。
+
+这创建了一个反馈循环，视觉证据补偿位姿预测误差。
+
+具体例子：如果位姿预测器认为相机向左移动2米但实际移动1.5米，渲染视图会略有偏差。
+
+差异图突出这种不匹配，让模型相应调整重建。
+
+- **训练-推理分布不匹配**：训练时，你有来自真实值的完美相机位姿。
+
+模型学习在位姿准确的假设下组装高斯。
+
+但推理时，位姿来自有误差的预测器。
+
+模型现在面对训练时从未见过的输入（不完美位姿）——就像在平路上训练司机然后让他们开颠簸路。
+
+ReCoSplat通过让视觉反馈（ReCo）成为训练的一部分来解决这个问题，所以模型从一开始就学会处理位姿不确定性。
+
+- **KV缓存压缩**：Transformer用键值（KV）缓存记住之前的token。
+
+对于100帧序列，这个内存会爆炸。
+
+ReCoSplat用混合策略：（1）早期transformer层看截断的历史（只有最近帧对低级特征重要），（2）后期层用块级选择性保留（保留重要块，丢弃冗余块）。
+
+这将KV缓存减少90%以上，同时保持重建质量。
+
+想象做笔记：你不会逐字记录所有内容（截断），你会突出要点同时总结其余部分（选择性保留）。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（ReCoSplat）：
+
+训练：                            训练：
+  真实位姿 --> 模型 --> 高斯          真实位姿 --> 模型 --> 高斯
+                                                ^
+                                                |
+                                        ReCo反馈
+                                        （视觉检查）
+
+推理：                            推理：
+  预测位姿 --> 模型 --> 高斯          预测位姿 --> 模型 --> 高斯
+  （不匹配！）                                    ^
+                                                |
+                                        ReCo反馈
+                                        （补偿误差）
+```
+
+从盲目信任位姿到视觉反馈循环，核心转变是让模型通过渲染意识到自己的重建质量。
+
+## 专家评审
+
+**选题眼光**：这是真实的缺口。
+
+位姿条件模型中的训练-推理不匹配是众所周知的，但很少被直接解决。
+
+大多数论文要么忽略它，要么使用端到端训练（不稳定）。
+
+ReCoSplat用原则性的解决方案正面应对。
+
+这个问题处于前馈效率和鲁棒性的交叉点——对实际影响来说是个甜蜜点。
+
+**方法成熟度**：ReCo模块很巧妙，不是蛮力。
+
+概念上简单（渲染和比较），但解决根本原因而非症状。
+
+KV缓存压缩是实用工程。
+
+但我想知道是否存在更简单的方法——位姿细化网络或不确定性感知的位姿预测能否用更少的机制达到类似结果？论文没有充分探索这些替代方案。
+
+**实验诚意**：基线公平，涵盖规范空间方法（pixelSplat）和无位姿方法（DUSt3R）。
+
+在多个数据集（RealEstate10K、ACID、Tanks&Temples）上结果强劲。
+
+消融实验清楚显示ReCo的贡献。
+
+一个小问题：论文没有深入分析失败案例或讨论ReCo可能挣扎的情况（例如无纹理场景，视觉比较模糊）。
+
+**写作功力**：摘要和方法部分清晰。
+
+但相关工作部分感觉仓促——列出先前工作但没有清楚定位ReCoSplat的独特贡献。
+
+消融研究可以更彻底：ReCo的不同渲染分辨率会怎样？方法对位姿预测器质量有多敏感？重写第4.3节（消融）加入更深入分析会提升论文档次。
+
+**判决**：弱接收 — 用原则性解决方案和强实证结果解决真实问题，尽管新颖性是增量式的，一些设计选择缺乏更深入的论证。
+
+## 要点总结
+
+渲染-比较反馈循环是这里可迁移的想法。
+
+任何时候你有一个模型做影响下游处理的预测，考虑添加一个"合理性检查"模块，渲染/模拟预测的后果并与真实值比较。
+
+这个模式超越3D重建：在机器人学中（预测动作，模拟结果，与传感器反馈比较），在生成模型中（预测下一个token，渲染完整序列，检查连贯性），或在规划系统中（预测轨迹，模拟物理，与约束比较）。
+
+KV缓存压缩策略也很实用：早期层获得截断历史，后期层获得选择性保留。
+
+这种分层内存管理可以应用于任何长序列transformer任务，不同层需要不同的时间上下文。
+
+最后，训练-推理不匹配的框架很有用。
+
+当你的训练数据有推理时不可用的特权信息（如真实位姿）时，不要只是寄希望于泛化——明确训练模型处理它实际会看到的降级输入。
+
+:::
