@@ -51,8 +51,8 @@ def detect_watermark_region(image: Image.Image) -> dict:
 def remove_watermark(image: Image.Image, background_estimate: str = "local") -> Image.Image:
     """Remove the 即梦AI watermark from an image.
 
-    Uses a simple inpainting approach: replaces bright watermark pixels
-    with the median of nearby darker pixels.
+    Uses an aggressive inpainting approach: replaces watermark pixels
+    by sampling from the surrounding non-watermark area.
 
     Args:
         image: Input image with watermark
@@ -72,32 +72,55 @@ def remove_watermark(image: Image.Image, background_estimate: str = "local") -> 
 
     # Detect watermark pixels (bright pixels)
     watermark_mask = estimate_alpha_from_brightness(region.astype(np.float32))
-    brightness = region.mean(axis=2)
 
     print(f"Removing {watermark_mask.sum()} watermark pixels...")
 
-    # Replace watermark pixels with nearby darker pixels
-    for row in range(h):
-        for col in range(w):
-            if watermark_mask[row, col]:
-                # Get a larger 15x15 window to find more non-watermark pixels
-                row_min = max(0, row - 7)
-                row_max = min(h, row + 8)
-                col_min = max(0, col - 7)
-                col_max = min(w, col + 8)
+    # Get background samples from areas around the watermark (not inside it)
+    # Sample from left, top, and top-left of watermark region
+    background_samples = []
 
-                window = region[row_min:row_max, col_min:col_max, :]
-                window_mask = watermark_mask[row_min:row_max, col_min:col_max]
+    # Sample from left side (50 pixels wide strip)
+    if x > 50:
+        left_strip = result[y:y+h, x-50:x, :]
+        background_samples.append(left_strip.reshape(-1, 3))
 
-                # Get non-watermark pixels in the window
-                dark_mask = ~window_mask
+    # Sample from top (50 pixels tall strip)
+    if y > 50:
+        top_strip = result[y-50:y, x:x+w, :]
+        background_samples.append(top_strip.reshape(-1, 3))
 
-                if dark_mask.any():
-                    for c in range(3):
-                        dark_values = window[:, :, c][dark_mask]
-                        if len(dark_values) > 0:
-                            # Use median to avoid outliers
-                            region[row, col, c] = np.median(dark_values)
+    if background_samples:
+        background_pixels = np.vstack(background_samples)
+
+        # Replace each watermark pixel with a random sample from background
+        for row in range(h):
+            for col in range(w):
+                if watermark_mask[row, col]:
+                    # Pick a random background pixel
+                    idx = np.random.randint(0, len(background_pixels))
+                    region[row, col] = background_pixels[idx]
+    else:
+        # Fallback: use nearby non-watermark pixels
+        for row in range(h):
+            for col in range(w):
+                if watermark_mask[row, col]:
+                    # Look in larger radius
+                    for radius in [15, 30, 50]:
+                        row_min = max(0, row - radius)
+                        row_max = min(h, row + radius + 1)
+                        col_min = max(0, col - radius)
+                        col_max = min(w, col + radius + 1)
+
+                        window = region[row_min:row_max, col_min:col_max, :]
+                        window_mask = watermark_mask[row_min:row_max, col_min:col_max]
+                        dark_mask = ~window_mask
+
+                        if dark_mask.any():
+                            for c in range(3):
+                                dark_values = window[:, :, c][dark_mask]
+                                if len(dark_values) > 0:
+                                    region[row, col, c] = np.median(dark_values)
+                            break
 
     result[y : y + h, x : x + w, :] = region
 
