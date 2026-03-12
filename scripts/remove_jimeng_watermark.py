@@ -51,8 +51,7 @@ def detect_watermark_region(image: Image.Image) -> dict:
 def remove_watermark(image: Image.Image, background_estimate: str = "local") -> Image.Image:
     """Remove the 即梦AI watermark from an image.
 
-    Uses an aggressive inpainting approach: replaces watermark pixels
-    by sampling from the surrounding non-watermark area.
+    Uses a spatially-aware inpainting approach that maintains texture coherence.
 
     Args:
         image: Input image with watermark
@@ -75,54 +74,52 @@ def remove_watermark(image: Image.Image, background_estimate: str = "local") -> 
 
     print(f"Removing {watermark_mask.sum()} watermark pixels...")
 
-    # Get background samples from areas around the watermark (not inside it)
-    # Sample from left, top, and top-left of watermark region
-    background_samples = []
+    # Strategy: For each watermark pixel, find the closest non-watermark pixel
+    # in the same row/column and copy its value
+    for row in range(h):
+        for col in range(w):
+            if watermark_mask[row, col]:
+                # Look left for a non-watermark pixel
+                replacement = None
 
-    # Sample from left side (50 pixels wide strip)
-    if x > 50:
-        left_strip = result[y:y+h, x-50:x, :]
-        background_samples.append(left_strip.reshape(-1, 3))
+                # Try left in same row
+                for c in range(col - 1, -1, -1):
+                    if not watermark_mask[row, c]:
+                        replacement = region[row, c].copy()
+                        break
 
-    # Sample from top (50 pixels tall strip)
-    if y > 50:
-        top_strip = result[y-50:y, x:x+w, :]
-        background_samples.append(top_strip.reshape(-1, 3))
-
-    if background_samples:
-        background_pixels = np.vstack(background_samples)
-
-        # Replace each watermark pixel with a random sample from background
-        for row in range(h):
-            for col in range(w):
-                if watermark_mask[row, col]:
-                    # Pick a random background pixel
-                    idx = np.random.randint(0, len(background_pixels))
-                    region[row, col] = background_pixels[idx]
-    else:
-        # Fallback: use nearby non-watermark pixels
-        for row in range(h):
-            for col in range(w):
-                if watermark_mask[row, col]:
-                    # Look in larger radius
-                    for radius in [15, 30, 50]:
-                        row_min = max(0, row - radius)
-                        row_max = min(h, row + radius + 1)
-                        col_min = max(0, col - radius)
-                        col_max = min(w, col + radius + 1)
-
-                        window = region[row_min:row_max, col_min:col_max, :]
-                        window_mask = watermark_mask[row_min:row_max, col_min:col_max]
-                        dark_mask = ~window_mask
-
-                        if dark_mask.any():
-                            for c in range(3):
-                                dark_values = window[:, :, c][dark_mask]
-                                if len(dark_values) > 0:
-                                    region[row, col, c] = np.median(dark_values)
+                # Try above in same column
+                if replacement is None:
+                    for r in range(row - 1, -1, -1):
+                        if not watermark_mask[r, col]:
+                            replacement = region[r, col].copy()
                             break
 
-    result[y : y + h, x : x + w, :] = region
+                # Try sampling from left border (outside watermark)
+                if replacement is None and x > 0:
+                    # Sample from 50 pixels to the left
+                    left_col = max(0, x - 10)
+                    replacement = result[y + row, left_col].copy()
+
+                # Try sampling from top border
+                if replacement is None and y > 0:
+                    top_row = max(0, y - 10)
+                    replacement = result[top_row, x + col].copy()
+
+                if replacement is not None:
+                    region[row, col] = replacement
+
+    # Apply a simple box blur to smooth transitions
+    # Process in 3x3 windows
+    smoothed = region.copy()
+    for row in range(1, h - 1):
+        for col in range(1, w - 1):
+            if watermark_mask[row, col]:
+                # Average with 8 neighbors
+                window = region[row-1:row+2, col-1:col+2, :]
+                smoothed[row, col] = window.mean(axis=(0, 1))
+
+    result[y : y + h, x : x + w, :] = smoothed
 
     return Image.fromarray(result, "RGB")
 
