@@ -1,0 +1,232 @@
+---
+title:
+  en: "DreamVideo-Omni: Teaching Video Models to Remember Faces While Following Motion Scripts"
+  zh: "DreamVideo-Omni：让视频模型同时记住人脸、听懂动作指令"
+description:
+  en: "A unified framework that lets diffusion-based video models handle multiple subjects with distinct identities while obeying layered motion controls — camera, global, and local — all at once."
+  zh: "一个统一框架，让扩散模型在生成视频时同时保持多主体身份、响应多粒度运动控制，两者不再互相拖累。"
+date: 2026-03-14
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2603.12257](https://arxiv.org/abs/2603.12257)
+**Authors**: Yujie Wei, Xinyu Liu, Shiwei Zhang, Hangjie Yuan, Jinbo Xing, Zhekai Chen, Xiang Wang, Haonan Qiu, Rui Zhao, Yutong Feng
+**Categories**: cs.CV
+
+## The Gap
+
+Video generation has split into two mostly separate tracks. One track — subject customization (think DreamBooth-style work) — focuses on making the model remember what a specific person or object looks like and reproduce that identity faithfully. The other track — motion control — focuses on steering how things move: camera trajectories, optical flow, skeleton poses. Papers like AnimateDiff, MotionCtrl, and CameraCtrl pushed motion control hard. Papers like CustomVideo and VideoBooth pushed identity preservation hard. Almost nobody has done both well at the same time, and the few that tried ran into three concrete problems:
+
+1. Motion granularity is coarse. Most methods handle one level of motion (say, camera only, or body pose only) but not all three layers simultaneously.
+2. Control ambiguity. When you have two people in a scene and you issue a motion signal, the model doesn't know which person you're talking to. The signal bleeds across subjects.
+3. Identity degradation. Fine-tuning or conditioning for motion control tends to corrupt the identity features the model learned. You get the right pose but the wrong face.
+
+```
+  Problem: multi-subject ID + multi-granularity motion = unsolved jointly
+      |
+      v
+  Assumption: a unified conditioning architecture + reward-shaped training
+              can decouple identity from motion without sacrificing either
+      |
+      v
+  Method:
+    Stage 1 -- joint training with condition-aware 3D RoPE
+               + hierarchical motion injection
+               + group/role embeddings for subject anchoring
+      |
+      v
+    Stage 2 -- latent identity reward model (LIRM)
+               gives motion-aware identity feedback in latent space
+      |
+      v
+  Evidence: DreamOmni Bench (new benchmark), quantitative + qualitative
+            comparisons against prior single-task and multi-task baselines
+      |
+      v
+  Conclusion: both identity fidelity and motion precision improve
+              over prior art, measured on the new benchmark
+```
+
+## The Increment
+
+**One sentence**: Before this paper, you had to choose between a model that remembered faces and a model that followed motion scripts — after it, one model does both without either falling apart.
+
+### Core Mechanism
+
+The architecture is built on a pretrained video diffusion backbone (likely a DiT-style transformer). Stage one wires in four types of conditioning simultaneously: reference images for subject appearance, optical flow for global motion, local dynamics signals (per-subject motion), and camera trajectories. The tricky part is that these signals live in very different spaces — pixel-level images, flow fields, 3D camera matrices — so the authors introduce a condition-aware 3D rotary positional embedding (RoPE) that gives each signal type its own positional encoding scheme while still letting them interact inside the transformer's attention layers. On top of that, a hierarchical motion injection strategy processes global motion at a coarser temporal scale first, then injects local dynamics at finer scales, so the two don't fight each other.
+
+The multi-subject ambiguity problem gets its own dedicated fix: group embeddings tag which subject a motion signal belongs to, and role embeddings encode the semantic role of that subject in the scene. Think of it as attaching a name tag and a job title to every motion instruction before it enters the model. This lets the attention mechanism route "walk left" to person A and "wave hand" to person B without confusion.
+
+Stage two is where identity preservation gets rescued. The authors train a latent identity reward model (LIRM) on top of the same video diffusion backbone. This reward model scores generated video latents on how well they preserve the reference identity, but crucially it's motion-aware — it doesn't penalize the model for moving the subject, only for distorting their appearance. The reward signal is fed back via reinforcement learning from human feedback (RLHF)-style training, nudging the diffusion model to prefer samples that score high on identity fidelity.
+
+```
+  Reference images ----+
+  Optical flow --------+---> Condition-aware 3D RoPE ---> Transformer blocks
+  Local dynamics ------+              |                          |
+  Camera trajectory ---+    Hierarchical motion injection        |
+                                      |                          |
+  Group embeddings ----+              v                          v
+  Role embeddings -----+---> Subject anchoring layer --> Denoised video latent
+                                                               |
+                                      +------------------------+
+                                      |
+                              Latent Identity Reward Model (LIRM)
+                                      |
+                              Identity reward score
+                                      |
+                              RL feedback --> update diffusion model weights
+```
+
+Think of it like a film production pipeline. Stage one is pre-production: you cast your actors (reference images), write the shot list (camera trajectory), choreograph the blocking (global motion), and assign each actor their specific moves (local dynamics + group/role embeddings). The condition-aware RoPE is the script supervisor who makes sure every instruction is labeled with who it's for and when it happens. The hierarchical injection is the director calling "wide shot first, then close-up" — you establish the big movement before you layer in the details.
+
+Stage two is post-production quality control. After the film is shot (video generated), a separate reviewer — the LIRM — watches the footage and asks: "Does this person still look like the actor we cast, even while they're moving?" If the answer is no, that take gets flagged and the director (diffusion model) learns to do better next time. The key insight is that the reviewer has seen enough motion to not confuse "they turned their head" with "they changed identity" — that's the motion-aware part of the reward.
+
+### Key Concepts
+
+- **Condition-aware 3D RoPE**: Rotary positional embeddings are a way of encoding position information directly into the attention computation, so the model knows where in space and time each token sits. The "3D" part means it encodes height, width, and time simultaneously. The "condition-aware" twist is that different input modalities (image patches vs. flow vectors vs. camera matrices) get different rotary bases, so the model can tell them apart even when they're all mixed together in the same attention layer. Concrete example: imagine you're reading a document where some words are in English and some are in French — condition-aware RoPE is like giving each language its own font so the model never confuses a French preposition for an English one.
+
+- **Latent Identity Reward Model (LIRM)**: Standard identity preservation checks happen in pixel space — you compare faces using a face recognition network. The problem is that during diffusion training, you're working in latent space, not pixel space, so the feedback arrives late and noisy after decoding. LIRM skips the decode step and learns to score identity fidelity directly from latents. It's trained on pairs of (reference latent, generated latent) with human preference labels, so it learns what "same person" looks like before the image is even rendered. This makes the reward signal faster and more tightly coupled to the training loop.
+
+- **Group and Role Embeddings**: When you have two subjects in a scene, a naive model sees one big bag of motion signals and doesn't know which signal belongs to which person. Group embeddings are learned vectors that say "this motion token belongs to subject 2." Role embeddings add a second layer: "subject 2 is the background character." Together they turn an ambiguous motion soup into a structured assignment problem that attention can solve cleanly.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+  [Identity model]                     [Unified backbone]
+       |                                      |
+  preserves face                    condition-aware 3D RoPE
+       |                              /    |    |    \
+  (motion breaks it)           image flow local camera
+                                      |
+  [Motion model]               group + role embeddings
+       |                              |
+  controls movement            hierarchical injection
+       |                              |
+  (identity forgotten)         [video latent]
+                                      |
+  Two separate systems          LIRM reward feedback
+  that can't coexist                  |
+                               identity + motion, both intact
+```
+
+From siloed single-task models to a unified conditioning architecture with reward-shaped identity preservation, the core shift is: motion control and identity preservation are no longer competing objectives but jointly optimized signals in the same training loop.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The field has been running identity and motion as parallel tracks for two years and the intersection is genuinely underexplored. It's not a manufactured problem — anyone who's tried to use existing tools for a multi-person scene with specific motion requirements has hit exactly these three failure modes. The timing is right: the backbone models are now strong enough that the bottleneck really is the conditioning architecture, not raw generation quality.
+
+**Method maturity**: It's more engineering than insight. The individual components — RoPE variants, hierarchical injection, RLHF-style reward training — are all established techniques. The contribution is the integration and the specific design choices (condition-aware RoPE, LIRM operating in latent space). That's not a criticism exactly, but don't expect a conceptual breakthrough. The latent-space reward model is the most novel piece and it's a clean idea worth noting.
+
+**Experimental integrity**: The benchmark is self-curated (DreamOmni Bench), which is a yellow flag. When you build the benchmark and report the best numbers on it, reviewers should ask whether the benchmark design inadvertently favors your method's strengths. The baselines listed are reasonable — they compare against prior customization and motion control methods — but without seeing the actual numbers and ablations it's hard to know if the comparisons are apples-to-apples. The two-stage training paradigm also raises a question: how much of the gain comes from the LIRM vs. simply training longer or on more data?
+
+**Writing quality**: The abstract front-loads jargon ("condition-aware 3D rotary positional embedding," "latent identity reward feedback learning") before the reader has any intuition for why those things matter. The methods section is probably where the real clarity lives, but the framing work in the intro is doing too little to earn the reader's trust. If the authors rewrote the introduction to lead with a concrete failure case — "here's what happens when you try to make existing models do this" — the whole paper would land harder.
+
+**Verdict**: weak accept — solid engineering contribution with a genuine use case, but the self-curated benchmark and incremental novelty keep it from being a must-read.
+
+## Takeaways
+
+A few things worth stealing:
+
+- The latent-space reward model idea transfers broadly. Any time you're doing RLHF-style training on a diffusion model and your reward signal requires decoding to pixel space, ask whether you can train a reward model that operates directly on latents instead. The latency and gradient quality improvement is real.
+
+- Group and role embeddings as a general pattern for multi-instance control. If you're building any system where multiple agents share a conditioning space (multi-object layout, multi-speaker audio, multi-character animation), the explicit "who does this instruction belong to" tagging is a clean architectural primitive that's easy to implement and hard to get wrong.
+
+- Condition-aware positional encoding for heterogeneous inputs. When you're mixing modalities in a transformer and they have fundamentally different spatial/temporal structures, giving each modality its own positional encoding basis (rather than projecting everything into a shared space first) is worth trying before reaching for more complex fusion architectures.
+:::
+
+:::zh
+**论文**: [2603.12257](https://arxiv.org/abs/2603.12257)
+**作者**: Yujie Wei, Xinyu Liu, Shiwei Zhang, Hangjie Yuan, Jinbo Xing, Zhekai Chen, Xiang Wang, Haonan Qiu, Rui Zhao, Yutong Feng
+**分类**: cs.CV
+
+## 缺口
+
+视频生成领域长期分裂成两条平行赛道。
+
+一条是主体定制化（subject customization），核心问题是让模型记住某个人或物体长什么样，并在生成时忠实还原。
+DreamBooth、CustomVideo、VideoBooth 都在这条路上。
+
+另一条是运动控制（motion control），核心问题是指挥画面怎么动：镜头轨迹、光流、骨骼姿态。
+AnimateDiff、MotionCtrl、CameraCtrl 是这条路的代表。
+
+两条路几乎没有交汇，少数尝试同时做的工作都撞上了三个具体问题：
+
+第一，运动粒度粗糙。大多数方法只处理一个层级的运动（比如只管镜头，或只管身体姿态），无法同时驾驭多个层级。
+
+第二，控制信号模糊。场景里有两个人，你发出一个运动指令，模型不知道你在说谁，信号在主体之间串扰。
+
+第三，身份退化。为运动控制做的微调或条件注入，往往会破坏模型原本学到的身份特征。姿势对了，脸却变了。
+
+```
+  问题：多主体身份保持 + 多粒度运动控制 = 从未被联合解决
+      |
+      v
+  假设：统一的条件架构 + 奖励塑形训练
+        可以在不牺牲任何一方的前提下解耦身份与运动
+      |
+      v
+  方法：
+    第一阶段 -- 联合训练
+               条件感知 3D RoPE
+               + 分层运动注入
+               + 群组/角色嵌入锚定主体
+      |
+      v
+    第二阶段 -- 潜空间身份奖励模型 (LIRM)
+               在潜空间提供运动感知的身份反馈
+      |
+      v
+  证据：DreamOmni Bench（新基准）
+        与先前单任务和多任务基线的定量+定性对比
+      |
+      v
+  结论：身份保真度和运动精度均优于先前方法
+```
+
+## 增量
+
+**一句话**：这篇论文之前，你必须在"记得住脸"和"听得懂动作指令"之间二选一；之后，一个模型两件事都能做，而且互不拖累。
+
+### 核心机制
+
+整个架构建立在预训练视频扩散骨干网络（很可能是 DiT 风格的 Transformer）之上。
+
+第一阶段同时接入四类条件信号：参考图像（主体外观）、光流（全局运动）、局部动态（每个主体的独立运动）、相机轨迹。
+难点在于这些信号来自完全不同的空间——像素级图像、流场、3D 相机矩阵——因此作者引入了条件感知 3D 旋转位置编码（RoPE），为每种信号类型分配独立的位置编码方案，同时允许它们在 Transformer 的注意力层内相互作用。
+在此之上，分层运动注入策略先在较粗的时间尺度处理全局运动，再在更细的尺度注入局部动态，防止两者相互干扰。
+
+多主体模糊问题有专门的解法：群组嵌入（group embeddings）标记某个运动信号属于哪个主体，角色嵌入（role embeddings）编码该主体在场景中的语义角色。
+可以理解为：每条运动指令进入模型之前，都被贴上了"姓名牌"和"职位牌"。
+这样注意力机制就能把"向左走"路由给 A，把"挥手"路由给 B，不再混淆。
+
+第二阶段专门拯救身份保真度。
+作者在同一个视频扩散骨干上训练了一个潜空间身份奖励模型（LIRM）。
+这个奖励模型对生成的视频潜变量打分，衡量其与参考身份的吻合程度，但关键是它具备运动感知能力——它不会因为主体在运动而扣分，只会因为外貌失真而扣分。
+奖励信号通过类 RLHF 的训练方式反馈给扩散模型，引导模型偏好身份保真度高的样本。
+
+```
+  参考图像 --------+
+  光流 -----------+---> 条件感知 3D RoPE ---> Transformer 块
+  局部动态 --------+              |                   |
+  相机轨迹 --------+    分层运动注入                   |
+                                  |                   v
+  群组嵌入 --------+              v            去噪视频潜变量
+  角色嵌入 --------+---> 主体锚定层                    |
+                                      +----------------+
+                                      |
+                              潜空间身份奖励模型 (LIRM)
+                                      |
+                              身份奖励分数
+                                      |
+                              RL 反馈 --> 更新扩散模型权重
+```
+
+用电影制作流程来理解这个架构会更直观。
+
+第一阶段是前期制作：你选定演员（参考图像），写好分镜表（相机轨迹），编排整体走位（全局运动），再给每位演员分配专属动作（局部动态 + 群组/角色嵌入）。
+条件感知 RoPE 是场记，确保每条指令都标注了"给谁的"和"什么时候执行"。
+分层注入是导演
