@@ -1,0 +1,372 @@
+---
+title:
+  en: "MXNorm: Hijacking Block Scales from Low-Precision Matmuls to Speed Up Normalization"
+  zh: "MXNorm：劫持低精度矩阵乘法的块尺度来加速归一化"
+description:
+  en: "Reuses MXFP8 block scales to approximate RMSNorm, reducing normalization overhead by 32x while maintaining training accuracy in Llama models up to 8B parameters."
+  zh: "复用 MXFP8 块尺度来近似 RMSNorm，将归一化开销降低 32 倍，同时在最大 8B 参数的 Llama 模型上保持训练精度。"
+date: 2026-03-16
+tags: ["arxiv", "ai", "cs.lg", "cs.ai", "cs.ne"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2603.13180](https://arxiv.org/abs/2603.13180)
+**Authors**: Callum McLean, Luke Y. Prince, Alexandre Payot, Paul Balança, Carlo Luschi
+**Categories**: cs.LG, cs.AI, cs.NE
+
+## The Gap
+
+Hardware accelerators have gotten really good at low-precision matrix multiplication (MXFP8, FP4), but normalization layers like RMSNorm still run in higher precision. The problem: matmul performance improved 10-100x with new formats, but normalization is stuck doing full-precision reductions over thousands of elements. This creates a bottleneck where the cheap matmuls finish quickly, then wait for expensive normalization to catch up.
+
+Prior work focused on making matmuls faster through lower precision. Nobody asked: can we make normalization cheaper by reusing computation that's already happening in the matmul pipeline?
+
+```
+Problem: Normalization bottleneck in low-precision training
+   |
+   v
+Observation: MXFP8 already computes block-wise max values (scales)
+   |
+   v
+Hypothesis: Block scales approximate global statistics well enough
+   |
+   v
+Method: Replace full reduction with aggregation over ~32 block scales
+   |
+   v
+Evidence: <0.1% accuracy loss on Llama 3 pretraining, 2.4x kernel speedup
+   |
+   v
+Conclusion: Normalization can piggyback on matmul infrastructure
+```
+
+## The Increment
+
+**One sentence**: Before this paper, normalization required scanning all elements; after, it scans only the block scales already computed for low-precision matmuls.
+
+### Core Mechanism
+
+MXFP8 format divides tensors into blocks (typically 32 elements) and stores a shared exponent (scale) per block. These scales capture the magnitude distribution across the tensor. MXNorm observes that RMSNorm fundamentally needs magnitude information—specifically, the root mean square of all elements.
+
+Instead of computing RMS from scratch by squaring and summing all elements, MXNorm reconstructs an approximation from the block scales. For each block, the scale represents the maximum absolute value. MXNorm squares these scales, averages them (weighted by block size), and takes the square root. This gives an RMS estimate using only ~1/32 of the data.
+
+The key insight: block scales are already sitting in memory from the MXFP8 cast that happens before every matmul. MXNorm just reads them instead of recomputing statistics from the full tensor. The approximation works because scales capture the magnitude envelope—if a block has large values, its scale is large, contributing appropriately to the global RMS.
+
+```
+Standard RMSNorm:
+  Input tensor (N elements)
+       |
+       v
+  [Square all N elements] -----> High memory bandwidth
+       |
+       v
+  [Sum N values] ----------------> Full reduction
+       |
+       v
+  [Sqrt and normalize]
+
+
+MXNorm:
+  Input tensor (N elements)
+       |
+       v
+  [MXFP8 cast] -------> Produces ~N/32 block scales (already done!)
+       |               (scales stored in memory)
+       v
+  [Read scales] -------> Low memory bandwidth
+       |
+       v
+  [Square ~N/32 scales, average, sqrt] --> Tiny reduction
+       |
+       v
+  [Normalize using approximate RMS]
+```
+
+Think of it like estimating the average temperature of a city. Standard approach: measure every street corner (thousands of readings). MXNorm approach: each neighborhood already has a weather station reporting its peak temperature (for other purposes). Just average those ~30 peak readings instead. You lose fine-grained detail, but the city-wide estimate is close enough because peaks correlate with averages.
+
+The method is parasitic in the best sense—it extracts value from infrastructure built for a different purpose (low-precision matmuls) without adding new computation.
+
+### Key Concepts
+
+- **MXFP8 block scales**: When converting a tensor to MXFP8, you divide it into blocks of 32 consecutive elements. For each block, you find the maximum absolute value—that's the scale. All elements in the block are then represented relative to this scale using low-precision mantissas. The scale is stored separately in higher precision. Example: block [0.1, 0.3, 0.05, 0.2] has scale 0.3; elements become [0.33, 1.0, 0.17, 0.67] × 0.3 in MXFP8 representation. These scales are computed once per matmul cast and live in memory.
+
+- **RMSNorm approximation quality**: RMS (root mean square) is sqrt(mean(x²)). Using block maxima instead of individual values introduces error because max(x) ≥ rms(x) for any block. But the error is bounded and systematic. If blocks are reasonably uniform, the overestimate is consistent across blocks and cancels out when averaging. The paper shows empirically that this approximation preserves training dynamics—loss curves stay within 0.1% of baseline through billions of tokens.
+
+- **Reduction bottleneck**: Modern GPUs have massive matmul throughput but limited memory bandwidth. Normalization requires reading all N elements, computing N squares, then summing them (a global reduction requiring synchronization across cores). This is memory-bound and synchronization-heavy. Reducing N to N/32 means 32x less data movement and a much smaller reduction tree, directly translating to speedup.
+
+## Framework Shift
+
+```
+Before (RMSNorm + MXFP8):              After (MXNorm):
+
+Matmul pipeline:                       Matmul pipeline:
+  Tensor --> [MXFP8 cast] --> Matmul     Tensor --> [MXFP8 cast] --> Matmul
+              |                                      |         |
+              v                                      |         v
+          (scales computed,                          |    (scales stored)
+           then discarded)                           |         |
+                                                     |         |
+Normalization pipeline:                              |         |
+  Tensor --> [Full reduction] --> RMS                +-------->+
+              (N operations)                                   |
+                                                               v
+                                                    [Aggregate scales] --> RMS
+                                                        (N/32 operations)
+```
+
+From parallel pipelines to shared infrastructure, the core shift is **computation reuse across layer boundaries**.
+
+## Expert Assessment
+
+**Problem choice**: Real and timely. As hardware moves to FP4/FP6, the normalization bottleneck will only worsen. The gap is genuine—nobody systematically exploited the fact that block scales are free byproducts of low-precision casting.
+
+**Method maturity**: Elegant hack rather than deep insight. The approximation is straightforward once you notice the scales are there. No complex theory—just "use what's already computed." That said, the simplicity is a strength. The risk: method is tied to block-structured formats (MXFP, NVFP). If future formats don't use block scales, MXNorm becomes irrelevant.
+
+**Experimental integrity**: Solid. Three model sizes (125M, 1B, 8B), full pretraining runs, fair baselines. The 0.1% accuracy claim holds up. Kernel benchmarks show real speedups, though modest (2.4x for the norm itself, only 1.3-2.6% end-to-end). The paper is honest about this—normalization is a small fraction of total compute, so even big norm speedups yield small overall gains. One weakness: experiments only on Llama architecture. Would be stronger with diverse model families.
+
+**Writing quality**: Clear and focused. The intro efficiently motivates the problem. Methods section is crisp. The weakness: insufficient analysis of when the approximation fails. What tensor distributions break MXNorm? The paper shows it works but doesn't deeply explore failure modes. A section on "when not to use this" would elevate it from engineering trick to principled method.
+
+**Verdict**: weak accept — Clever, practical, well-executed, but narrow impact (small end-to-end speedups, format-dependent, limited theoretical depth).
+
+## Takeaways
+
+**Reuse intermediate artifacts**: When optimizing a pipeline, inventory what's already being computed for other purposes. Here, block scales were throwaway metadata; repurposing them eliminated redundant work. This pattern applies beyond ML—any system with staged computation likely has exploitable intermediates.
+
+**Approximate with structure-aware sampling**: Instead of sampling random elements to estimate statistics, sample structural summaries (block maxima, quantiles, etc.). If your data has hierarchical structure, summaries at coarser levels often suffice.
+
+**Benchmark the right thing**: The paper reports both kernel speedups (2.4x) and end-to-end impact (1.3%). Many papers would bury the latter. Always measure what users actually care about—local optimizations often vanish in the full system.
+
+**Format-specific optimizations**: As hardware diversifies (MXFP, NVFP, FP6, etc.), there's opportunity in format-specific tricks. Don't just use formats as drop-in replacements—exploit their unique properties.
+:::
+
+:::zh
+**论文**: [2603.13180](https://arxiv.org/abs/2603.13180)
+**作者**: Callum McLean, Luke Y. Prince, Alexandre Payot, Paul Balança, Carlo Luschi
+**分类**: cs.LG, cs.AI, cs.NE
+
+## 缺口
+
+硬件加速器在低精度矩阵乘法（MXFP8、FP4）上已经非常快了，但 RMSNorm 这类归一化层还在用高精度跑。
+
+问题在于：矩阵乘法性能靠新格式提升了 10-100 倍，但归一化还在对成千上万个元素做全精度规约。
+
+这就造成了瓶颈——便宜的矩阵乘法很快算完，然后等着昂贵的归一化慢慢追上来。
+
+之前的工作都在通过降低精度让矩阵乘法更快。
+
+没人问过：能不能复用矩阵乘法流水线里已经算好的东西，让归一化变便宜？
+
+```
+问题：低精度训练中的归一化瓶颈
+   |
+   v
+观察：MXFP8 已经在算块级最大值（尺度）
+   |
+   v
+假设：块尺度能足够好地近似全局统计量
+   |
+   v
+方法：用约 32 个块尺度的聚合替代全规约
+   |
+   v
+证据：Llama 3 预训练精度损失 <0.1%，核函数加速 2.4 倍
+   |
+   v
+结论：归一化可以搭矩阵乘法基础设施的便车
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，归一化要扫描所有元素；之后，只扫描为低精度矩阵乘法已经算好的块尺度。
+
+### 核心机制
+
+MXFP8 格式把张量分成块（通常 32 个元素），每块存一个共享指数（尺度）。
+
+这些尺度捕捉了张量上的幅度分布。
+
+MXNorm 观察到 RMSNorm 本质上需要幅度信息——具体说，是所有元素的均方根。
+
+MXNorm 不从头算 RMS（平方所有元素再求和），而是从块尺度重建近似值。
+
+对每个块，尺度代表最大绝对值。
+
+MXNorm 把这些尺度平方，求平均（按块大小加权），再开方。
+
+这样只用约 1/32 的数据就得到了 RMS 估计。
+
+关键洞察：块尺度在每次矩阵乘法前的 MXFP8 转换中已经算好，就在内存里。
+
+MXNorm 只是读它们，而不是从完整张量重新算统计量。
+
+近似有效是因为尺度捕捉了幅度包络——如果一个块有大值，它的尺度就大，对全局 RMS 的贡献也相应大。
+
+```
+标准 RMSNorm：
+  输入张量（N 个元素）
+       |
+       v
+  [平方所有 N 个元素] -----> 高内存带宽
+       |
+       v
+  [求和 N 个值] --------------> 全规约
+       |
+       v
+  [开方并归一化]
+
+
+MXNorm：
+  输入张量（N 个元素）
+       |
+       v
+  [MXFP8 转换] -------> 产生约 N/32 个块尺度（已经算好了！）
+       |               （尺度存在内存里）
+       v
+  [读尺度] -----------> 低内存带宽
+       |
+       v
+  [平方约 N/32 个尺度，求平均，开方] --> 微小规约
+       |
+       v
+  [用近似 RMS 归一化]
+```
+
+就像估算一个城市的平均气温。
+
+标准方法：测量每个街角（数千次读数）。
+
+MXNorm 方法：每个街区已经有气象站报告峰值温度（为了其他目的）。
+
+只要平均那约 30 个峰值读数就行。
+
+你失去了细粒度细节，但全市估计足够接近，因为峰值和平均值相关。
+
+这个方法是寄生式的——从为其他目的（低精度矩阵乘法）建的基础设施里榨取价值，不增加新计算。
+
+这是最好的那种寄生。
+
+### 关键概念
+
+- **MXFP8 块尺度**：把张量转成 MXFP8 时，你把它分成 32 个连续元素的块。
+
+对每个块，找最大绝对值——那就是尺度。
+
+块里所有元素然后用低精度尾数相对这个尺度表示。
+
+尺度单独用更高精度存。
+
+例子：块 [0.1, 0.3, 0.05, 0.2] 的尺度是 0.3；元素在 MXFP8 表示中变成 [0.33, 1.0, 0.17, 0.67] × 0.3。
+
+这些尺度每次矩阵乘法转换时算一次，存在内存里。
+
+- **RMSNorm 近似质量**：RMS（均方根）是 sqrt(mean(x²))。
+
+用块最大值代替单个值会引入误差，因为对任何块 max(x) ≥ rms(x)。
+
+但误差有界且系统性。
+
+如果块相当均匀，高估在各块间一致，求平均时会抵消。
+
+论文实证显示这个近似保持了训练动态——损失曲线在数十亿 token 上保持在基线 0.1% 以内。
+
+- **规约瓶颈**：现代 GPU 有巨大的矩阵乘法吞吐量，但内存带宽有限。
+
+归一化要读所有 N 个元素，算 N 个平方，然后求和（全局规约，需要跨核心同步）。
+
+这是内存受限且同步密集的。
+
+把 N 降到 N/32 意味着数据移动减少 32 倍，规约树小得多，直接转化为加速。
+
+## 框架转变
+
+```
+之前（RMSNorm + MXFP8）：            之后（MXNorm）：
+
+矩阵乘法流水线：                     矩阵乘法流水线：
+  张量 --> [MXFP8 转换] --> 矩阵乘法    张量 --> [MXFP8 转换] --> 矩阵乘法
+            |                                    |         |
+            v                                    |         v
+        （尺度算完                               |    （尺度存储）
+         就扔掉）                                |         |
+                                                |         |
+归一化流水线：                                   |         |
+  张量 --> [全规约] --> RMS                      +-------->+
+            （N 次操作）                                   |
+                                                          v
+                                              [聚合尺度] --> RMS
+                                                  （N/32 次操作）
+```
+
+从并行流水线到共享基础设施，核心转变是**跨层边界的计算复用**。
+
+## 专家评审
+
+**选题眼光**：真实且及时。
+
+随着硬件转向 FP4/FP6，归一化瓶颈只会恶化。
+
+缺口是真的——没人系统性地利用块尺度是低精度转换的免费副产品这个事实。
+
+**方法成熟度**：优雅的 hack 而非深刻洞察。
+
+一旦你注意到尺度在那儿，近似就很直接。
+
+没有复杂理论——就是"用已经算好的东西"。
+
+话说回来，简单是优点。
+
+风险：方法绑定到块结构格式（MXFP、NVFP）。
+
+如果未来格式不用块尺度，MXNorm 就没用了。
+
+**实验诚意**：扎实。
+
+三个模型尺寸（125M、1B、8B），完整预训练，公平基线。
+
+0.1% 精度损失的说法站得住。
+
+核函数基准测试显示真实加速，虽然温和（归一化本身 2.4 倍，端到端只有 1.3-2.6%）。
+
+论文对此很诚实——归一化只占总计算的一小部分，所以即使归一化大幅加速，整体收益也小。
+
+一个弱点：实验只在 Llama 架构上。
+
+如果有多样化的模型家族会更强。
+
+**写作功力**：清晰聚焦。
+
+引言高效地激发问题。
+
+方法部分简洁。
+
+弱点：对近似何时失效分析不足。
+
+什么张量分布会破坏 MXNorm？论文展示了它有效，但没深入探索失效模式。
+
+一个"何时不该用"的章节能把它从工程技巧提升到有原则的方法。
+
+**判决**：弱接收 — 巧妙、实用、执行良好，但影响窄（端到端加速小、格式依赖、理论深度有限）。
+
+## 要点总结
+
+**复用中间产物**：优化流水线时，盘点一下什么东西已经为其他目的算过了。
+
+这里，块尺度是一次性元数据；重新利用它们消除了冗余工作。
+
+这个模式超越机器学习——任何有阶段性计算的系统都可能有可利用的中间产物。
+
+**用结构感知采样来近似**：不要随机采样元素来估计统计量，而是采样结构摘要（块最大值、分位数等）。
+
+如果你的数据有层次结构，粗粒度层的摘要往往就够了。
+
+**基准测试正确的东西**：论文报告了核函数加速（2.4 倍）和端到端影响（1.3%）。
+
+很多论文会埋掉后者。
+
+总是测量用户真正关心的——局部优化在完整系统里常常消失。
+
+**格式特定优化**：随着硬件多样化（MXFP、NVFP、FP6 等），格式特定技巧有机会。
+
+不要只把格式当即插即用的替代品——利用它们的独特属性。
+
+:::
