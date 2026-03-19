@@ -1,0 +1,304 @@
+---
+title:
+  en: "Stop Breaking Things: How Graph-Based Impact Analysis Cuts AI Coding Regressions by 70%"
+  zh: "别再搞坏代码了：图结构影响分析如何将 AI 编码回归率降低 70%"
+description:
+  en: "TDAD introduces AST-based code-test graph analysis to tell AI coding agents exactly which tests to verify before committing a change, slashing regression rates dramatically."
+  zh: "TDAD 通过基于 AST 的代码-测试图分析，精准告知 AI 编码智能体哪些测试需要验证，大幅降低回归率。"
+date: 2026-03-19
+tags: ["arxiv", "ai", "cs.se", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2603.17973](https://arxiv.org/abs/2603.17973)
+**Authors**: Pepe Alonso
+**Categories**: cs.SE, cs.AI
+
+## The Gap
+
+SWE-bench has become the de facto leaderboard for AI coding agents, but it measures one thing: did the agent resolve the issue? It says nothing about whether the agent broke something else in the process. Prior work on agents like SWE-agent, Devin, and similar systems optimizes hard for resolution rate while treating regressions as an acceptable side effect. The benchmark itself has no regression penalty — you get credit for fixing the bug even if you snap three other tests in half.
+
+The deeper problem is that existing agent workflows treat test suites as oracles to consult after the fact, not as a map to navigate during development. TDD as a concept exists, but nobody had seriously asked: does telling a smaller model to "do TDD" actually help, or does it just add noise to the prompt?
+
+```
+Problem: AI agents fix bugs but break other tests
+    |
+    v
+Assumption: Agents need to KNOW which tests are at risk
+    |           (not just be told to "write tests first")
+    v
+Method: Build AST graph of code<->test relationships,
+        rank tests by change impact, feed as context
+    |
+    v
+Evidence: 70% regression drop (6.08% -> 1.82%),
+          resolution up 24% -> 32% on SWE-bench Verified
+    |
+    v
+Conclusion: Context (what to verify) beats procedure
+            (how to do TDD) for smaller models
+```
+
+## The Increment
+
+**One sentence**: Before this paper, AI coding agents had no principled way to know which tests their changes would break; after it, a graph-based impact score can surface that context automatically and measurably reduce regressions.
+
+### Core Mechanism
+
+TDAD works in three stages. First, it parses the repository using AST analysis to extract every function, class, and method definition then traces which test files import or call which production code symbols. This produces a bipartite graph: one side is production code nodes, the other is test nodes and edges carry weights based on call depth and coupling tightness.
+
+Second, when an agent proposes a diff, TDAD computes an impact score for each test by walking the graph from the changed symbols outward. Tests that directly call a modified function score highest; tests that call something that calls something modified score lower. The top-K tests by impact score get surfaced as context to the agent before it finalizes the change.
+
+Third, this context feeds into a GraphRAG-style retrieval step inside the agent's workflow. Instead of the agent blindly running the full test suite (expensive) or guessing which tests matter (unreliable), it gets a ranked shortlist. An optional auto-improvement loop then lets the agent iterate: run the shortlisted tests, observe failures, patch repeat — up to N rounds.
+
+```
+Repository Source Code
+        |
+        v
+   AST Parser
+   /         \
+Functions   Test Files
+   \         /
+    Bipartite
+      Graph
+        |
+   Proposed Diff
+        |
+        v
+  Impact Scorer
+  (graph walk from
+   changed nodes)
+        |
+        v
+  Top-K Tests  <-- fed as context to agent
+        |
+        v
+  Agent patches + verifies
+        |
+   [auto-loop?]
+   yes |    | no
+       v    v
+   iterate  done
+```
+
+Think of it like a building's electrical panel. When you're rewiring one circuit, a good electrician doesn't test every outlet in the building — they look at the panel diagram, trace which rooms share that circuit, and test only those outlets. TDAD is the panel diagram. The AST graph is the wiring map; the impact scorer is the electrician reading which breakers are downstream of your change; the top-K list is the clipboard of rooms to check. Without the diagram, you're either testing everything (slow) or guessing (dangerous). With it, you test exactly what's at risk.
+
+### Key Concepts
+
+- **AST-based code-test graph**: An Abstract Syntax Tree is just a structured representation of source code — instead of raw text, you get a tree where each node is a meaningful unit (function call, class definition, import statement). TDAD uses this to find edges between production code and tests without running anything. Concretely: if `test_login.py` imports `auth.validate_token` and calls it, there's an edge from `validate_token` to `test_login`. Change `validate_token`, and that edge lights up.
+
+- **Weighted impact analysis**: Not all edges are equal. A test that directly calls your changed function is more at risk than a test that calls a wrapper that calls your function. TDAD assigns weights based on call depth and coupling — closer in the graph means higher impact score. It's the same intuition as PageRank but for risk propagation instead of link authority.
+
+- **GraphRAG workflow**: RAG (Retrieval-Augmented Generation) normally retrieves text chunks from a vector store. GraphRAG does retrieval over a graph structure instead, letting you exploit relational structure (A calls B which calls C) rather than just semantic similarity. Here it means the agent's context window gets populated with structurally relevant tests, not just textually similar ones.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+Agent gets issue description          Agent gets issue description
+         |                                     |
+         v                                     v
+   Agent writes fix                      AST graph built
+         |                               from repo
+         v                                |
+   Run full test suite                         v
+   (or skip entirely)                  Diff -> impact scores
+         |                                |
+         v                                     v
+   Hope nothing broke                  Top-K tests surfaced
+                               |
+                                               v
+                         Agent writes fix
+                                         + verifies shortlist
+                               |
+                                               v
+                                         Targeted confidence
+```
+
+From reactive to proactive, the core shift is: stop treating the test suite as a post-hoc oracle and start treating it as a navigable map that tells you where to look before you commit.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The regression blind spot in SWE-bench is well-known but under-addressed — most teams just accept it as noise. Framing it as a first-class problem and building a benchmark methodology around it is genuinely useful. The field needed someone to just do this.
+
+**Method maturity**: The AST graph + impact scoring idea is not exotic — it's essentially a lightweight version of what static analysis tools like pytest-cov or dependency trackers already do. The novelty is in the integration: wiring it into an agent's context window as a GraphRAG skill rather than a post-hoc check. That's a reasonable engineering insight, not a theoretical breakthrough. The auto-improvement loop is the more interesting piece, but it's also the least rigorously evaluated (10 instances is a toy sample).
+
+**Experimental integrity**: The numbers are promising but the setup raises questions. 100 instances for the main experiment is thin for SWE-bench claims. The 60% resolution on10 instances for the auto-loop is essentially anecdote-level — you can't draw conclusions from that. The comparison between TDD prompting and GraphRAG is the most interesting result, but the TDD baseline isn't described in enough detail to know if it was a fair prompt. The finding that TDD prompting **increased* regressions to 9.94% is surprising and deserves more investigation than it gets.
+
+**Writing quality**: The paper is readable and the open-source commitment is a genuine plus. The weakest section is the experimental setup — it reads like a lab notebook rather than a controlled study. If the author rewrote the evaluation section with clearer ablations (what exactly changes between conditions, what's held constant), the paper's credibility would jump significantly. Right now you have to take several comparisons on faith.
+
+**Verdict**: weak accept — the problem framing and the TDD-vs-context finding are worth publishing, but the experimental rigor needs another pass before the numbers can be trusted at face value.
+
+## Takeaways
+
+The most transferable idea here isn't the full TDAD system — it's the design principle the paper accidentally discovers: **for smaller models, giving them the right context beats giving them the right procedure**. If you're building agent workflows with sub-70B models, this is worth internalizing. Don't write elaborate chain-of-thought prompts telling the model how to think; instead, invest in retrieval infrastructure that surfaces what the model needs to know.
+
+The AST-to-graph pipeline is also directly stealable. If you're building any kind of code review tool, change impact estimator, or CI triage system, the bipartite code-test graph with weighted edges is a clean primitive that's cheap to build and immediately useful. You don't need the full agent loop to get value from it.
+
+Finally, the regression-aware benchmark methodology is something the community should adopt. If you're evaluating any coding agent, tracking what percentage of previously-passing tests break is a one-line addition to your eval harness and it tells you something resolution rate completely hides.
+:::
+
+:::zh
+**论文**: [2603.17973](https://arxiv.org/abs/2603.17973)
+**作者**: Pepe Alonso
+**分类**: cs.SE, cs.AI
+
+## 缺口
+
+SWE-bench 已经成为 AI 编码智能体的事实标准排行榜，但它只衡量一件事：智能体有没有解决问题。
+它完全不关心智能体在解决问题的过程中有没有顺手搞坏别的东西。
+
+SWE-agent、Devin 这类系统的优化目标都是解决率，把回归当成可以接受的副作用。
+基准测试本身没有回归惩罚——你修好了 bug 就得分，哪怕同时折断了三个其他测试。
+
+更深层的问题在于：现有的智能体工作流把测试套件当成事后查阅的神谕，而不是开发过程中可以导航的地图。
+TDD 作为概念早就存在，但从没有人认真问过：让一个较小的模型"做 TDD"到底有没有用，还是只是在提示词里加了噪声？
+
+```
+问题：AI 智能体修 bug 的同时破坏其他测试
+    |
+    v
+假设：智能体需要"知道"哪些测试处于风险中
+    |     （而不只是被告知"先写测试"）
+    v
+方法：构建代码<->测试的 AST 图，
+      按变更影响力排序测试，作为上下文注入
+    |
+    v
+证据：回归率下降 70%（6.08% -> 1.82%），
+      解决率从 24% 升至 32%
+    |
+    v
+结论：上下文（验证什么）比流程（怎么做 TDD）
+      对小模型更有效
+```
+
+## 增量
+
+**一句话**：这篇论文之前，AI 编码智能体没有原则性的方法知道自己的改动会破坏哪些测试；之后，基于图的影响力评分可以自动浮现这些上下文，并可量化地降低回归率。
+
+### 核心机制
+
+TDAD 分三个阶段工作。
+
+第一阶段，用 AST 分析解代码仓库，提取所有函数、类和方法定义，然后追踪哪些测试文件导入或调用了哪些生产代码符号。
+结果是一张二部图：一侧是生产代码节点，另一侧是测试节点，边的权重基于调用深度和耦合紧密程度。
+
+第二阶段，当智能体提出一个 diff 时，TDAD 从被修改的符号出发，沿图向外游走，为每个测试计算影响力分数。
+直接调用被修改函数的测试得分最高；调用了被修改函数的包装器的测试得分较低。
+影响力最高的 Top-K 个测试在智能体最终确认改动之前被作为上下文浮现出来。
+
+第三阶段，这些上下文通过 GraphRAG 风格的检索步骤注入智能体的工作流。
+智能体不再盲目跑完整个测试套件（太贵），也不再猜测哪些测试重要（不可靠），而是得到一份排好序的短名单。
+可选的自动改进循环让智能体可以迭代：跑短名单上的测试，观察失败，打补丁，重复——最多 N 轮。
+
+```
+代码仓库源码
+      |
+      v
+  AST 解析器
+  /         \
+函数定义   测试文件
+  \         /
+   二部图构建
+      |
+  提出的 Diff
+      |
+      v
+  影响力评分器
+  （从变更节点出发
+    沿图游走）
+      |
+      v
+  Top-K 测试  <-- 作为上下文注入智能体
+      |
+      v
+  智能体修改 + 验证
+      |
+  [自动循环?]
+  是 |    | 否
+     v    v
+  继续迭代  完成
+```
+
+用一个比喻来理解：这就像楼宇的配电箱。
+你在改一路电路时，好的电工不会测试楼里每一个插座——他会看配电箱图，追踪哪些房间共用这路电，只测那几个房间。
+TDAD 就是那张配电箱图。
+AST 图是线路图；影响力评分器是电工读取哪些断路器在你改动的下游；Top-K 列表是他手上那张"需要检查的房间"清单。
+没有图，你要么测所有东西（慢），要么靠猜（危险）。
+有了图，你只测真正有风险的部分。
+
+### 关键概念
+
+- **基于 AST 的代码-测试图**：抽象语法树（AST）就是源代码的结构化表示——不是原始文本，而是一棵树，每个节点是一个有意义的单元（函数调用、类定义、导入语句）。TDAD 用它在不运行任何代码的情况下找到生产代码和测试之间的边。具体来说：如果 `test_login.py` 导入并调用了 `auth.validate_token`，就有一条从 `validate_token` 到 `test_login` 的边。修改 `validate_token`，这条边就亮了。
+
+- **加权影响力分析**：不是所有边都等价。直接调用你修改的函数的测试，比调用了调用了你函数的包装器的测试风险更高。TDAD 根据调用深度和耦合程度分配权重——在图中越近，影响力分数越高。直觉上和 PageRank 一样，只不过传播的是风险而不是链接权威。
+
+- **GraphRAG 工作流**：普通的 RAG 从向量库里检索文本块。GraphRAG 在图结构上做检索，可以利用关系结构（A 调用 B，B 调用 C），而不只是语义相似度。在这里，智能体的上下文窗口被填充的是结构上相关的测试，而不只是文本上相似的测试。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+
+智能体收到问题描述                智能体收到问题描述
+       |                                |
+       v                                  v
+  智能体写修复                      从仓库构建 AST 图
+       |                  |
+       v                                v
+  跑完整测试套件               Diff -> 影响力评分
+  （或直接跳过）                          |
+       |                                  v
+       v                          Top-K 测试浮现
+  希望没有搞坏东西                        |
+                          v
+                                    智能体写修复
+                    + 验证短名单
+                                          |
+                                          v
+                    有针对性的信心
+```
+
+从被动到主动，核心转变是：不再把测试套件当事后神谕，而是把它当成可导航的地图，在提交之前就告诉你该看哪里。
+
+## 专家评审
+
+**选题眼光**：这是真缺口。
+SWE-bench 的回归盲点业界都知道，但一直没人认真处理——大多数团队把它当噪声接受了。
+把它作为一等公民问题来框架，并围绕它构建基准测试方法论，是真正有用的贡献。
+这件事本来就该有人做。
+
+**方法成熟度**：AST 图加影响力评分的想法并不新奇——本质上是 pytest-cov 或依赖追踪工具已经在做的事情的轻量版本。
+新颖之处在于集成方式：把它作为 GraphRAG 技能接入智能体的上下文窗口，而不是事后检查。
+这是合理的工程洞察，不是理论突破。
+自动改进循环是更有趣的部分，但也是评估最不严格的部分——10 个实例是玩具级别的样本量。
+
+**实验诚意**：数字看起来不错，但实验设置有几个问题值得注意。
+主实验 100 个实例对于 SWE-bench 的声明来说偏少。
+自动循环在 10 个实例上达到 60% 解决率，基本上是轶事级别——无法从中得出结论。
+TDD 提示和 GraphRAG 之间的对比是最有趣的结果，但 TDD 基线描述不够详细，无法判断提示是否公平。
+TDD 提示把回归率提高到 9.94% 这个发现很令人惊讶，但论文给它的分析篇幅远不够。
+
+**写作功力**：论文可读性不错，开源承诺是真正的加分项。
+最弱的部分是实验设置——读起来像实验室笔记，而不是受控研究。
+如果作者重写评估部分，把消融实验写清楚（各条件之间具体改变了什么，么保持不变），论文的可信度会大幅提升。
+现在有几个对比需要读者自己去信任。
+
+**判决**：弱接收——问题框架和"TDD 对比上下文"这个发现值得发表，但实验严谨性需要再打磨一遍，才能让数字经得起推敲。
+
+## 要点总结
+
+这篇论文最值得迁移的想法不是完整的 TDAD 系统，而是它意外发现的设计原则：**对于较小的模型，给它正确的上下文比给它正确的流程更有效**。
+如果你在用 70B 以下的模型构建智能体工作流，这个原则值得内化。
+不要写精心设计的思维链提示告诉模型怎么思考；而是投资于检索基础设施，让模型能拿到它需要知道的东西。
+
+AST 到图的管道也可以直接拿走用。
+如果你在构建任何代码审查工具、变更影响估算器或 CI 分诊系统，带加权边的二部代码-测试图是一个干净的原语，构建成本低，立竿见影。
+你不需要完整的智能体循环就能从中获益。
+
+最后，回归感知的基准测试方法论是整个社区都应该采纳的东西。
+如果你在评估任何编码智能体，追踪之前通过的测试中有多少比例被破坏，只需要在你的评估脚手架里加一行代码，而它能告诉你解决率完全隐藏的信息。
+:::

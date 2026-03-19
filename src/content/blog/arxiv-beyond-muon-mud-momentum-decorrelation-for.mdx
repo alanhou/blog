@@ -1,0 +1,312 @@
+---
+title:
+  en: "MUD: Faster Transformer Training via Triangular Momentum Whitening"
+  zh: "MUD：用三角动量去相关加速 Transformer 训练"
+description:
+  en: "MUD replaces Muon's expensive polar decomposition with a Cholesky-style triangular update, cutting optimizer overhead by up to 3x while matching or beating Muon's convergence quality."
+  zh: "MUD 用Cholesky 风格的三角更新替代 Muon 的极分解，将优化器开销降低最多 3 倍，同时保持甚至超越 Muon 的收敛质量。"
+date: 2026-03-19
+tags: ["arxiv", "ai", "cs.lg", "math.naoc"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2603.17970](https://arxiv.org/abs/2603.17970)
+**Authors**: Ben S. Southworth, Stephen Thomas
+**Categories**: cs.LG, math.NA, math.OC
+
+## The Gap
+
+AdamW is the default optimizer for transformer training, but it treats each parameter independently — it has no idea that weight matrices have rows and columns that interact. Muon (2024) fixed this by orthogonalizing the momentum matrix before applying the update, which acts like a cheap second-order method. The catch: Muon's orthogonalization uses a polar decomposition approximation (Newton-Schulz iterations), which requires several large matrix multiplications per step. On modern hardware, those multiplications are not free — they can eat30–60% of your step time, and the overhead scales badly with model size and batch configuration.
+
+So the gap is: we want the statistical benefits of momentum whitening (faster convergence per step) without paying the compute cost of polar decomposition. Nobody had asked whether a cheaper triangular factorization could do the same job.
+
+```
+Problem: AdamW ignores matrix structure -> slow convergence
+    |
+    v
+Prior fix (Muon): polar decomposition whitening
+    |
+    * Bottleneck: multiple large matmuls per step
+    * Overhead: 30-60% of step time, hardware-dependent
+    |
+    v
+Gap: Can we whiten momentum cheaply without polar decomp?
+    |
+    v
+Assumption: Triangular (Cholesky-like) factors are enough
+    |
+    v
+Method (MUD): Gauss-Seidel iteration on Gram matrix
+    |
+    v
+Evidence: 1.3-3x tokens/s improvement over Muon
+    |
+    v
+Conclusion: Triangular whitening matches polar quality at lower cost
+```
+
+## The Increment
+
+**One sentence**: Before this paper, getting Muon-quality training meant paying Muon's compute tax; after this paper, you can get most of the benefit with a triangular update that's 1.3–3x cheaper on wall-clock time.
+
+### Core Mechanism
+
+MUD's core idea is to whiten the momentum matrix using a triangular factor instead of a full orthogonal one. Here's what that means concretely. You have a momentum matrix M (same shape as your weight matrix). You want to "decorelate" its rows so that the update doesn't waste steps on correlated directions. Muon does this by computing the polar factor U = M(M^T M)^{-1/2}, which requires iterating a matrix polynomial. MUD instead finds a lower-triangular matrix L such that L M has approximately orthonormal rows — meaning (LM)(LM)^T ≈ I.
+
+The key operation is a Gauss-Seidel sweep over the Gram matrix G = MM^T. You update L row by row: each row of L is chosen to decorelate the corresponding row of M against all previously processed rows. This is exactly the structure of Gram-Schmidt orthogonalization, but done in a way that's equivalent to one sweep of symmetric Gauss-Seidel preconditioning on G. The authors prove this converges quadratically near the fixed point (row-orthonormal matrices), which means once you're close, you need very few inner iterations.
+
+In practice, MUD runs 1–3 inner Gauss-Seidel sweps per optimizer step. Each sweep is O(n^2 d) for an n×d matrix, same asymptotic cost as Muon's Newton-Schulz, but the constant is much smaller because triangular solves are memory-bandwidthfriendly and don't require the same synchronization overhead as repeated full matrix multiplications.
+
+```
+Momentum M (n x d)
+    |
+    v
+Gram matrix G = M^T   (n x n, cheap if n < d)
+    |
+    v
+Gauss-Seidel sweep on G:
+  for i = 1..n:
+    L[i,i] = 1 / sqrt(G[i,i] - sum(L[i,j]^2 for j<i))
+    L[i,j] = -(G[i,j] + sum(L[i,k]*L[k,j])) * L[i,i]
+    |
+    v
+Whitened update W = L M   (rows approx orthonormal)
+    |
+    v
+Apply W as gradient update (like Muon's polar factor)
+```
+
+Think of it like tuning a choir. Muon's approach is to record all the singers simultaneously, compute a full SVD of the sound, and rotate everyone into perfect harmony — mathematically clean, but expensive. MUD's approach is the choir director going down the row one singer at a time: "You, sing your note. You, adjust so you don't clash with her. You, adjust so you don't clash with either of them." Each singer only needs to hear the people already seated. That sequential, triangular correction is Gram-Schmidt. It's not as globally optimal as the SVD rotation, but it gets the choir close enough to in-tune, much faster, because you never have to hold the whole sound in memory at once.
+
+The method components map directly: the choir = weight matrix rows, the director's sequential correction = Gauss-Seidel sweep, "don't clash" = decorelating the Gram matrix off-diagonals, "close enough to in-tune" = quadratic convergence near the orthonormal fixed point.
+
+### Key Concepts
+
+- **Momentum whitening**: When you accumulate gradient momentum across steps, the momentum vector tends to develop correlations — some directions get reinforced together, so your update wastes capacity moving along corelated axes. Whitening transforms the momentum so its directions are uncorrelated and equally scaled, like rotating an ellipse into a circle. This is why second-order methods converge faster: they implicitly whiten the gradient. MUD does this cheaply for matrix-shaped parameters.
+
+- **Gram matrix and Gauss-Seidel**: The Gram matrix G = MM^T captures all pairwise inner products between rows of M. If G = I, the rows are orthonormal — perfectly decorelated. Gauss-Seidel is a classical iterative solver that fixes one variable at a time while holding others fixed. Applied here, it means: zero out one off-diagonal entry of G at a time by applying a triangular correction. It's the numerical linear algebra equivalent of fixing one equation at a time in a system of equations.
+
+- **Polar decomposition vs triangular factorization**: Every matrix M can be written as M = UP where U has orthonormal rows and P is symmetric positive definite (polar decomposition). Muon extracts U. MUD instead finds L (lower triangular) such that LM has orthonormal rows — this is the QR decomposition from the left. Both achieve whitening; the difference is purely computational. Triangular factors are cheaper to compute iteratively because each step only touches a triangular subproblem.
+
+## Framework Shift
+
+```
+Before (Muon / polar decomposition):    After (MUD / triangular whitening):
+
+  M --> [Newton-Schulz iterations]         M --> [Gram matrix G = MM^T]
+         |                                        |
+         | 5-10 full matmuls                | 1-3 Gauss-Seidel sweps
+         |                                        | (triangular, sequential)
+         v                                        v
+  Polar factor U                L M  (approx row-orthonormal)
+  (globally optimal orthogonalization)     (locally convergent, cheaper)
+         |                        |
+         v                                v
+  High quality, high overhead              Similar quality, lower overhead
+  ~30-60% of step time                     ~10-20% of step time
+```
+
+From polar decomposition to triangular factorization, the core shift is: you don't need global optimality in the whitening step — local, sequential correction is good enough and much cheaper.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. Muon's overhead is a genuine pain point that practitioners have noticed, and the question "can we whiten more cheaply?" is natural and well-posed. It sits at the intersection of numerical linear algebra and deep learning optimization, which is underexplored. Not a manufactured gap.
+
+**Method maturity**: The insight is clever — connecting Gram-Schmidt to Gauss-Seidel preconditioning is a nice observation, and the quadratic convergence proof gives it theoretical grounding. That said, the method is essentially "do QR instead of polar decomp," which is a known idea in numerical linear algebra. The novelty is in recognizing this works well enough for optimizer whitening and proving it. It's not brute force, but it's also not a paradigm shift — it's a well-executed engineering insight with solid math backing.
+
+**Experimental integrity**: The baselines look fair — they tune AdamW and Muon carefully and report wall-clock time rather than just step count, which is the right metric for this claim. The 1.3–3x improvement range is wide, which is honest (hardware and model size matter a lot). The ESM-2 protein LM experiment is a nice out-of-distribution test. One mild concern: the paper doesn't deeply ablate the number of inner Gauss-Seidel sweps vs quality tradeoff across all settings, so it's not fully clear when1 sweep is enough vs3.
+
+**Writing quality**: The theoretical section (fixed points, convergence proof) is solid but dense. The weakest part is the experimental section's narrative — the authors present numbers but don't always explain **why* MUD wins more on some architectures than others. A paragraph connecting model width/depth to the overhead ratio would make the results much more interpretable and actionable.
+
+**Verdict**: weak accept — solid engineering contribution with honest experiments, but the novelty ceiling is "smart application of classical numerical methods" rather than a new idea.
+
+## Takeaways
+
+- If you're using Muon, try MUD as a drop-in replacement. The overhead reduction is real and the convergence quality is comparable. Worth a weekend experiment.
+- The broader lesson: optimizer overhead is a first-class concern, not an afterthought. When evaluating optimizers, always measure wall-clock time-to-perplexity, not just steps-to-perplexity.
+- The Gauss-Seidel framing of Gram-Schmidt is a useful mental model for anyone building custom preconditioners — sequential triangular corrections are often cheaper than global factorizations and converge quadratically near fixed points.
+- For protein LMs and other non-standard transformer architectures, this paper gives evidence that momentum whitening generalizes beyond language modeling, which is useful if you're working in those domains.
+:::
+
+:::zh
+**论文**: [2603.17970](https://arxiv.org/abs/2603.17970)
+**作者**: Ben S. Southworth, Stephen Thomas
+**分类**: cs.LG, math.NA, math.OC
+
+## 缺口
+
+AdamW 是 Transformer 训练的默认优化器，但它对每个参数独立处理，完全不知道权重矩阵的行列之间存在相互作用。
+
+Muon（2024年）通过在应用更新前对动量矩阵做正交化来解决这个问题，效果相当于一种廉价的二阶方法。
+
+问题在于：Muon 的正交化使用极分解近似（Newton-Schulz 迭代），每步需要多次大型矩阵乘法。
+
+在现代硬件上，这些矩阵乘法并不便宜——可以吃掉 30–60% 的单步时间，而且随着模型规模和批次配置的变化，开销还会进一步放大。
+
+所以缺口很清晰：我们想要动量白化带来的统计收益（每步收敛更快），但不想付出极分解的计算代价。
+
+没有人问过：更便宜的三角分解能不能完成同样的工作？
+
+```
+问题：AdamW 忽略矩阵结构 -> 收敛慢
+    |
+    v
+已有修复（Muon）：极分解白化
+    |
+    * 瓶颈：每步多次大型矩阵乘法
+    * 开销：占单步时间 30-60%，硬件依赖
+    |
+    v
+缺口：能否在不做极分解的情况下廉价白化动量？
+    |
+    v
+假设：三角（Cholesky 风格）因子已经足够
+    |
+    v
+方法（MUD）：对 Gram 矩阵做 Gauss-Seidel 迭代
+    |
+    v
+证据：相比 Muon，tokens/s 提升 1.3-3 倍
+    |
+    v
+结论：三角白化以更低代价匹配极分解质量
+```
+
+## 增量
+
+**一句话**：这篇论文之前，要获得 Muon 级别的训练质量就必须付出 Muon 的计算税；之后，用一个三角更新就能拿到大部分收益，挂钟时间便宜 1.3–3 倍。
+
+### 核心机制
+
+MUD 的核心思路是用三角因子而非完整正交因子来白化动量矩阵。
+
+具体来说：你有一个动量矩阵 M（形状与权重矩阵相同）。
+
+你想"去相关"它的行，让更新不在相关方向上浪费步数。
+
+Muon 的做法是计算极因子 U = M(M^T M)^{-1/2}，需要迭代一个矩阵多项式。
+
+MUD 则寻找一个下三角矩阵 L，使得 LM 的行近似正交归一——即 (LM)(LM)^T ≈ I。
+
+关键操作是对 Gram 矩阵G = MM^T 做 Gauss-Seidel 扫描。
+
+逐行更新 L：每行 L 被选择为将 M 的对应行与所有已处理行去相关。
+
+这正是 Gram-Schmidt 正交化的结构，但以等价于对 G 做对称 Gauss-Seidel 预条件的方式实现。
+
+作者证明了这在不动点（行正交归一矩阵）附近二次收敛，意味着一旦接近，只需极少内迭代。
+
+实践中，MUD 每个优化器步骤运行 1–3 次 Gauss-Seidel 扫描。
+
+每次扫描的渐近代价与 Muon 的 Newton-Schulz 相同，但常数小得多——三角求解对内存带宽友好，不需要反复全矩阵乘法的同步开销。
+
+```
+动量矩阵 M（n x d）
+    |
+    v
+Gram 矩阵 G = M^T   （n x n，当 n << d 时很便宜）
+    |
+    v
+对 G 做 Gauss-Seidel 扫描：
+  for i = 1..n:
+    L[i,i] = 1 / sqrt(G[i,i] - sum(L[i,j]^2, j<i))
+    L[i,j] = -(G[i,j] + sum(L[i,k]*L[k,j])) * L[i,i]
+    |
+    v
+白化更新 W = L M   （行近似正交归一）
+    |
+    v
+将 W 作为梯度更新应用（类似 Muon 的极因子）
+```
+
+用合唱团调音来理解这个方法。
+
+Muon 的做法是同时录下所有歌手的声音，对整体音场做 SVD，然后把所有人旋转到完美和声——数学上干净，但代价高昂。
+
+MUD 的做法是指挥逐个走过每位歌手："你，唱你的音。你，调整一下别和她撞。你，调整一下别和前两位撞。"
+
+每位歌手只需要听已经就位的人。
+
+这种顺序的、三角形的修正就是 Gram-Schmidt。
+
+它不如 SVD 旋转全局最优，但能让合唱团足够接近和谐，而且快得多——因为你不需要把整个声场同时装进内存。
+
+方法组件的映射：合唱团 = 权重矩阵的行，指挥的顺序修正 = Gauss-Seidel 扫描，"不撞音" = 去相关 Gram 矩阵的非对角元素，"足够接近和谐" = 在正交归一不动点附近的二次收敛。
+
+### 关键概念
+
+- **动量白化**：跨步骤累积梯度动量时，动量向量会产生相关性——某些方向被一起强化，导致更新在相关轴上浪费容量。白化将动量变换为方向不相关、尺度均等的形式，就像把椭圆旋转成圆。这就是二阶方法收敛更快的原因：它们隐式地白化了梯度。MUD 以低廉的代价对矩阵形状的参数做到了这一点。
+
+- **Gram 矩阵与 Gauss-Seidel**：Gram 矩阵 G = MM^T 捕捉了 M 各行之间的所有成对内积。如果 G = I，各行正交归一——完全去相关。Gauss-Seidel 是一种经典迭代求解器，每次固定其他变量只更新一个变量。用在这里，意思是：每次通过施加三角修正来清零 G 的一个非对角元素。这是数值线性代数中"每次只修一个方程"的等价物。
+
+- **极分解 vs 三角分解**：任何矩阵 M 都可以写成 M = UP，其中 U 有正交归一的行，P 是对称正定矩阵（极分解）。Muon 提取 U。MUD 则寻找下三角矩阵 L，使得 LM 有正交归一的行——这是从左侧做 QR 分解。两者都实现了白化；区别纯粹是计算上的。三角因子迭代计算更便宜，因为每步只涉及一个三角子问题。
+
+## 框架转变
+
+```
+之前（Muon / 极分解）：              之后（MUD / 三角白化）：
+
+  M --> [Newton-Schulz 迭代]           M --> [Gram 矩阵 G = MM^T]
+         |                                |
+         | 5-10 次全矩阵乘法                  | 1-3 次 Gauss-Seidel 扫描
+         |                                    | （三角、顺序）
+         v                                v
+  极因子 U                             L M  （近似行正交归一）
+  （全局最优正交化）                   （局部收敛，代价更低）
+         |                                    |
+         v                                    v
+  高质量，高开销                        相近质量，低开销
+  ~占单步时间 30-60%                    ~占单步时间 10-20%
+```
+
+从极分解到三角分解，核心转变是：白化步骤不需要全局最优——局部的、顺序的修正已经足够好，而且便宜得多。
+
+## 专家评审
+
+**选题眼光**：这是真缺口。
+
+Muon 的开销是实践者真实感受到的痛点，"能否更便宜地白化？"是自然且定义清晰的问题。
+
+它处于数值线性代数与深度学习优化的交叉地带，这个区域目前研究不足。
+
+不是人造缺口。
+
+**方法成熟度**：洞察是聪明的——将 Gram-Schmidt 与 Gauss-Seidel 预条件联系起来是个漂亮的观察，二次收敛证明给了它理论支撑。
+
+话虽如此，这个方法本质上是"用 QR 代替极分解"，这在数值线性代数中是已知思路。
+
+新颖性在于认识到这对优化器白化足够好，并加以证明。
+
+不是蛮力，但也不是范式转变——是有扎实数学支撑的、执行良好的工程洞察。
+
+**实验诚意**：基线看起来公平——作者仔细调了 AdamW 和 Muon，并报告挂钟时间而非仅步数，这对于这类声明是正确的度量。
+
+1.3–3 倍的改进范围很宽，这是诚实的（硬件和模型规模影响很大）。
+
+ESM-2 蛋白质语言模型实验是一个不错的分布外测试。
+
+一个小顾虑：论文没有在所有设置下深入消融内部 Gauss-Seidel 扫描次数与质量的权衡，所以什么时候 1 次扫描够用、什么时候需要 3 次，并不完全清楚。
+
+**写作功力**：理论部分（不动点、收敛证明）扎实但密集。
+
+最弱的部分是实验部分的叙事——作者呈现了数字，但并不总是解释为什么 MUD 在某些架构上赢得更多。
+
+一段将模型宽度/深度与开销比率联系起来的文字，会让结果更易解读、更有指导意义。
+
+**判决**：弱接收——扎实的工程贡献，实验诚实，但新颖性上限是"经典数值方法的聪明应用"，而非新思想。
+
+## 要点总结
+
+如果你在用 Muon，可以直接试 MUD 作为替代品。
+
+开销降低是真实的，收敛质量相当，值得花一个周末做实验。
+
+更广泛的教训：优化器开销是一等公民，不是事后考虑。
+
+评估优化器时，永远要测挂钟时间-困惑度曲线，而不只是步数-困惑度曲线。
+
+Gauss-Seidel 对 Gram-Schmidt 的重新框架，对任何构建自定义预条件器的人都是有用的心智模型——顺序三角修正通常比全局分解便宜，且在不动点附近二次收敛。
+
+对于蛋白质语言模型和其他非标准 Transformer 架构，这篇论文提供了动量白化超越语言建模泛化的证据，如果你在这些领域工作，这个结论是有价值的参考。
+:::
