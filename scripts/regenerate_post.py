@@ -11,11 +11,16 @@ from fetch_arxiv import (
     insert_after_frontmatter, strip_thinking_tags, BLOG_DIR, ARXIV_API_URL
 )
 
+if len(sys.argv) < 2:
+    print("Usage: python regenerate_post.py <arxiv_id>")
+    sys.exit(1)
+
+arxiv_id = sys.argv[1]
+
 client, model, provider = get_llm_client()
 print(f"Using {provider} provider with model: {model}")
 
 # Fetch paper from arxiv
-arxiv_id = "2603.08706"
 print(f"Fetching paper {arxiv_id} from arxiv...")
 resp = requests.get(f"{ARXIV_API_URL}?id_list={arxiv_id}", timeout=30)
 resp.raise_for_status()
