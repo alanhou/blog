@@ -1,0 +1,129 @@
+---
+title:
+  en: "Scaling DoRA: High-Rank Adaptation via Factored Norms and Fused Kernels"
+  zh: "扩展DoRA：通过分解范数和融合核实现高秩适配"
+description:
+  en: "Systems-level optimizations that eliminate the dense matrix materialization bottleneck in DoRA, enabling high-rank adaptation with 1.5-2x speedup and up to 7GB VRAM savings"
+  zh: "系统级优化消除DoRA中的密集矩阵实体化瓶颈，实现高秩适配，加速1.5-2倍并节省高达7GB显存"
+date: 2026-03-23
+tags: ["arxiv", "ai", "fine-tuning", "dora", "lora", "parameter-efficient", "systems", "cs.LG"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2603.22276](https://arxiv.org/abs/2603.22276)
+**Authors**: Alexandra Zelenin, Alexandra Zhuravlyova
+**Categories**: cs.LG
+
+## Abstract
+
+Weight-Decomposed Low-Rank Adaptation (DoRA) extends LoRA by decoupling weight magnitude from direction, but its forward pass requires computing a row-wise norm that every major framework implements by materializing the dense product BA — consuming ~512 MB of transient memory per module at typical dimensions. This paper presents two systems contributions: (1) a factored norm that decomposes the squared norm into base, cross, and Gram terms computable through O(d_out·r + r²) intermediates, eliminating the dense product; and (2) fused Triton kernels that collapse four CUDA kernel launches into a single pass with ~4x reduced memory traffic. Across six 8-32B vision-language models on three NVIDIA GPUs at rank 384, the implementation achieves 1.5-2.0x inference speedup and 1.5-1.9x faster gradient computation with up to 7 GB lower peak VRAM.
+
+## Key Contributions
+
+- **Factored norm computation**: Algebraic decomposition of ∥W + sBA∥² into three terms (base, cross, BA norm), each computable without materializing the full dense matrix
+- **Fused Triton kernels**: Single-pass kernel replacing four separate CUDA launches, with numerically stable form avoiding catastrophic cancellation in the near-unity rescaling regime
+- **Three-tier runtime dispatch**: Automatically selects optimal path (fused backward for training, fused forward for inference, eager fallback for CPU), compatible with torch.compile, gradient checkpointing, DeepSpeed ZeRO, and FSDP
+- **Comprehensive validation**: Tested on 6 GPUs spanning 4 architecture generations (L40S through B300) with final-logit cosine similarity exceeding 0.9999
+
+## The Problem
+
+DoRA's forward pass requires computing:
+
+$$W' = m \odot \frac{W + sBA}{\|W + sBA\|_{\text{row}}}$$
+
+Every major framework (HF PEFT, torchtune, Unsloth, SWIFT, LLaMA-Factory, Axolotl) computes the row-wise norm by constructing an identity matrix and materializing the full dense product BA. At d_in = 8192 and rank r = 384, a single module allocates 3-4 dense temporaries totaling ~512 MB in bf16. With gradient checkpointing, these are allocated twice per step. Across hundreds of adapted modules in an 8-32B model, this causes severe speed degradation and OOM failures at high rank.
+
+## Factored Norm
+
+The key insight is that the row-wise squared norm decomposes as:
+
+$$\|W + sBA\|^2_{\text{row}} = \|W\|^2_{\text{row}} + 2s\langle W, BA\rangle_{\text{row}} + s^2\|BA\|^2_{\text{row}}$$
+
+Each term can be computed through low-rank intermediates:
+- **Base norm**: ∥W∥² via chunked accumulation along d_in
+- **Cross term**: Row-wise inner product via U = WA^T ∈ R^{d_out × r}, then element-wise product with B
+- **BA norm**: Via Gram matrix G = AA^T ∈ R^{r × r} (only 1 MB at r = 512)
+
+Theoretical persistent-memory reduction: **15x** at d = 8192, r = 512.
+
+## Fused Kernels
+
+The DoRA composition `(g-1) ⊙ base + g ⊙ s ⊙ lora` normally requires four separate CUDA kernel launches. The fused Triton kernel performs this in a single pass, using a numerically stable form that avoids catastrophic cancellation when g ≈ 1 (where magnitude scales concentrate in practice).
+
+## Results
+
+| Metric | Improvement |
+|--------|------------|
+| Inference speedup | 1.5-2.0x over HF PEFT |
+| Gradient computation | 1.5-1.9x faster |
+| Peak VRAM reduction | Up to 7 GB |
+| Compose-kernel speedup | 1.5-2.7x (microbenchmarks) |
+| Numerical fidelity | Cosine similarity > 0.9999 |
+| Training match | < 7.1×10⁻⁴ mean per-step loss delta over 2000 steps |
+
+## Takeaways
+
+- High-rank DoRA has been impractical on single-GPU setups due to dense matrix materialization — this work makes it feasible
+- The factored norm is a purely algebraic insight: decompose the squared norm to avoid ever constructing the full BA product
+- Fused kernels address memory traffic, not just compute — collapsing multiple passes into one
+- The approach is a drop-in replacement requiring no changes to the adapter architecture, optimizer, or training recipe
+- All six major PEFT frameworks surveyed use the same suboptimal identity-matrix approach, suggesting broad applicability of this fix
+:::
+
+:::zh
+**论文**: [2603.22276](https://arxiv.org/abs/2603.22276)
+**作者**: Alexandra Zelenin, Alexandra Zhuravlyova
+**分类**: cs.LG
+
+## 摘要
+
+权重分解低秩适配（DoRA）通过解耦权重幅度和方向扩展了LoRA，但其前向传播需要计算逐行范数，所有主流框架的实现方式都是实体化密集乘积BA——在典型维度下每个模块消耗约512 MB的临时内存。本文提出两项系统贡献：(1) 分解范数，将平方范数分解为基础项、交叉项和Gram项，仅需O(d_out·r + r²)的中间量即可计算，无需实体化密集矩阵；(2) 融合Triton核，将四次CUDA核启动合并为一次通行，内存流量减少约4倍。在三块NVIDIA GPU上对六个8-32B视觉语言模型以秩384进行测试，推理加速1.5-2.0倍，梯度计算加速1.5-1.9倍，峰值显存最多减少7 GB。
+
+## 主要贡献
+
+- **分解范数计算**：将∥W + sBA∥²代数分解为三项（基础、交叉、BA范数），每项均无需实体化完整密集矩阵
+- **融合Triton核**：单次通行核替代四次独立CUDA启动，采用数值稳定形式避免近单位缩放区间的灾难性抵消
+- **三级运行时调度**：自动选择最优路径（训练用融合反向、推理用融合前向、CPU用即时回退），兼容torch.compile、梯度检查点、DeepSpeed ZeRO和FSDP
+- **全面验证**：在跨越4代架构的6块GPU上测试（L40S至B300），最终logit余弦相似度超过0.9999
+
+## 问题所在
+
+DoRA的前向传播需要计算逐行范数∥W + sBA∥_row。所有主流框架（HF PEFT、torchtune、Unsloth、SWIFT、LLaMA-Factory、Axolotl）都通过构造单位矩阵并实体化完整密集乘积BA来计算。在d_in = 8192、秩r = 384时，单个模块分配3-4个密集临时变量，在bf16下总计约512 MB。使用梯度检查点时，这些临时变量每步分配两次。在8-32B模型的数百个适配模块中，这导致严重的速度下降和OOM故障。
+
+## 分解范数
+
+核心洞察是逐行平方范数可分解为：
+
+$$\|W + sBA\|^2_{\text{row}} = \|W\|^2_{\text{row}} + 2s\langle W, BA\rangle_{\text{row}} + s^2\|BA\|^2_{\text{row}}$$
+
+每项可通过低秩中间量计算：
+- **基础范数**：∥W∥²通过沿d_in的分块累积
+- **交叉项**：通过U = WA^T ∈ R^{d_out × r}的逐行内积，再与B元素级相乘
+- **BA范数**：通过Gram矩阵G = AA^T ∈ R^{r × r}（r = 512时仅1 MB）
+
+理论持久内存减少：d = 8192、r = 512时**15倍**。
+
+## 融合核
+
+DoRA组合运算`(g-1) ⊙ base + g ⊙ s ⊙ lora`通常需要四次独立CUDA核启动。融合Triton核在单次通行中完成，使用数值稳定形式避免g ≈ 1时的灾难性抵消。
+
+## 实验结果
+
+| 指标 | 提升 |
+|------|------|
+| 推理加速 | 比HF PEFT快1.5-2.0倍 |
+| 梯度计算 | 快1.5-1.9倍 |
+| 峰值显存减少 | 最多7 GB |
+| 组合核加速 | 1.5-2.7倍（微基准测试） |
+| 数值保真度 | 余弦相似度 > 0.9999 |
+| 训练匹配度 | 2000步内平均每步损失差 < 7.1×10⁻⁴ |
+
+## 要点总结
+
+- 高秩DoRA在单GPU上因密集矩阵实体化而不切实际——本工作使其可行
+- 分解范数是纯代数洞察：分解平方范数以避免构造完整BA乘积
+- 融合核解决的是内存流量问题而非仅仅是计算——将多次通行合并为一次
+- 该方法是即插即用的替换，无需更改适配器架构、优化器或训练流程
+- 调查的六个主流PEFT框架都使用相同的次优单位矩阵方法，表明此修复具有广泛适用性
+:::
