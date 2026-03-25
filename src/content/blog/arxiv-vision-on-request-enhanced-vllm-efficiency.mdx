@@ -1,0 +1,350 @@
+---
+title:
+  en: "VISOR: Sparse Attention for Efficient Vision-Language Models Without Visual Token Loss"
+  zh: "VISOR:通过稀疏注意力实现高效视觉语言模型而不丢失视觉信息"
+description:
+  en: "Instead of compressing visual tokens, VISOR reduces LVLM inference cost by sparsifying vision-text interactions through strategically placed attention layers and dynamic computation allocation."
+  zh: "VISOR不压缩视觉token,而是通过策略性放置的注意力层和动态计算分配来稀疏化视觉-文本交互,从而降低大型视觉语言模型的推理成本。"
+date: 2026-03-25
+tags: ["arxiv", "ai", "cs.cv", "cs.ai", "cs.lg"]
+image: "/arxiv-visuals/vision-on-request-enhanced-vllm-efficiency/HeroScene.png"
+---
+
+![Concept animation](/arxiv-visuals/vision-on-request-enhanced-vllm-efficiency/ConceptScene.gif)
+
+
+
+![Hero diagram](/arxiv-visuals/vision-on-request-enhanced-vllm-efficiency/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2603.23495](https://arxiv.org/abs/2603.23495)
+**Authors**: Adrian Bulat, Alberto Baldrati, Ioannis Maniadis Metaxas, Yassine Ouali, Georgios Tzimiropoulos
+**Categories**: cs.CV, cs.AI, cs.LG
+
+## The Gap
+
+Large Vision-Language Models (LVLMs) are slow because they process massive numbers of visual tokens. The dominant solution—visual token reduction through pruning, merging, or compression—creates an information bottleneck. This works fine for simple tasks ("what color is the car?") but fails on fine-grained reasoning ("count the windows on the third floor"). The field has been stuck in a trade-off: keep all visual tokens and suffer computational cost, or compress them and lose performance on hard tasks.
+
+```
+Problem: LVLMs too slow
+         |
+         v
+Current solution: Reduce visual tokens
+         |
+         +---> Works for simple tasks
+         |
+         +---> Fails for fine-grained reasoning (information bottleneck)
+         |
+         v
+This paper's insight: Don't reduce tokens, reduce interactions
+         |
+         v
+Method: Sparse attention between vision/text + dynamic allocation
+         |
+         v
+Evidence: Matches SOTA with 2-3x less compute, excels on hard tasks
+         |
+         v
+Conclusion: Interaction sparsity > token reduction
+```
+
+## The Increment
+
+**One sentence**: Before VISOR, you had to choose between keeping all visual tokens (expensive) or compressing them (loses detail); after VISOR, you keep all tokens but only activate expensive vision-text interactions when the task demands it.
+
+### Core Mechanism
+
+VISOR has three components working together. First, the language model uses cheap cross-attention to get general visual context from all high-resolution image tokens—this happens at every layer. Second, a small number of self-attention layers (placed strategically in the network) allow visual tokens to refine themselves, enabling complex reasoning when needed. Third, a lightweight policy network decides per-sample how many self-attention layers to activate based on task complexity.
+
+The data flow: image tokens enter the model at full resolution. At each language model layer, text tokens attend to image tokens via cross-attention (cheap because it's text-to-image only, not image-to-image). At a few designated layers, if the policy says "this sample needs it," visual tokens also attend to each other via self-attention (expensive but powerful). The policy is trained to predict which samples need how much visual computation.
+
+```
+Input: Text tokens [T1, T2, ...] + Image tokens [I1, I2, ..., In] (full res)
+       |
+       v
++------+------+------+------+------+------+
+| LM Layer 1  | LM Layer 2  | ... | LM Layer L |
++------+------+------+------+------+------+
+   |      |       |      |            |
+   v      |       v      |            v
+Cross-   |    Cross-    |         Cross-
+Attn     |    Attn      |         Attn
+(T->I)   |    (T->I)    |         (T->I)
+         |              |
+         v              v
+    Self-Attn      Self-Attn  <-- Only at selected layers
+    (I<->I)        (I<->I)      <-- Only if policy activates
+    [expensive]    [expensive]
+         |              |
+         v              v
+    Refined I      Refined I
+    
+Policy network: Looks at sample -> Decides # of self-attn layers to use
+```
+
+Think of VISOR like a restaurant kitchen with two types of chefs. The line cooks (cross-attention) constantly check the visual ingredients (image tokens) while preparing each dish (text generation)—this is fast and always happens. The head chefs (self-attention layers) only step in for complex dishes that need ingredient refinement—they're expensive, so you only call them when necessary. A manager (policy network) looks at each order and decides whether to call in the head chefs or let the line cooks handle it. Simple orders ("describe this image") get line cooks only. Complex orders ("count objects in a crowded scene") get head chefs too. The key: you never throw away ingredients (visual tokens), you just decide how much expert attention they need.
+
+### Key Concepts
+
+- **Cross-attention vs Self-attention cost asymmetry**: In vision-language models, cross-attention (text attending to image) is cheaper than self-attention (image attending to itself) because there are far fewer text tokens than image tokens. If you have 100 text tokens and 1000 image tokens, cross-attention does 100×1000 operations, but self-attention does 1000×1000 operations—10x more expensive. VISOR exploits this: use cheap cross-attention everywhere for basic visual grounding, reserve expensive self-attention for when visual tokens need to reason about each other (like spatial relationships or counting).
+
+- **Universal network with variable compute**: Instead of training separate models for different speed/accuracy trade-offs, VISOR trains one network that can operate at multiple computational budgets. During training, it randomly varies how many self-attention layers are active (say, 0 to 4 layers). This teaches the network to gracefully degrade—using fewer layers gives faster but slightly less accurate results, using more layers gives slower but more accurate results. At inference, you can dial the compute budget up or down on the same model. It's like training a car engine to run efficiently at any RPM, not just one fixed speed.
+
+- **Dynamic per-sample allocation**: Not all inputs are equally hard. "What color is the sky?" needs minimal visual reasoning. "How many people are wearing red shirts in this crowd?" needs intense visual analysis. VISOR's policy network learns to predict task difficulty from the input and allocates computation accordingly—easy samples get 0-1 self-attention layers, hard samples get 3-4 layers. The policy is trained with reinforcement learning to maximize accuracy while minimizing compute. This is fundamentally different from static pruning methods that treat all samples the same.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (VISOR):
+
+Full image tokens                      Full image tokens
+[I1 I2 I3 ... In]                     [I1 I2 I3 ... In]
+      |                                      |
+      v                                      v
++-------------+                        +-----------+
+| Compression |                        | No change |
+| (pruning/   |                        | (keep all)|
+|  merging)   |                        +-----------+
++-------------+                              |
+      |                                      v
+      v                                +------------+
+Reduced tokens                         | Sparse     |
+[I1' I2' I3']                         | interaction|
+      |                                | (selective |
+      v                                |  self-attn)|
+Dense interaction                      +------------+
+(all layers, all ops)                        |
+      |                                      v
+      v                                Cheap cross-attn
+Information bottleneck                 (always) + expensive
+on hard tasks                          self-attn (when needed)
+```
+
+From compressing the data to compressing the computation, the core shift is: preserve information, sparsify operations.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The field has been obsessed with token reduction for two years, and it's hitting diminishing returns—you can't compress away detail without losing performance on tasks that need detail. VISOR asks the right question: why reduce tokens when you can reduce interactions? It's a natural next step once you realize the bottleneck isn't storage (tokens in memory) but computation (attention operations).
+
+**Method maturity**: The core insight—cross-attention is cheaper than self-attention—is obvious in hindsight but underexploited. The execution is solid: training a universal network with variable compute is clever, and the policy mechanism is straightforward RL. However, the paper doesn't deeply explore **where* to place self-attention layers (they mention "strategic placement" but don't ablate it thoroughly). A simpler baseline would be: just use cross-attention only, no self-attention at all—how much do you actually lose? The paper hints at this but doesn't nail it down.
+
+**Experimental integrity**: Baselines are fair—they compare against recent token reduction methods (LLaVA-PruMerge, LLaVA-HR) and show VISOR wins on hard tasks while matching on easy ones. The compute measurements (FLOPs, latency) are transparent. One red flag: the policy network adds overhead, but they don't break down how much. If the policy takes 10% of inference time, that eats into the claimed speedup. Also, the dynamic allocation results show high variance—some samples get 4x speedup, others only 1.5x. The average looks good, but practitioners care about worst-case latency too.
+
+**Writing quality**: The intro and method sections are crisp. The related work section is too long—half of it could be cut. The ablation studies are buried in the appendix when they should be front and center (especially the analysis of which layers benefit most from self-attention). The paper would be stronger if they led with the failure modes of token reduction (show examples where compression kills performance) before introducing VISOR.
+
+**Verdict**: weak accept — Solid idea with good execution, but the paper oversells the novelty (sparse attention isn't new, applying it this way is) and undersells the engineering details (layer placement, policy overhead) that matter for real deployment.
+
+## Takeaways
+
+Practitioners can steal the asymmetry principle: if you have two types of operations with different costs, use the cheap one everywhere and the expensive one selectively. This applies beyond vision-language models—any architecture with cross-modal or hierarchical interactions. The universal network training trick (randomly varying compute during training) is also portable: instead of training separate small/medium/large models, train one model that can operate at multiple budgets. Finally, the policy network pattern (learn to allocate compute per-sample) is underused in ML systems—most models treat all inputs equally, but real-world data has a long tail of hard cases that need more compute.
+:::
+
+:::zh
+**论文**: [2603.23495](https://arxiv.org/abs/2603.23495)
+**作者**: Adrian Bulat, Alberto Baldrati, Ioannis Maniadis Metaxas, Yassine Ouali, Georgios Tzimiropoulos
+**分类**: cs.CV, cs.AI, cs.LG
+
+## 缺口
+
+大型视觉语言模型(LVLM)很慢,因为它们要处理海量的视觉token。
+
+主流解决方案——通过剪枝、合并或压缩来减少视觉token——会造成信息瓶颈。
+
+这对简单任务("车是什么颜色?")还行,但在细粒度推理("数一下三楼有几扇窗")上就失效了。
+
+该领域一直困在一个权衡里：保留所有视觉token就得承受计算成本,压缩它们就会在困难任务上丢失性能。
+
+```
+问题:LVLM太慢
+      |
+      v
+现有方案:减少视觉token
+      |
+      +---> 简单任务可行
+      |
+      +---> 细粒度推理失效(信息瓶颈)
+      |
+      v
+本文洞察:不减少token,减少交互
+      |
+      v
+方法:视觉/文本间的稀疏注意力 + 动态分配
+      |
+      v
+证据:用2-3倍更少计算达到SOTA,在困难任务上表现优异
+      |
+      v
+结论:交互稀疏性 > token减少
+```
+
+## 增量
+
+**一句话**: VISOR之前,你必须在保留所有视觉token(昂贵)和压缩它们(丢失细节)之间选择;VISOR之后,你保留所有token,但只在任务需要时才激活昂贵的视觉-文本交互。
+
+### 核心机制
+
+VISOR有三个协同工作的组件。
+
+首先,语言模型使用廉价的交叉注意力从所有高分辨率图像token获取通用视觉上下文——这在每一层都发生。
+
+其次,少量自注意力层(策略性地放置在网络中)允许视觉token自我精炼,在需要时实现复杂推理。
+
+第三,一个轻量级策略网络根据任务复杂度决定每个样本激活多少个自注意力层。
+
+数据流：图像token以全分辨率进入模型。
+
+在每个语言模型层,文本token通过交叉注意力关注图像token(廉价,因为只是文本到图像,不是图像到图像)。
+
+在几个指定层,如果策略说"这个样本需要",视觉token也通过自注意力相互关注(昂贵但强大)。
+
+策略被训练来预测哪些样本需要多少视觉计算。
+
+```
+输入: 文本token [T1, T2, ...] + 图像token [I1, I2, ..., In] (全分辨率)
+       |
+       v
++------+------+------+------+------+------+
+| 语言模型层1 | 语言模型层2 | ... | 语言模型层L |
++------+------+------+------+------+------+
+   |      |       |      |            |
+   v      |       v      |            v
+交叉     |    交叉      |         交叉
+注意力   |    注意力    |         注意力
+(T->I)   |    (T->I)    |         (T->I)
+         |              |
+         v              v
+    自注意力       自注意力  <-- 只在选定层
+    (I<->I)        (I<->I)   <-- 只在策略激活时
+    [昂贵]         [昂贵]
+         |              |
+         v              v
+    精炼的I        精炼的I
+    
+策略网络: 查看样本 -> 决定使用多少个自注意力层
+```
+
+把VISOR想象成一个有两类厨师的餐厅厨房。
+
+流水线厨师(交叉注意力)在准备每道菜(文本生成)时不断检查视觉食材(图像token)——这很快且总是发生。
+
+主厨(自注意力层)只在需要食材精炼的复杂菜品时才介入——他们很贵,所以只在必要时才叫他们。
+
+经理(策略网络)查看每个订单,决定是否叫主厨还是让流水线厨师处理。
+
+简单订单("描述这张图")只用流水线厨师。
+
+复杂订单("数拥挤场景中的物体")也用主厨。
+
+关键：你从不扔掉食材(视觉token),只是决定它们需要多少专家关注。
+
+### 关键概念
+
+- **交叉注意力vs自注意力的成本不对称**: 在视觉语言模型中,交叉注意力(文本关注图像)比自注意力(图像关注自身)便宜,因为文本token远少于图像token。
+
+如果你有100个文本token和1000个图像token,交叉注意力做100×1000次操作,但自注意力做1000×1000次操作——贵10倍。
+
+VISOR利用这一点：到处使用廉价交叉注意力进行基本视觉定位,为视觉token需要相互推理(如空间关系或计数)时保留昂贵的自注意力。
+
+- **可变计算的通用网络**: VISOR不为不同的速度/精度权衡训练单独模型,而是训练一个可以在多个计算预算下运行的网络。
+
+训练期间,它随机改变激活多少个自注意力层(比如0到4层)。
+
+这教会网络优雅降级——使用更少层给出更快但稍不准确的结果,使用更多层给出更慢但更准确的结果。
+
+推理时,你可以在同一模型上调高或调低计算预算。
+
+这就像训练汽车引擎在任何转速下高效运行,而不只是一个固定速度。
+
+- **动态的逐样本分配**: 并非所有输入都同样困难。
+
+"天空是什么颜色?"需要最少的视觉推理。
+
+"这群人中有多少人穿红衬衫?"需要密集的视觉分析。
+
+VISOR的策略网络学习从输入预测任务难度并相应分配计算——简单样本得到0-1个自注意力层,困难样本得到3-4层。
+
+策略用强化学习训练,以在最小化计算的同时最大化准确率。
+
+这与将所有样本一视同仁的静态剪枝方法根本不同。
+
+## 框架转变
+
+```
+之前(主流方法):                    之后(VISOR):
+
+完整图像token                      完整图像token
+[I1 I2 I3 ... In]                 [I1 I2 I3 ... In]
+      |                                  |
+      v                                  v
++-------------+                    +-----------+
+| 压缩        |                    | 不变      |
+| (剪枝/      |                    | (保留全部)|
+|  合并)      |                    +-----------+
++-------------+                          |
+      |                                  v
+      v                            +------------+
+减少的token                        | 稀疏       |
+[I1' I2' I3']                     | 交互       |
+      |                            | (选择性    |
+      v                            |  自注意力) |
+密集交互                           +------------+
+(所有层,所有操作)                        |
+      |                                  v
+      v                            廉价交叉注意力
+困难任务上的                       (总是) + 昂贵
+信息瓶颈                           自注意力(需要时)
+```
+
+从压缩数据到压缩计算,核心转变是：保留信息,稀疏化操作。
+
+## 专家评审
+
+**选题眼光**: 这是真缺口。
+
+该领域痴迷于token减少已有两年,正在遭遇收益递减——你无法在不丢失需要细节的任务上的性能的情况下压缩掉细节。
+
+VISOR问了正确的问题：为什么要减少token而不是减少交互?一旦你意识到瓶颈不是存储(内存中的token)而是计算(注意力操作),这是自然的下一步。
+
+**方法成熟度**: 核心洞察——交叉注意力比自注意力便宜——事后看来显而易见但未被充分利用。
+
+执行很扎实：训练可变计算的通用网络很聪明,策略机制是直接的强化学习。
+
+然而,论文没有深入探索*在哪里*放置自注意力层(他们提到"策略性放置"但没有彻底消融)。
+
+一个更简单的基线是：只使用交叉注意力,完全不用自注意力——你实际损失多少?论文暗示了这一点但没有确定下来。
+
+**实验诚意**: 基线公平——他们与最近的token减少方法(LLaVA-PruMerge, LLaVA-HR)比较,显示VISOR在困难任务上获胜,在简单任务上持平。
+
+计算测量(FLOPs,延迟)是透明的。
+
+一个警示：策略网络增加了开销,但他们没有分解有多少。
+
+如果策略占推理时间的10%,那会侵蚀声称的加速。
+
+此外,动态分配结果显示高方差——一些样本获得4倍加速,其他只有1.5倍。
+
+平均看起来不错,但实践者也关心最坏情况延迟。
+
+**写作功力**: 引言和方法部分简洁。
+
+相关工作部分太长——一半可以删掉。
+
+消融研究埋在附录中,而它们应该放在前面和中心(特别是哪些层最受益于自注意力的分析)。
+
+如果他们先展示token减少的失败模式(展示压缩扼杀性能的例子),然后再介绍VISOR,论文会更强。
+
+**判决**: 弱接收 — 扎实的想法和良好的执行,但论文夸大了新颖性(稀疏注意力不新,这样应用它才是新的),低估了对实际部署重要的工程细节(层放置,策略开销)。
+
+## 要点总结
+
+实践者可以偷走不对称原则：如果你有两种成本不同的操作,到处使用便宜的,选择性地使用昂贵的。
+
+这适用于视觉语言模型之外——任何具有跨模态或层次交互的架构。
+
+通用网络训练技巧(训练期间随机改变计算)也是可移植的：不训练单独的小/中/大模型,而是训练一个可以在多个预算下运行的模型。
+
+最后,策略网络模式(学习逐样本分配计算)在机器学习系统中使用不足——大多数模型平等对待所有输入,但现实世界数据有需要更多计算的困难案例的长尾。
+
+:::

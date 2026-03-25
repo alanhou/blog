@@ -1,0 +1,288 @@
+---
+title:
+  en: "UniGRPO: Unified Reinforcement Learning for Reasoning-Driven Image Generation"
+  zh: "UniGRPO: 推理驱动的视觉生成统一策略优化"
+description:
+  en: "A unified RL framework that jointly optimizes text reasoning and image generation through GRPO, enabling models to expand prompts through reasoning before synthesizing images."
+  zh: "一个统一的强化学习框架，通过 GRPO 联合优化文本推理和图像生成，使模型能够先通过推理扩展提示词，再合成图像。"
+date: 2026-03-25
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+![Concept animation](/arxiv-visuals/unigrpo-unified-policy-optimization-for-reasoning/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2603.23500](https://arxiv.org/abs/2603.23500)
+**Authors**: Jie Liu, Zilyu Ye, Linxiao Yuan, Shenhan Zhu, Yu Gao, Jie Wu, Kunchang Li, Xionghui Wang, Xiaonan Nie, Weilin Huang
+**Categories**: cs.CV
+
+## The Gap
+
+Unified models that generate both text and images are converging on autoregressive text + flow matching for images. But training these models is messy: text uses GRPO (Group Relative Policy Optimization), images use FlowGRPO, and nobody's figured out how to train them together without the two modalities fighting each other. Existing approaches either train modalities separately (losing the benefit of joint optimization) or use ad-hoc combinations that don't scale to multi-turn interactions.
+
+The specific problem: when you want a model to reason about a prompt ("a cat on a mat" → "a fluffy orange tabby cat lounging on a woven straw mat in afternoon sunlight") and then generate the image, you need sparse terminal rewards (the final image quality) to propagate back through both the reasoning chain and the image generation process. Standard FlowGRPO uses classifier-free guidance, which creates branching rollouts that explode combinatorially in multi-turn scenarios.
+
+```
+Problem: Separate training recipes for text + image
+   |
+   v
+Assumption: Can formulate as unified MDP with terminal rewards
+   |
+   v
+Method: UniGRPO = GRPO (text) + modified FlowGRPO (image)
+   |                        |
+   |                        +-- Remove CFG (linear rollouts)
+   |                        +-- MSE velocity penalty (not latent KL)
+   v
+Evidence: Improved image quality through reasoning
+   |
+   v
+Conclusion: Scalable baseline for interleaved generation
+```
+
+## The Increment
+
+**One sentence**: Before, you trained text reasoning and image generation separately with incompatible RL recipes; now you can train them jointly with a single unified framework that scales to multi-turn interactions.
+
+### Core Mechanism
+
+UniGRPO treats the entire process—reasoning then image generation—as one Markov Decision Process. The state is the current prompt, actions are either generating the next reasoning token or taking a flow matching step for the image, and the reward only arrives at the end when you evaluate the final image quality.
+
+For the text part, it's standard GRPO: sample multiple reasoning expansions, score them by how good the resulting images are, and push up the probability of better expansions. For the image part, they modify FlowGRPO in two ways. First, they kill classifier-free guidance. CFG normally runs two parallel flows (conditional and unconditional) and interpolates them, but that branching makes multi-turn rollouts intractable. Second, instead of penalizing divergence in latent space (KL penalty), they penalize divergence directly in velocity field space (MSE on the predicted flow directions). This gives a tighter, more interpretable regularization signal.
+
+```
+User prompt --> [Reasoning Model] --> Expanded prompt --> [Flow Model] --> Image
+                      ^                                         ^
+                      |                                         |
+                   GRPO loss                              FlowGRPO loss
+                      |                                         |
+                      +------------- Terminal reward -----------+
+                                    (image quality score)
+```
+
+Think of it like a relay race where the first runner (reasoning model) hands off to the second runner (image model), but you only know if the team won after the second runner crosses the finish line. Standard training would have each runner practice separately with their own coach. UniGRPO has one coach who watches the whole race and tells both runners how to improve based on the final time. The key trick: the first runner's baton handoff (the expanded prompt) has to be smooth, and the second runner can't suddenly branch into two parallel runners mid-race (no CFG), because that would make it impossible to track who contributed what to the final time.
+
+### Key Concepts
+
+- **Flow Matching for Images**: Instead of denoising (like diffusion models), flow matching learns a velocity field that pushes noise directly toward the target image along straight paths. Imagine you're at point A (random noise) and want to reach point B (your image). Diffusion takes a wobbly, iterative path. Flow matching learns a vector field that points from A to B at every intermediate point, so you can just follow the arrows in a straight line. It's faster and more controllable, but harder to train with RL because the "path" itself is what you're optimizing.
+
+- **Classifier-Free Guidance (CFG)**: A trick where you run the model twice—once with the prompt, once without—and steer toward the difference. It's like asking "what does this prompt add?" by comparing prompted vs unprompted outputs. This improves quality but doubles compute and creates branching rollouts (you're now tracking two parallel trajectories). In multi-turn generation, this branches exponentially, so UniGRPO removes it entirely.
+
+- **Velocity Field MSE Penalty**: Flow models predict a velocity (direction and speed) at each step. The MSE penalty directly compares the policy's predicted velocity to a reference model's velocity, rather than comparing the final latent representations. It's like correcting a driver's steering angle in real-time rather than waiting to see where they end up. This prevents the model from taking wild detours (reward hacking) while still allowing useful exploration.
+
+## Framework Shift
+
+```
+Before (separate training):          After (UniGRPO):
+
+Text RL:  [Prompt] -> [Reasoning]    [Prompt] -> [Reasoning] -> [Image]
+              |                              |              |
+          Text reward                    Terminal reward ---+
+                                            (image quality)
+Image RL: [Prompt] -> [Image]
+              |           |
+          CFG branch   CFG branch
+              |           |
+          Image reward ---+
+```
+
+From modality-specific optimization to end-to-end trajectory optimization, the core shift is treating interleaved generation as a single decision process with sparse terminal feedback.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The field is clearly moving toward unified models (GPT-4V, Gemini, etc.), and nobody has a clean training recipe for the text+image case. This isn't manufactured—it's the next logical step after autoregressive text and flow-based images became standard.
+
+**Method maturity**: Mostly assembly of existing pieces (GRPO + FlowGRPO), but the two modifications (removing CFG, switching to velocity MSE) are well-motivated. The CFG removal is necessary for scalability, not just a simplification. The velocity penalty is clever—it's a more direct regularization than latent KL. However, they don't explore whether simpler alternatives (e.g., just tuning the KL weight) might work.
+
+**Experimental integrity**: Baselines are fair (they compare against separate training and standard FlowGRPO). The numbers show clear improvement. Red flag: they only test on single-round reasoning→image, not the multi-turn scenarios they claim to enable. The scalability argument is theoretical, not empirical. Also, no ablation on whether you really need both modifications or if one suffices.
+
+**Writing quality**: The abstract oversells ("unified framework for interleaved generation") when they only validate on one round. Section 3.2 (method) is dense—would benefit from a toy example walkthrough. The related work section is perfunctory and doesn't clearly position this against concurrent work on multimodal RL.
+
+**Verdict**: weak accept — Solid incremental contribution with practical value, but the scalability claims need empirical validation and the method feels like the obvious thing to try rather than a deep insight.
+
+## Takeaways
+
+The velocity field MSE penalty is the most transferable idea. If you're doing RL on any generative model that predicts intermediate steps (flows, diffusion, autoregressive with KV cache), penalizing the step-level predictions directly is often better than penalizing the final output divergence. It's faster to compute and gives a clearer training signal.
+
+The CFG removal is a forcing function: if your RL setup requires branching rollouts, you're probably not going to scale. This applies beyond vision—any multi-turn RL problem should avoid techniques that multiply trajectories exponentially.
+
+For practitioners building reasoning+generation pipelines: you can steal the MDP formulation (treat the whole chain as one episode with terminal reward) even if you're not using RL. It clarifies what you're optimizing for and where credit assignment happens.
+:::
+
+:::zh
+**论文**: [2603.23500](https://arxiv.org/abs/2603.23500)
+**作者**: Jie Liu, Zilyu Ye, Linxiao Yuan, Shenhan Zhu, Yu Gao, Jie Wu, Kunchang Li, Xionghui Wang, Xiaonan Nie, Weilin Huang
+**分类**: cs.CV
+
+## 缺口
+
+能同时生成文本和图像的统一模型正在收敛到一个范式：文本用自回归，图像用流匹配。
+
+但训练这些模型很混乱：文本用 GRPO（群体相对策略优化），图像用 FlowGRPO，没人搞清楚怎么把它们一起训练而不让两个模态互相打架。
+
+现有方法要么分开训练各模态（失去联合优化的好处），要么用临时拼凑的组合，无法扩展到多轮交互。
+
+具体问题：当你想让模型先推理提示词（"一只猫在垫子上" → "一只毛茸茸的橙色虎斑猫在午后阳光下懒洋洋地躺在编织草垫上"），然后生成图像时，你需要稀疏的终端奖励（最终图像质量）反向传播到推理链和图像生成过程。
+
+标准 FlowGRPO 使用无分类器引导，会创建分支轨迹，在多轮场景中组合爆炸。
+
+```
+问题：文本+图像的训练方法各自为政
+   |
+   v
+假设：可以建模为带终端奖励的统一 MDP
+   |
+   v
+方法：UniGRPO = GRPO（文本）+ 改进的 FlowGRPO（图像）
+   |                        |
+   |                        +-- 移除 CFG（线性轨迹）
+   |                        +-- MSE 速度惩罚（非潜在 KL）
+   v
+证据：通过推理提升图像质量
+   |
+   v
+结论：可扩展的交错生成基线
+```
+
+## 增量
+
+**一句话**: 以前你用不兼容的强化学习方法分别训练文本推理和图像生成；
+
+现在你可以用单一统一框架联合训练它们，且能扩展到多轮交互。
+
+### 核心机制
+
+UniGRPO 把整个过程——推理然后生成图像——当作一个马尔可夫决策过程。
+
+状态是当前提示词，动作是生成下一个推理 token 或执行图像的流匹配步骤，奖励只在最后评估最终图像质量时到达。
+
+文本部分是标准 GRPO：采样多个推理扩展，根据生成图像的好坏打分，提高更好扩展的概率。
+
+图像部分他们对 FlowGRPO 做了两处改动。
+
+第一，干掉无分类器引导。
+
+CFG 通常运行两个并行流（有条件和无条件）然后插值，但这种分支让多轮轨迹变得难以处理。
+
+第二，不在潜在空间惩罚散度（KL 惩罚），而是直接在速度场空间惩罚散度（预测流方向的 MSE）。
+
+这提供了更紧、更可解释的正则化信号。
+
+```
+用户提示 --> [推理模型] --> 扩展提示 --> [流模型] --> 图像
+                ^                              ^
+                |                              |
+             GRPO 损失                   FlowGRPO 损失
+                |                              |
+                +-------- 终端奖励 -------------+
+                        （图像质量分数）
+```
+
+把它想象成接力赛，第一棒（推理模型）交给第二棒（图像模型），但你只有在第二棒冲过终点后才知道团队是否赢了。
+
+标准训练会让每个跑者跟各自的教练单独练习。
+
+UniGRPO 有一个教练看完整场比赛，根据最终成绩告诉两个跑者如何改进。
+
+关键技巧：第一棒的交接（扩展提示）必须流畅，第二棒不能突然在比赛中途分裂成两个并行跑者（无 CFG），因为那会让你无法追踪谁对最终成绩贡献了什么。
+
+### 关键概念
+
+- **图像的流匹配**: 不是去噪（像扩散模型），流匹配学习一个速度场，沿直线路径把噪声直接推向目标图像。
+
+想象你在 A 点（随机噪声）想到达 B 点（你的图像）。
+
+扩散走一条摇摆的迭代路径。
+
+流匹配学习一个向量场，在每个中间点都指向从 A 到 B，所以你只需沿着箭头走直线。
+
+它更快更可控，但用强化学习训练更难，因为你优化的是"路径"本身。
+
+- **无分类器引导（CFG）**: 一个技巧，你运行模型两次——一次带提示，一次不带——然后朝差异方向引导。
+
+就像通过比较有提示和无提示的输出来问"这个提示增加了什么？"。
+
+这提升质量但计算翻倍，并创建分支轨迹（你现在追踪两条并行轨迹）。
+
+在多轮生成中，这会指数级分支，所以 UniGRPO 完全移除它。
+
+- **速度场 MSE 惩罚**: 流模型在每步预测一个速度（方向和速率）。
+
+MSE 惩罚直接比较策略预测的速度和参考模型的速度，而不是比较最终的潜在表示。
+
+就像实时纠正司机的方向盘角度，而不是等着看他们最后开到哪。
+
+这防止模型走极端弯路（奖励黑客），同时仍允许有用的探索。
+
+## 框架转变
+
+```
+之前（分开训练）：                之后（UniGRPO）：
+
+文本 RL：[提示] -> [推理]        [提示] -> [推理] -> [图像]
+             |                          |          |
+         文本奖励                   终端奖励 -------+
+                                      （图像质量）
+图像 RL：[提示] -> [图像]
+             |         |
+         CFG 分支   CFG 分支
+             |         |
+         图像奖励 -----+
+```
+
+从模态特定优化到端到端轨迹优化，核心转变是把交错生成当作带稀疏终端反馈的单一决策过程。
+
+## 专家评审
+
+**选题眼光**: 真缺口。
+
+该领域明显在朝统一模型发展（GPT-4V、Gemini 等），没人有文本+图像情况的干净训练方法。
+
+这不是人造的——这是自回归文本和基于流的图像成为标准后的下一个逻辑步骤。
+
+**方法成熟度**: 主要是组装现有部件（GRPO + FlowGRPO），但两处改动（移除 CFG、切换到速度 MSE）动机充分。
+
+CFG 移除对可扩展性是必要的，不只是简化。
+
+速度惩罚很巧妙——比潜在 KL 更直接的正则化。
+
+但他们没探索更简单的替代方案（比如只调 KL 权重）是否可行。
+
+**实验诚意**: 基线公平（他们对比了分开训练和标准 FlowGRPO）。
+
+数字显示明确改进。
+
+警示：他们只测试了单轮推理→图像，没测他们声称能实现的多轮场景。
+
+可扩展性论证是理论性的，非经验性的。
+
+另外，没有消融实验说明是否真需要两处改动，还是一处就够。
+
+**写作功力**: 摘要过度推销（"交错生成的统一框架"），而他们只验证了一轮。
+
+第 3.2 节（方法）很密集——需要一个玩具示例演练。
+
+相关工作部分敷衍，没清楚定位这篇论文相对于多模态强化学习并行工作的位置。
+
+**判决**: 弱接收 — 扎实的增量贡献，有实用价值，但可扩展性主张需要经验验证，方法感觉像显而易见的尝试而非深刻洞见。
+
+## 要点总结
+
+速度场 MSE 惩罚是最可迁移的想法。
+
+如果你在任何预测中间步骤的生成模型上做强化学习（流、扩散、带 KV 缓存的自回归），直接惩罚步骤级预测通常比惩罚最终输出散度更好。
+
+它计算更快，训练信号更清晰。
+
+CFG 移除是一个强制函数：如果你的强化学习设置需要分支轨迹，你可能无法扩展。
+
+这超越视觉——任何多轮强化学习问题都应避免指数级倍增轨迹的技术。
+
+对于构建推理+生成流水线的实践者：你可以偷走 MDP 建模（把整条链当作带终端奖励的一个回合），即使你不用强化学习。
+
+它澄清了你在优化什么，以及信用分配发生在哪里。
+
+:::
