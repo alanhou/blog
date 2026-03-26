@@ -1,7 +1,18 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join, basename } from 'path';
 import satori from 'satori';
-import { Resvg } from '@resvg/resvg-js';
+
+let Resvg;
+try {
+  ({ Resvg } = await import('@resvg/resvg-js'));
+} catch {
+  Resvg = null;
+}
+
+const FALLBACK_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl5n2sAAAAASUVORK5CYII=',
+  'base64'
+);
 
 const ARXIV_PLACEHOLDER = 'https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png';
 const VISUALS_DIR = 'public/arxiv-visuals';
@@ -132,6 +143,8 @@ async function generateCover(titleEn, titleZh, tags, slug, fonts) {
     },
     { width: 1200, height: 630, fonts }
   );
+
+  if (!Resvg) return FALLBACK_PNG;
 
   const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: 1200 } });
   return resvg.render().asPng();
