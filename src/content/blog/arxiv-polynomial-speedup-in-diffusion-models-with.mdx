@@ -1,0 +1,313 @@
+---
+title:
+  en: "Polynomial Speedup in Diffusion Models with the Multilevel Euler-Maruyama Method"
+  zh: "多层次欧拉-丸山方法：扩散模型的多项式加速"
+description:
+  en: "A multilevel numerical method that achieves polynomial speedup in diffusion model sampling by strategically combining approximators of varying accuracy and cost."
+  zh: "通过策略性组合不同精度和成本的近似器，在扩散模型采样中实现多项式加速的多层次数值方法。"
+date: 2026-03-26
+tags: ["arxiv", "ai", "cs.lg", "math.na", "stat.ml"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2603.24594](https://arxiv.org/abs/2603.24594)
+**Authors**: Arthur Jacot
+**Categories**: cs.LG, math.NA, stat.ML
+
+## The Gap
+
+Diffusion models generate images by solving differential equations backward in time. Each step requires evaluating a neural network (the "drift" function). The problem: accurate networks are expensive to run. If you want ε error, traditional Euler-Maruyama (EM) method needs ε^(-γ-1) compute when the drift is "Harder than Monte Carlo" (HTMC regime, γ>2). For large models, this means hundreds of evaluations of massive UNets.
+
+Prior work focused on better samplers (DDIM, DPM-Solver) or distillation, but these still fundamentally pay the ε^(-γ-1) cost. The gap: numerical analysis has multilevel Monte Carlo methods that break this barrier for integrals, but nobody applied this thinking to the ODE/SDE solving in diffusion models.
+
+```
+Problem: Diffusion sampling cost
+    |
+    v
+Observation: Drift approximation has HTMC property (γ>2)
+    |
+    v
+Method: ML-EM (multilevel Euler-Maruyama)
+    |
+    +---> Train k UNets: small -> medium -> large
+    +---> Use many cheap evals + few expensive evals
+    |
+    v
+Evidence: 4x speedup on CelebA 64x64, γ≈2.5 measured
+    |
+    v
+Conclusion: Sampling cost = O(ε^-γ) instead of O(ε^(-γ-1))
+             (same cost as single drift evaluation)
+```
+
+## The Increment
+
+**One sentence**: Before this paper, diffusion sampling cost scaled as ε^(-γ-1); after, it scales as ε^(-γ) — you can now sample at the cost of evaluating the drift once.
+
+### Core Mechanism
+
+ML-EM trains a hierarchy of k neural networks f^1, f^2, ..., f^k approximating the true drift f, where f^1 is tiny and fast, f^k is huge and accurate. During sampling, instead of using only f^k for all timesteps, ML-EM uses a telescoping sum trick: compute the trajectory with f^1 (cheap), then add corrections using differences (f^2 - f^1), (f^3 - f^2), ..., (f^k - f^(k-1)).
+
+The key insight: each correction term has smaller variance than the full trajectory, so you need fewer samples at higher levels. Specifically, if level i costs C_i and has error ε_i, you run N_i ∝ ε_i^2 / ε^2 samples at level i. The total cost becomes dominated by the cheapest level, not the most expensive.
+
+```
+Traditional EM:
+  t=0 --[f^k]--> t=1 --[f^k]--> t=2 --[f^k]--> ... --[f^k]--> t=T
+  Cost: T * C_k
+
+ML-EM:
+  Level 1: t=0 --[f^1]--> t=1 --[f^1]--> ... (many samples, cheap)
+           |
+  Level 2: + correction from (f^2 - f^1) (fewer samples)
+           |
+  Level 3: + correction from (f^3 - f^2) (even fewer)
+           |
+  Level k: + correction from (f^k - f^(k-1)) (very few samples)
+  
+  Cost: N_1*C_1 + N_2*C_2 + ... + N_k*C_k ≈ O(ε^-γ)
+```
+
+Think of it like building a house. Traditional method: hire the master architect to draw every single brick (expensive, slow). ML-EM method: have an apprentice sketch the rough layout (fast), then a journeyman refine the walls (medium), then the master only touches up the details (few expensive interventions). The house gets built to the same spec, but you paid apprentice wages for most of the work.
+
+The telescoping structure is load-bearing here: each level only corrects the error introduced by the previous level, not the full trajectory error. This is why variance decreases geometrically and you can use exponentially fewer samples at higher levels.
+
+### Key Concepts
+
+- **HTMC (Harder than Monte Carlo) regime**: A function is HTMC with parameter γ if approximating it to ε accuracy costs ε^(-γ) compute, where γ>2. Monte Carlo integration has γ=2 (by central limit theorem). Neural networks in diffusion models have γ≈2.5 because you need to scale width/depth to reduce approximation error, and compute grows superlinearly with size. This is the regime where multilevel methods shine — if γ≤2, the speedup vanishes.
+
+- **Telescoping sum**: Instead of computing E[X] directly, write X = Y_1 + (Y_2 - Y_1) + (Y_3 - Y_2) + ... where Y_i are increasingly accurate approximations. Each difference term (Y_{i+1} - Y_i) has smaller variance than X itself, so you can estimate it with fewer samples. The total cost is sum of (samples_i ** cost_i), which can be much less than (total_samples * cost_k) if you balance the levels right.
+
+- **Variance reduction through correlation**: When you compute f^{i+1}(x) - f^i(x) at the same point x, the two networks are correlated (both trying to approximate the same f). Their difference has lower variance than either one alone. This is why the correction terms need fewer samples — you're measuring a small residual, not a full signal.
+
+## Framework Shift
+
+```
+Before (standard EM):                After (ML-EM):
+
+All steps use f^k:                   Hierarchical evaluation:
+                                     
+  [f^k] -> [f^k] -> [f^k]              [f^1] many times (cheap base)
+    |        |        |                   |
+  step1    step2    step3                 + [f^2-f^1] fewer times
+                                           |
+Cost: T * (expensive)                      + [f^3-f^2] even fewer
+                                           |
+                                           + [f^k-f^(k-1)] very few
+                                     
+                                     Cost: mostly cheap, little expensive
+```
+
+From "use the best tool for every job" to "use cheap tools for bulk work, expensive tools only for refinement" — the core shift is exploiting the hierarchy of approximation quality.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Diffusion model sampling is a major bottleneck in practice, and the HTMC observation is genuinely insightful. This isn't manufactured — people are running 50-100 steps with billion-parameter UNets. The connection to multilevel Monte Carlo is natural in hindsight but wasn't obvious to the ML community.
+
+**Method maturity**: Elegant application of existing numerical analysis to a new domain. The theory is solid (builds on established multilevel MC literature), but the practical implementation has wrinkles. Training k separate UNets is non-trivial — how do you ensure they're actually approximating the same drift? The paper doesn't deeply address this. Also, the method assumes you can cheaply evaluate smaller networks, but in practice, batch size and memory overhead complicate this.
+
+**Experimental integrity**: Baselines are fair (standard EM with same total compute budget). The 4x speedup on CelebA 64x64 is believable, but this is a small-scale experiment. The claim about "orders of magnitude" speedups on larger models is extrapolation, not measurement. The γ≈2.5 measurement is interesting but only shown for one dataset/architecture. Would like to see: ImageNet experiments, comparison with distillation methods, ablation on number of levels k.
+
+**Writing quality**: The paper front-loads theory and relegates practical details to appendix. Section 3 (numerical experiments) is too brief — only 1.5 pages for the main result. The connection between abstract SDE theory and concrete UNet training could be clearer. Rewriting Section 2.3 to lead with intuition before formalism would help accessibility.
+
+**Verdict**: weak accept — Solid theoretical contribution with promising but limited experimental validation. The idea is sound and the speedup is real, but the practical impact depends on scaling behavior that isn't fully demonstrated.
+
+## Takeaways
+
+**Hierarchical approximation is underused in ML**: Whenever you have a compute-intensive function that can be approximated at multiple fidelities, consider a multilevel approach. This applies beyond diffusion — think RL with cheap simulators + expensive real-world rollouts, or neural architecture search with small proxy tasks + full training.
+
+**The γ>2 threshold matters**: Measure the approximation-cost tradeoff for your models. If γ≤2, multilevel methods won't help. If γ>2, you're leaving polynomial speedups on the table.
+
+**Variance reduction through correlation**: When comparing two approximations, evaluate them at the same inputs to exploit correlation. This principle transfers to A/B testing, gradient estimation, and any scenario where you're measuring differences.
+
+**Concrete technique**: If you're training multiple model sizes anyway (for deployment flexibility), you can repurpose them for multilevel sampling at near-zero additional cost. The training overhead is the main barrier, not the sampling algorithm itself.
+:::
+
+:::zh
+**论文**: [2603.24594](https://arxiv.org/abs/2603.24594)
+**作者**: Arthur Jacot
+**分类**: cs.LG, math.NA, stat.ML
+
+## 缺口
+
+扩散模型通过反向求解微分方程来生成图像。
+
+每一步都需要评估一个神经网络（"漂移"函数）。
+
+问题在于：精确的网络运行成本很高。
+
+如果你想要 ε 误差，传统的欧拉-丸山（EM）方法在漂移处于"比蒙特卡洛更难"（HTMC 区域，γ>2）时需要 ε^(-γ-1) 的计算量。
+
+对于大型模型，这意味着要对巨大的 UNet 进行数百次评估。
+
+先前的工作集中在更好的采样器（DDIM、DPM-Solver）或蒸馏上，但这些方法本质上仍然要付出 ε^(-γ-1) 的代价。
+
+缺口在于：数值分析中有多层次蒙特卡洛方法可以打破积分计算的这个障碍，但没人把这种思路应用到扩散模型的 ODE/SDE 求解上。
+
+```
+问题：扩散采样成本
+    |
+    v
+观察：漂移近似具有 HTMC 性质 (γ>2)
+    |
+    v
+方法：ML-EM（多层次欧拉-丸山）
+    |
+    +---> 训练 k 个 UNet：小 -> 中 -> 大
+    +---> 使用大量廉价评估 + 少量昂贵评估
+    |
+    v
+证据：CelebA 64x64 上 4 倍加速，测得 γ≈2.5
+    |
+    v
+结论：采样成本 = O(ε^-γ) 而非 O(ε^(-γ-1))
+         （与单次漂移评估成本相同）
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，扩散采样成本按 ε^(-γ-1) 缩放；之后，按 ε^(-γ) 缩放——现在可以用评估一次漂移的成本完成采样。
+
+### 核心机制
+
+ML-EM 训练一个由 k 个神经网络组成的层次结构 f^1, f^2, ..., f^k 来近似真实漂移 f，其中 f^1 很小很快，f^k 很大很准确。
+
+在采样过程中，ML-EM 不是在所有时间步都只使用 f^k，而是使用一个伸缩求和技巧：用 f^1（便宜）计算轨迹，然后使用差值 (f^2 - f^1)、(f^3 - f^2)、...、(f^k - f^(k-1)) 添加修正。
+
+关键洞察：每个修正项的方差都小于完整轨迹，所以在更高层次上需要更少的样本。
+
+具体来说，如果第 i 层的成本是 C_i，误差是 ε_i，你在第 i 层运行 N_i ∝ ε_i^2 / ε^2 个样本。
+
+总成本由最便宜的层主导，而不是最昂贵的层。
+
+```
+传统 EM：
+  t=0 --[f^k]--> t=1 --[f^k]--> t=2 --[f^k]--> ... --[f^k]--> t=T
+  成本：T * C_k
+
+ML-EM：
+  第 1 层：t=0 --[f^1]--> t=1 --[f^1]--> ...（许多样本，便宜）
+           |
+  第 2 层：+ 来自 (f^2 - f^1) 的修正（更少样本）
+           |
+  第 3 层：+ 来自 (f^3 - f^2) 的修正（更更少）
+           |
+  第 k 层：+ 来自 (f^k - f^(k-1)) 的修正（非常少样本）
+  
+  成本：N_1*C_1 + N_2*C_2 + ... + N_k*C_k ≈ O(ε^-γ)
+```
+
+把它想象成盖房子。
+
+传统方法：雇佣总建筑师画每一块砖（昂贵、缓慢）。
+
+ML-EM 方法：让学徒画粗略布局（快速），然后让熟练工细化墙壁（中等），最后总建筑师只修饰细节（少量昂贵干预）。
+
+房子建到同样的规格，但你为大部分工作支付的是学徒工资。
+
+这里的伸缩结构是承重的：每一层只修正前一层引入的误差，而不是完整的轨迹误差。
+
+这就是为什么方差几何级数下降，你可以在更高层次上使用指数级更少的样本。
+
+### 关键概念
+
+- **HTMC（比蒙特卡洛更难）区域**：如果将一个函数近似到 ε 精度需要 ε^(-γ) 的计算量，其中 γ>2，那么这个函数就处于 HTMC 区域。
+
+蒙特卡洛积分的 γ=2（根据中心极限定理）。
+
+扩散模型中的神经网络 γ≈2.5，因为你需要扩展宽度/深度来减少近似误差，而计算量随大小超线性增长。
+
+这是多层次方法发光的区域——如果 γ≤2，加速就消失了。
+
+- **伸缩求和**：不直接计算 E[X]，而是写成 X = Y_1 + (Y_2 - Y_1) + (Y_3 - Y_2) + ...，其中 Y_i 是越来越准确的近似。
+
+每个差值项 (Y_{i+1} - Y_i) 的方差都小于 X 本身，所以可以用更少的样本来估计它。
+
+如果你平衡好各层，总成本是 (样本数_i * 成本_i) 的和，可以远小于 (总样本数 * 成本_k)。
+
+- **通过相关性减少方差**：当你在同一点 x 计算 f^{i+1}(x) - f^i(x) 时，两个网络是相关的（都试图近似同一个 f）。
+
+它们的差值方差低于任何一个单独的方差。
+
+这就是为什么修正项需要更少的样本——你在测量一个小残差，而不是完整信号。
+
+## 框架转变
+
+```
+之前（标准 EM）：                  之后（ML-EM）：
+
+所有步骤使用 f^k：                 分层评估：
+                                     
+  [f^k] -> [f^k] -> [f^k]              [f^1] 多次（便宜的基础）
+    |        |        |                   |
+  步骤1    步骤2    步骤3                  + [f^2-f^1] 较少次数
+                                           |
+成本：T * （昂贵）                          + [f^3-f^2] 更少次数
+                                           |
+                                           + [f^k-f^(k-1)] 很少次数
+                                     
+                                     成本：主要便宜，少量昂贵
+```
+
+从"每项工作都用最好的工具"到"大量工作用便宜工具，昂贵工具只用于精修"——核心转变是利用近似质量的层次结构。
+
+## 专家评审
+
+**选题眼光**：真实缺口。
+
+扩散模型采样在实践中是主要瓶颈，HTMC 观察确实有洞察力。
+
+这不是人造的——人们正在用十亿参数的 UNet 运行 50-100 步。
+
+与多层次蒙特卡洛的联系事后看来很自然，但对机器学习社区来说并不明显。
+
+**方法成熟度**：将现有数值分析优雅地应用到新领域。
+
+理论扎实（建立在已有的多层次 MC 文献上），但实际实现有褶皱。
+
+训练 k 个独立的 UNet 并非易事——如何确保它们实际上在近似同一个漂移？论文没有深入解决这个问题。
+
+此外，该方法假设你可以廉价地评估较小的网络，但在实践中，批量大小和内存开销使这变得复杂。
+
+**实验诚意**：基线公平（相同总计算预算的标准 EM）。
+
+CelebA 64x64 上的 4 倍加速是可信的，但这是小规模实验。
+
+关于在更大模型上"数量级"加速的说法是外推，不是测量。
+
+γ≈2.5 的测量很有趣，但只在一个数据集/架构上展示。
+
+希望看到：ImageNet 实验、与蒸馏方法的比较、层数 k 的消融研究。
+
+**写作功力**：论文前置理论，将实践细节放到附录。
+
+第 3 节（数值实验）太简短——主要结果只有 1.5 页。
+
+抽象 SDE 理论与具体 UNet 训练之间的联系可以更清晰。
+
+重写第 2.3 节，在形式化之前先给出直觉，会提高可读性。
+
+**判决**：弱接收——扎实的理论贡献，实验验证有前景但有限。
+
+想法是合理的，加速是真实的，但实际影响取决于未充分展示的缩放行为。
+
+## 要点总结
+
+**分层近似在机器学习中使用不足**：每当你有一个可以在多个保真度上近似的计算密集型函数时，考虑多层次方法。
+
+这超越了扩散——想想用便宜模拟器 + 昂贵真实世界展开的强化学习，或用小代理任务 + 完整训练的神经架构搜索。
+
+**γ>2 阈值很重要**：测量你的模型的近似-成本权衡。
+
+如果 γ≤2，多层次方法不会有帮助。
+
+如果 γ>2，你正在浪费多项式加速。
+
+**通过相关性减少方差**：比较两个近似时，在相同输入上评估它们以利用相关性。
+
+这个原则可以迁移到 A/B 测试、梯度估计以及任何测量差异的场景。
+
+**具体技术**：如果你无论如何都在训练多个模型大小（为了部署灵活性），你可以以接近零的额外成本将它们重新用于多层次采样。
+
+训练开销是主要障碍，而不是采样算法本身。
+:::
