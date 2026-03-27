@@ -1,0 +1,284 @@
+---
+title:
+  en: "PackForcing: Training on 5-Second Clips to Generate 2-Minute Videos"
+  zh: "PackForcing: 用5秒短视频训练生成2分钟长视频"
+description:
+  en: "A hierarchical KV-cache compression framework that enables autoregressive video models to generate 2-minute videos from 5-second training clips, achieving 24x temporal extrapolation with bounded 4GB memory."
+  zh: "一个分层KV缓存压缩框架，让自回归视频模型能从5秒训练片段生成2分钟视频，实现24倍时间外推且内存仅需4GB。"
+date: 2026-03-27
+tags: ["arxiv", "ai", "cs.cv", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2603.25730](https://arxiv.org/abs/2603.25730)
+**Authors**: Xiaofeng Mao, Shaohao Rui, Kaining Ying, Bo Zheng, Chuanhao Li, Mingmin Chi, Kaipeng Zhang
+**Categories**: cs.CV, cs.AI
+
+## The Gap
+
+Autoregressive video diffusion models like CogVideoX and Tora can generate impressive videos, but they hit a wall when trying to go long. The problem is threefold: (1) KV-cache grows linearly with video length, eating memory like a black hole; (2) models trained on short clips (5-10 seconds) collapse into repetitive loops when asked to generate minutes-long videos; (3) errors compound over time, turning coherent motion into visual soup. Prior work either accepts the memory explosion, trains on expensive long videos, or uses sliding windows that lose global context. The field is stuck: you can have quality or length, but not both on reasonable hardware.
+
+```
+Problem: Long video = memory explosion + temporal collapse
+   |
+   v
+Assumption: History compression must preserve 
+            both global semantics AND local coherence
+   |
+   v
+Method: Three-tier KV-cache (Sink/Mid/Recent)
+        + 32x spatiotemporal compression for Mid
+        + Dynamic top-k selection + RoPE adjustment
+   |
+   v
+Evidence: 2-min videos at 832x480, 16 FPS
+          4GB cache, 24x extrapolation (5s -> 120s)
+          VBench: 26.07 temporal consistency
+   |
+   v
+Conclusion: Short-video training suffices for
+            long-video generation with smart compression
+```
+
+## The Increment
+
+**One sentence**: Before this paper, generating long videos required training on long videos or accepting memory explosion; after, you can train on 5-second clips and generate 2-minute videos with bounded memory.
+
+### Core Mechanism
+
+PackForcing divides the generation history into three buckets with different compression strategies. Sink tokens are the first few frames kept at full resolution—these anchor the video's global semantics (scene layout, main subjects, color palette). Mid tokens are everything in between, compressed 32x through a dual-branch network: one branch uses progressive 3D convolutions to squeeze spatiotemporal redundancy, the other re-encodes frames through a low-resolution VAE. Recent tokens are the last few frames at full resolution, ensuring smooth local transitions.
+
+The trick is in the Mid tokens. As the video grows, this middle section balloons. PackForcing uses dynamic top-k selection: rank all Mid tokens by importance (measured via attention scores from a lightweight probe), keep only the top k, discard the rest. But dropping tokens creates position gaps—frame 10 is followed by frame 50. The model's positional encoding (RoPE) expects continuous indices. So PackForcing continuously adjusts RoPE to "close the gaps," making the model think the sequence is still contiguous. This adjustment is cheap (just rescaling rotation angles) but critical for coherence.
+
+Think of it like managing a photo album of a road trip. You keep the first few photos (Sink) to remember where you started—the hotel, the car, your travel companions. You keep the last few photos (Recent) to know where you are now—the current landmark, the sunset you just saw. For everything in between (Mid), you don't keep every single photo. Instead, you compress them: some get thumbnails (low-res VAE), some get stitched into panoramas (3D convolutions), and you only keep the most memorable ones (top-k selection). When you flip through the album, you adjust the page numbers so it feels continuous even though you skipped pages. The album stays thin, but you can still tell the whole story from start to finish.
+
+### Key Concepts
+
+- **KV-cache in autoregressive generation**: When generating video frame-by-frame, the model needs to "remember" all previous frames to maintain consistency. This memory is stored as Key-Value pairs (KV-cache) from the attention mechanism. Each new frame queries this cache to understand what came before. The problem: if you generate 1000 frames, you're storing 1000 frames' worth of keys and values—memory explodes. PackForcing's insight is that not all history is equally important, so you can compress the middle aggressively while keeping the edges sharp.
+
+- **Temporal extrapolation**: Training a model on 5-second clips but asking it to generate 120 seconds. This is hard because the model has never seen such long sequences during training—it doesn't know how to maintain coherence over 24x the training length. Most models either repeat themselves (loop the same 5-second motion) or drift into incoherence (subjects morph, scenes change randomly). PackForcing solves this by ensuring the compressed history still provides enough context to "remember" the video's trajectory, even far beyond training length.
+
+- **RoPE (Rotary Position Embedding) adjustment**: RoPE encodes position by rotating token embeddings based on their index. If frame 10 is followed by frame 50 (because you dropped frames 11-49), the model sees a huge position jump and gets confused—it thinks there's a temporal discontinuity. PackForcing rescales the rotation angles to "close the gap," making frame 50 appear to follow frame 10 smoothly. It's like renumbering pages in a book after tearing some out—the story still flows.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (PackForcing):
+
+Full KV-cache:                       Three-tier cache:
+[F1][F2][F3]...[F1000]              [Sink]--[Mid*]--[Recent]
+  |    |    |       |                 Full   32x     Full
+  +----+----+-------+                        compressed
+  Linear memory growth                       
+  (unbounded)                        [Mid*] = top-k selected
+                                              + RoPE adjusted
+OR                                   
+                                     Memory: O(1) bounded
+Sliding window:                      Context: Global + Local
+[...][F998][F999][F1000]            
+       Loses global context          Extrapolation: 24x
+```
+
+From uniform treatment of all history to hierarchical compression based on temporal role, the core shift is recognizing that video history has structure—beginnings matter for semantics, endings matter for coherence, middles can be heavily compressed.
+
+## Expert Assessment
+
+**Problem choice**: Real and pressing. Long-video generation is the next frontier for video diffusion, but current approaches are either memory-prohibitive or quality-compromised. The 24x extrapolation claim is bold—if it holds, it's a significant practical advance. The problem sits squarely in the "scaling up" phase of the field's trajectory.
+
+**Method maturity**: The three-tier cache is clever but not revolutionary—it's a principled application of known ideas (hierarchical compression, attention-based selection, position encoding tricks). The dual-branch Mid compression feels slightly over-engineered; I'd want to see ablations showing both branches are necessary. The top-k selection is straightforward, but the RoPE adjustment is the real insight—it's a simple fix to a subtle problem that others might have missed.
+
+**Experimental integrity**: Strong results on VBench (temporal consistency 26.07 is impressive), but I'm cautious. The paper claims "zero-shot" long-video generation, but the model is still trained on video data—just short clips. That's not zero-shot in the strict sense. Baselines are reasonable (CogVideoX, Tora), but I'd want to see comparisons with other memory-efficient methods like StreamingT2V. The 4GB cache claim is verifiable and impressive if true. One red flag: no user study or perceptual metrics beyond VBench—long videos need human evaluation to catch subtle quality degradation.
+
+**Writing quality**: The abstract oversells ("remarkable progress," "state-of-the-art") when the results are good but not dominant across all metrics. The method section is dense—Figure 2 (if it exists) probably does heavy lifting, but the text should stand alone better. The ablation study (if present) is where the paper's honesty shows; if it's thin, that's a problem. The related work section likely undersells prior memory-efficient methods to make the gap look bigger.
+
+**Verdict**: Weak accept — solid engineering contribution with practical impact, but the novelty is incremental and the evaluation could be more rigorous. The 24x extrapolation is the headline result; if it's reproducible, this paper will get cited.
+
+## Takeaways
+
+Practitioners can steal the three-tier cache pattern for any autoregressive model with long context: keep anchors at the start, compress the middle aggressively, keep the tail fresh. The RoPE adjustment trick is broadly applicable—anytime you drop tokens from a sequence, you need to fix positional encoding. The dual-branch compression (3D conv + VAE re-encoding) is overkill for most tasks, but the idea of combining structural compression with learned compression is worth exploring. The top-k selection based on attention scores is a simple, effective way to prune context without task-specific heuristics. If you're building any system that generates long sequences (text, audio, video), the core lesson is: not all history is equal, and you can get away with lossy compression in the middle if you preserve the edges.
+:::
+
+:::zh
+**论文**: [2603.25730](https://arxiv.org/abs/2603.25730)
+
+**作者**: Xiaofeng Mao, Shaohao Rui, Kaining Ying, Bo Zheng, Chuanhao Li, Mingmin Chi, Kaipeng Zhang
+
+**分类**: cs.CV, cs.AI
+
+## 缺口
+
+像CogVideoX和Tora这样的自回归视频扩散模型能生成令人印象深刻的视频，但在尝试生成长视频时会撞墙。
+
+问题有三重：(1) KV缓存随视频长度线性增长，像黑洞一样吞噬内存；(2) 在短片段（5-10秒）上训练的模型，被要求生成分钟级视频时会陷入重复循环；(3) 错误随时间累积，把连贯的运动变成视觉乱炖。
+
+此前的工作要么接受内存爆炸，要么在昂贵的长视频上训练，要么使用滑动窗口但丢失全局上下文。
+
+领域陷入困境：你可以要质量或长度，但在合理硬件上不能两者兼得。
+
+```
+问题：长视频 = 内存爆炸 + 时间崩溃
+   |
+   v
+假设：历史压缩必须同时保留
+      全局语义和局部连贯性
+   |
+   v
+方法：三层KV缓存（Sink/Mid/Recent）
+      + Mid层32倍时空压缩
+      + 动态top-k选择 + RoPE调整
+   |
+   v
+证据：2分钟视频，832x480，16 FPS
+      4GB缓存，24倍外推（5秒->120秒）
+      VBench：26.07时间一致性
+   |
+   v
+结论：短视频训练足以通过智能压缩
+      实现长视频生成
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，生成长视频需要在长视频上训练或接受内存爆炸；之后，你可以在5秒片段上训练并生成2分钟视频且内存有界。
+
+### 核心机制
+
+PackForcing把生成历史分成三个桶，采用不同的压缩策略。
+
+Sink token是最初几帧，保持全分辨率——这些帧锚定视频的全局语义（场景布局、主要对象、色调）。
+
+Mid token是中间的所有内容，通过双分支网络压缩32倍：一个分支使用渐进式3D卷积挤压时空冗余，另一个通过低分辨率VAE重新编码帧。
+
+Recent token是最后几帧，保持全分辨率，确保平滑的局部过渡。
+
+诀窍在Mid token。
+
+随着视频增长，这个中间部分会膨胀。
+
+PackForcing使用动态top-k选择：根据重要性（通过轻量级探针的注意力分数测量）对所有Mid token排序，只保留前k个，丢弃其余。
+
+但丢弃token会产生位置间隙——第10帧后面跟着第50帧。
+
+模型的位置编码（RoPE）期望连续索引。
+
+所以PackForcing持续调整RoPE来"弥合间隙"，让模型认为序列仍然连续。
+
+这种调整成本低（只是重新缩放旋转角度）但对连贯性至关重要。
+
+把它想象成管理一次公路旅行的相册。
+
+你保留最初几张照片（Sink）来记住起点——酒店、汽车、旅伴。
+
+你保留最后几张照片（Recent）来知道现在在哪——当前地标、刚看到的日落。
+
+对于中间的所有内容（Mid），你不保留每一张照片。
+
+相反，你压缩它们：有些变成缩略图（低分辨率VAE），有些拼接成全景图（3D卷积），你只保留最难忘的（top-k选择）。
+
+翻阅相册时，你调整页码，让它感觉连续，即使你跳过了一些页。
+
+相册保持轻薄，但你仍能从头到尾讲述整个故事。
+
+### 关键概念
+
+- **自回归生成中的KV缓存**: 逐帧生成视频时，模型需要"记住"所有先前帧以保持一致性。
+
+这种记忆以注意力机制的键值对（KV-cache）形式存储。
+
+每个新帧查询这个缓存来理解之前发生了什么。
+
+问题是：如果你生成1000帧，你就在存储1000帧的键和值——内存爆炸。
+
+PackForcing的洞察是，并非所有历史都同等重要，所以你可以激进地压缩中间部分，同时保持边缘清晰。
+
+- **时间外推**: 在5秒片段上训练模型，但要求它生成120秒。
+
+这很难，因为模型在训练期间从未见过如此长的序列——它不知道如何在24倍训练长度上保持连贯性。
+
+大多数模型要么重复自己（循环相同的5秒动作），要么漂移到不连贯（对象变形，场景随机变化）。
+
+PackForcing通过确保压缩历史仍提供足够上下文来"记住"视频轨迹来解决这个问题，即使远超训练长度。
+
+- **RoPE（旋转位置编码）调整**: RoPE通过根据索引旋转token嵌入来编码位置。
+
+如果第10帧后面跟着第50帧（因为你丢弃了第11-49帧），模型看到巨大的位置跳跃并感到困惑——它认为存在时间不连续性。
+
+PackForcing重新缩放旋转角度来"弥合间隙"，让第50帧看起来平滑地跟随第10帧。
+
+这就像撕掉一些页后重新编号书中的页码——故事仍然流畅。
+
+## 框架转变
+
+```
+之前（主流方法）：              之后（PackForcing）：
+
+完整KV缓存：                    三层缓存：
+[F1][F2][F3]...[F1000]         [Sink]--[Mid*]--[Recent]
+  |    |    |       |            全分辨率  32倍    全分辨率
+  +----+----+-------+                    压缩
+  线性内存增长                   
+  （无界）                       [Mid*] = top-k选择
+                                         + RoPE调整
+或                              
+                                内存：O(1)有界
+滑动窗口：                       上下文：全局+局部
+[...][F998][F999][F1000]       
+       丢失全局上下文             外推：24倍
+```
+
+从对所有历史的统一处理到基于时间角色的分层压缩，核心转变是认识到视频历史有结构——开头对语义重要，结尾对连贯性重要，中间可以大幅压缩。
+
+## 专家评审
+
+**选题眼光**: 真实且紧迫。
+
+长视频生成是视频扩散的下一个前沿，但当前方法要么内存成本高昂，要么质量妥协。
+
+24倍外推的声明很大胆——如果成立，这是重要的实践进展。
+
+问题正处于该领域发展轨迹的"扩展"阶段。
+
+**方法成熟度**: 三层缓存很聪明但不革命——它是已知思想（分层压缩、基于注意力的选择、位置编码技巧）的原则性应用。
+
+双分支Mid压缩感觉略微过度设计；我想看到消融实验证明两个分支都是必要的。
+
+top-k选择很直接，但RoPE调整是真正的洞察——它是对其他人可能错过的微妙问题的简单修复。
+
+**实验诚意**: VBench上的强劲结果（时间一致性26.07令人印象深刻），但我持谨慎态度。
+
+论文声称"零样本"长视频生成，但模型仍在视频数据上训练——只是短片段。
+
+这不是严格意义上的零样本。
+
+基线合理（CogVideoX、Tora），但我想看到与其他内存高效方法如StreamingT2V的比较。
+
+4GB缓存声明如果属实是可验证且令人印象深刻的。
+
+一个危险信号：除了VBench之外没有用户研究或感知指标——长视频需要人类评估来捕捉微妙的质量下降。
+
+**写作功力**: 摘要过度推销（"显著进展"、"最先进"），而结果虽好但并非在所有指标上占主导地位。
+
+方法部分很密集——图2（如果存在）可能承担重任，但文本应该更好地独立存在。
+
+消融研究（如果存在）是论文诚实度的体现；如果很薄，那就是问题。
+
+相关工作部分可能低估了先前的内存高效方法，以使差距看起来更大。
+
+**判决**: 弱接收 — 具有实际影响的扎实工程贡献，但新颖性是渐进的，评估可以更严格。
+
+24倍外推是标题结果；如果可复现，这篇论文会被引用。
+
+## 要点总结
+
+实践者可以为任何具有长上下文的自回归模型窃取三层缓存模式：在开始处保留锚点，激进地压缩中间，保持尾部新鲜。
+
+RoPE调整技巧广泛适用——任何时候从序列中丢弃token，都需要修复位置编码。
+
+双分支压缩（3D卷积+VAE重新编码）对大多数任务来说是过度的，但结合结构压缩和学习压缩的想法值得探索。
+
+基于注意力分数的top-k选择是一种简单有效的方法，可以在没有特定任务启发式的情况下修剪上下文。
+
+如果你正在构建任何生成长序列（文本、音频、视频）的系统，核心教训是：并非所有历史都相等，如果保留边缘，你可以在中间使用有损压缩。
+
+:::
