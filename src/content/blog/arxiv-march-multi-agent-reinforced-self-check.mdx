@@ -1,12 +1,12 @@
 ---
 title:
-  en: "MARCH: Breaking Confirmation Bias in LLM Hallucination Detection Through Multi-Agent Reinforcement"
-  zh: "MARCH:用多智能体强化学习打破大模型幻觉检测中的确认偏误"
+  en: "MARCH: Three Agents for Grounded Self-Checking in RAG"
+  zh: "MARCH：用三智能体自检降低RAG幻觉"
 description:
-  en: "A multi-agent framework that eliminates self-confirmation bias in LLM hallucination detection by enforcing information asymmetry between generation and verification agents, achieving 8B-parameter performance competitive with closed-source models."
-  zh: "一个多智能体框架,通过在生成和验证智能体之间强制信息不对称来消除大模型幻觉检测中的自我确认偏误,使8B参数模型达到与闭源模型竞争的性能。"
-date: 2026-03-26
-tags: ["arxiv", "ai", "cs.cl"]
+  en: "MARCH uses a Solver, Proposer, and blinded Checker trained with reinforcement learning to turn claim-level self-verification into better factual grounding, lifting an 8B model close to top proprietary systems on hallucination benchmarks."
+  zh: "MARCH用Solver、Proposer和盲审Checker组成多智能体自检链路,再用强化学习联合优化,把主张级验证变成更强的事实对齐能力,让8B模型在幻觉基准上逼近顶级闭源系统。"
+date: 2026-03-25
+tags: ["arxiv", "ai", "cs.cl", "rag", "llm"]
 image: "/arxiv-visuals/march-multi-agent-reinforced-self-check/HeroScene.png"
 ---
 
@@ -20,320 +20,264 @@ image: "/arxiv-visuals/march-multi-agent-reinforced-self-check/HeroScene.png"
 
 :::en
 **Paper**: [2603.24579](https://arxiv.org/abs/2603.24579)
-**Authors**: Zhuo Li, Yupeng Zhang, Pengyu Cheng, Jiajun Song, Mengyu Zhou, Hao Li, Shujie Hu, Yu Qin, Erchao Zhao, Xiaoxi Jiang
+**Authors**: Zhuo Li, Yupeng Zhang, Pengyu Cheng, Jiajun Song, Mengyu Zhou, Hao Li, Shujie Hu, Yu Qin, Erchao Zhao, Xiaoxi Jiang, Guanjun Jiang
 **Categories**: cs.CL
 
 ## The Gap
 
-Existing hallucination detection methods use LLM-as-a-judge to verify outputs against retrieved evidence, but they suffer from confirmation bias — the verifier sees the original generation and unconsciously validates its errors. Self-checking methods like self-consistency and chain-of-thought verification fail because the same model that made the mistake is asked to catch it. The core problem: when the judge has access to the defendant's testimony, it's contaminated.
+RAG is supposed to make language models factual by grounding them in retrieved documents, but in practice it often just gives models more material to misread. Current hallucination mitigation usually relies on one of two weak options. Either you supervise the final answer with coarse labels, which misses claim-level errors, or you ask another LLM to judge the answer while showing it the original response, which creates confirmation bias: the verifier sees the answer first and tends to rationalize it instead of independently checking the evidence.
+
+That leaves a real hole. We have many evaluation tools for hallucination, but far fewer training frameworks that force the model to *internally learn* document-grounded checking. MARCH attacks exactly that hole by making self-verification asymmetric rather than self-referential.
 
 ```
-Problem: RAG systems hallucinate
-    |
-    v
-Prior approach: LLM verifies its own output
-    |
-    v
-Limitation: Verifier sees original answer
-    |                    |
-    v                    v
-Confirmation bias    Reproduces errors
-    |
-    v
-MARCH's assumption: Information asymmetry breaks bias
-    |
-    v
-Method: Checker validates claims WITHOUT seeing original output
-    |
-    v
-Evidence: 8B model matches closed-source performance
-    |
-    v
-Conclusion: Deliberate ignorance enables factual self-correction
+Problem: RAG answers still hallucinate
+         even with retrieved evidence
+                |
+                v
+Existing fix 1: coarse answer-level supervision
+Existing fix 2: LLM-as-judge sees full answer
+                |
+                v
+Failure mode: claim-level errors survive,
+              verifier inherits confirmation bias
+                |
+                v
+Need: a training loop where verification is
+      independent, granular, and grounded
+                |
+                v
+MARCH: split generation, claim extraction,
+       and blinded checking across 3 agents
+                |
+                v
+Result: lower hallucination rates and better
+        multi-hop QA from the same 8B base
 ```
 
 ## The Increment
 
-**One sentence**: Before MARCH, LLMs verified their own outputs while seeing them; after MARCH, a blind checker validates atomic claims in isolation, breaking the confirmation loop.
+**One sentence**: Before MARCH, self-checking usually meant letting the model inspect its own answer; after MARCH, self-checking becomes a structured three-agent game where the verifier is deliberately blinded and the whole pipeline is optimized with reinforcement learning.
 
 ### Core Mechanism
 
-MARCH orchestrates three specialized agents in a pipeline. The Solver generates a RAG response from a query and retrieved documents. The Proposer decomposes this response into atomic propositions — minimal, independently verifiable claims. The Checker then validates each proposition against the evidence, crucially without access to the Solver's original output.
+MARCH assigns three roles to the same base policy under different prompts.
 
-The information flow is deliberately asymmetric. The Solver sees query + evidence → generates response. The Proposer sees response → extracts claims. The Checker sees only claim + evidence → outputs verification. This architectural choice prevents the Checker from anchoring on the Solver's reasoning path.
+1. **Solver** reads the query and retrieved documents, then writes the answer.
+2. **Proposer** turns that answer into atomic question-answer pairs, effectively breaking the narrative into verifiable factual claims.
+3. **Checker** receives only the atomic questions and the source documents, not the Solver's original answer, and must answer each question from evidence alone.
+
+The key idea is **information asymmetry**. The Checker is not allowed to see the Solver's wording, so it cannot lazily agree with it. If the Proposer extracts a claim like "the company reported 14.2% growth in 2023," the Checker must recover that answer from the documents independently. Any mismatch means the whole response trajectory is treated as flawed.
+
+The reward is intentionally harsh. MARCH uses a **Zero-Tolerance Reward**: if every claim matches the Checker's evidence-grounded answer, the trajectory gets success; if even one claim fails, the trajectory gets penalized. The authors then optimize both the Solver and Checker trajectories jointly with **PPO**, so the model learns not just to sound plausible, but to generate statements it can later survive under blind audit.
 
 ```
-Query + Evidence
-    |
-    v
-[Solver] -----> Response
-                    |
-                    v
-                [Proposer] -----> Atomic Claims
-                                      |
-                                      v
-Evidence -----> [Checker] -----> Verification
-(NO Response)        ^
-                     |
-                Information
-                 Asymmetry
+Query + retrieved docs
+        |
+        v
+     [Solver]
+        |
+        | full response y
+        v
+    [Proposer]
+        |
+        | atomic QA pairs (qi, ai)
+        v
+     [Checker]
+        |
+        | answers âi using docs only
+        | (no access to y)
+        v
+Compare ai vs âi
+        |
+        +-- all match --> reward
+        |
+        +-- one mismatch --> penalty
 ```
 
-Think of MARCH like a scientific peer review system with enforced blindness. The Solver is the researcher writing a paper. The Proposer is an editor extracting individual claims from the paper. The Checker is a reviewer who receives only the claims and raw data — never the original paper. The reviewer can't be swayed by the paper's narrative or writing style; they must judge each claim purely on evidence. The key insight: by hiding the paper from the reviewer, you force independent verification. The three roles co-evolve through reinforcement learning, like a review board that learns over time which verification strategies actually catch errors.
+Think of it like writing, fact extraction, and legal review split across three desks. The writer drafts the memo, the analyst turns it into checkable statements, and the auditor verifies those statements using only the source folder, not the memo itself. That workflow is slower than just rereading the draft, but much better at catching wishful interpretation. MARCH turns that workflow into an RL training signal.
 
 ### Key Concepts
 
-- **Atomic Proposition**: A claim that can be verified in isolation without context from other claims. Example: Instead of "The Eiffel Tower, built in 1889, is 330 meters tall," you get three propositions: (1) The Eiffel Tower was built in 1889, (2) The Eiffel Tower is 330 meters tall, (3) The Eiffel Tower exists. Each can be checked independently against evidence. This granularity prevents a verifier from accepting a half-true statement because part of it sounds right.
+- **Information Asymmetry**: This is the paper's central move. Most LLM judges fail because they are exposed to too much of the original answer and get nudged toward agreement. MARCH removes that shortcut. The Checker sees the documents and the questions, but not the answer being checked.
 
-- **Information Asymmetry**: Deliberately withholding information from an agent to change its behavior. In MARCH, the Checker never sees the Solver's output — only the claim and evidence. This isn't an oversight; it's the core mechanism. When you know the "expected answer," you unconsciously look for evidence that supports it. By keeping the Checker ignorant of the expected answer, it must build its judgment from scratch, eliminating anchoring bias.
+- **Claim-Level Atomization**: Instead of scoring the final response as a single blob, MARCH decomposes it into atomic QA pairs. That gives the training loop finer supervision. A long answer may be mostly right but still contain one crucial wrong number; atomization makes that visible.
 
-- **Multi-Agent Reinforcement Learning (MARL)**: Training multiple agents simultaneously where each agent's optimal strategy depends on others' strategies. In MARCH, the Solver learns to generate responses that survive decomposition and verification. The Proposer learns to extract claims that are neither too coarse (hiding errors) nor too fine (creating noise). The Checker learns verification strategies that catch subtle hallucinations. They co-evolve like an ecosystem — the Checker's improving detection forces the Solver to be more careful, which forces the Proposer to be more precise, which gives the Checker better training signal.
+- **Zero-Tolerance Reward**: The reward is binary and unforgiving. One unsupported claim invalidates the whole response. This matters because partial-credit rewards can let models trade factual rigor for fluent-but-sloppy generation. MARCH explicitly rejects that tradeoff.
+
+- **Joint Optimization of Generation and Audit**: The framework does not only train the Solver. It also trains the Checker trajectory, so the base model co-evolves as both a generator and an auditor. The paper argues that this dual role is what makes the grounding skill transferable to downstream QA.
 
 ## Framework Shift
 
 ```
-Before (LLM-as-a-judge):              After (MARCH):
+Before:
+[Generate answer] -> [Judge sees answer + docs] -> [score]
 
-Query + Evidence                      Query + Evidence
-    |                                     |
-    v                                     v
-[LLM Generator]                       [Solver]
-    |                                     |
-    v                                     v
-Response                              Response
-    |                                     |
-    +----------+                          v
-    |          |                      [Proposer]
-    v          v                          |
-Evidence   Response                       v
-    |          |                      Claim 1, Claim 2, ...
-    v          v                          |
-[LLM Verifier] <--- sees both             v
-    |                                 [Checker] <--- sees only
-    v                                     |         claim + evidence
-Verification                              v
-(biased)                              Verification
-                                      (unbiased)
+After MARCH:
+[Generate answer]
+      |
+      v
+[Decompose into atomic claims]
+      |
+      v
+[Blinded checker re-answers from docs only]
+      |
+      v
+[Use claim agreement as RL reward]
 ```
 
-From monolithic self-checking to adversarial decomposition, the core shift is enforced ignorance as a debiasing mechanism.
+**One sentence**: The shift is from answer-level self-evaluation with leaked context to claim-level blind auditing with reinforcement learning.
 
 ## Expert Assessment
 
-**Problem choice**: Real gap. Confirmation bias in self-verification is well-documented in psychology and demonstrably hurts LLM reliability. The RAG context makes it urgent — these systems are deployed in high-stakes domains. Not manufactured.
+**Problem choice**: Strong. Hallucination in RAG is one of the few failure modes that directly blocks real deployment in law, finance, and healthcare. The paper targets a bottleneck that matters operationally, not just benchmark-wise.
 
-**Method maturity**: Clever architectural insight (information asymmetry) combined with standard MARL training. The three-agent decomposition is elegant but raises questions: why not two agents (generator + blind checker)? The Proposer seems like it could be a deterministic rule-based module. The paper doesn't justify why claim extraction needs to be learned. Also, MARL is notoriously unstable — the paper glosses over training dynamics.
+**Method maturity**: Thoughtful and better engineered than it first appears. The three-agent design is conceptually simple, but the important contribution is not "more agents"—it is the asymmetric information structure plus the claim-level interface between them. That makes the method easier to trust than a vague self-critique loop. The downside is cost: generation, decomposition, and checking all sit in the training path, so this is not a lightweight trick.
 
-**Experimental integrity**: Baselines are fair (self-consistency, chain-of-thought, existing RAG methods). Numbers look solid across multiple benchmarks. One red flag: the 8B model "competitive with closed-source" claim is vague — which closed-source model, on which metric? The paper shows GPT-4 comparisons but cherry-picks favorable benchmarks. Also, no analysis of failure modes — when does information asymmetry hurt performance?
+**Experimental integrity**: Good overall. The paper evaluates on RAGTruth, FaithBench, Facts Grounding, ContextualJudgeBench, and multi-hop QA, which is a better spread than many factuality papers. The headline numbers are meaningful: on RAGTruth + FaithBench average accuracy, the base Llama3.1-8B rises from **55.20** to **74.93** with MARCH-STEM and **75.23** with MARCH-General; on Facts Grounding, it rises from **57.09** to **85.23**; on ContextualJudgeBench average, it goes from **29.7** to **51.6/52.3**. Those are not cosmetic gains.
 
-**Writing quality**: The abstract and intro are strong. The method section buries the key insight (information asymmetry) under MARL details. Section 3.2 should lead with "why blind checking works" before diving into agent architectures. The related work section is a laundry list; rewriting it to position MARCH in the bias-mitigation literature (not just hallucination detection) would elevate the framing.
+**What I buy most**: The fact that better hallucination control also improves multi-hop QA is the paper's strongest signal. MARCH is not merely building a stricter judge; it seems to be teaching the underlying policy to generate reasoning that remains anchored to evidence. That is a stronger claim, and the HotpotQA / MuSiQue / 2Wiki results support it.
 
-**Verdict**: weak accept — solid contribution with a clear insight, but the execution feels like it's solving two problems (bias + MARL training) when one (bias) is sufficient. The MARL component adds complexity without clear ablation showing it's necessary.
+**What still worries me**: The method leans heavily on factual decomposition into atomic claims, especially numerical or high-fidelity statements. That is a good fit for data-intensive RAG, but less obviously for open-ended explanation, synthesis, or creative knowledge work where claim boundaries are fuzzy. There is also an incentive question: zero-tolerance reward may suppress useful but harder-to-verify detail, pushing the model toward conservative answers.
+
+**Verdict**: accept — The paper identifies a real failure mode, proposes a clean structural fix, and backs it with broad empirical gains. Even if the full training recipe is expensive, the design principle is important and likely to transfer.
 
 ## Takeaways
 
-Steal the information asymmetry principle: when building verification systems, hide the thing being verified from the verifier. This applies beyond LLMs — code review tools, fact-checking pipelines, even human workflows. The atomic proposition decomposition is also portable: break complex outputs into minimal verifiable units before checking them. Concrete technique: if you're building a RAG system, add a claim extraction step and verify claims independently rather than verifying the full response. You don't need MARL for this — even a simple pipeline with frozen models will reduce hallucinations.
+**Blind the verifier on purpose**: If your verifier sees the answer it is supposed to check, you have already contaminated the audit. MARCH's best idea is not the multi-agent framing by itself, but the discipline of removing answer leakage from the checking step.
+
+**Turn free-form answers into checkable interfaces**: The Proposer is basically a compiler from narrative text to atomic QA pairs. That pattern is reusable well beyond this paper. If you want grounded generation, build an intermediate representation that can be independently validated.
+
+**Use harsher rewards when factuality is non-negotiable**: In domains where one wrong number breaks trust, partial-credit reward functions may optimize the wrong thing. MARCH's zero-tolerance setup is a reminder that the reward should match the operational failure standard, not just average benchmark convenience.
 :::
 
 :::zh
 **论文**: [2603.24579](https://arxiv.org/abs/2603.24579)
-**作者**: Zhuo Li, Yupeng Zhang, Pengyu Cheng, Jiajun Song, Mengyu Zhou, Hao Li, Shujie Hu, Yu Qin, Erchao Zhao, Xiaoxi Jiang
+**作者**: Zhuo Li, Yupeng Zhang, Pengyu Cheng, Jiajun Song, Mengyu Zhou, Hao Li, Shujie Hu, Yu Qin, Erchao Zhao, Xiaoxi Jiang, Guanjun Jiang
 **分类**: cs.CL
 
 ## 缺口
 
-现有的幻觉检测方法用大模型作为裁判,对照检索到的证据来验证输出,但它们都有确认偏误——验证者看到了原始生成内容,会不自觉地为其错误背书。
+RAG本来是想通过检索文档让语言模型更贴近事实,但在实际系统里,它常常只是给模型提供了更多可以“看错”的材料。现有缓解幻觉的方法通常落在两类弱方案里。第一类是对最终答案做粗粒度监督,这会漏掉主张级错误;第二类是让另一个LLM在看过原始回答后再去判分,这会产生确认偏差: 验证器先看到了答案,更容易替它找理由,而不是独立回到证据本身做核查。
 
-自检方法如自洽性检验和思维链验证都失败了,因为犯错的模型被要求去抓自己的错。
-
-核心问题：当法官能看到被告的证词时,判断就被污染了。
+真正的空缺在这里。我们已经有不少用于“评估”幻觉的工具,但很少有训练框架能逼着模型把文档对齐能力真正内化。MARCH瞄准的正是这个空缺: 它把自检从“自己看自己”改成了“有信息隔离的结构化核查”。
 
 ```
-问题: RAG系统产生幻觉
-    |
-    v
-先前方法: 大模型验证自己的输出
-    |
-    v
-局限: 验证者看到原始答案
-    |                    |
-    v                    v
-确认偏误            复制错误
-    |
-    v
-MARCH的假设: 信息不对称打破偏误
-    |
-    v
-方法: 检查者在看不到原始输出的情况下验证声明
-    |
-    v
-证据: 8B模型达到闭源模型性能
-    |
-    v
-结论: 刻意的无知使事实自我纠正成为可能
+问题: RAG回答即使有检索证据
+      仍然会产生幻觉
+           |
+           v
+现有修复1: 答案级粗监督
+现有修复2: Judge看到完整答案再打分
+           |
+           v
+失败点: 主张级错误仍会漏掉,
+        验证器还会继承确认偏差
+           |
+           v
+需求: 独立、细粒度、基于证据的
+      训练时核查闭环
+           |
+           v
+MARCH: 用3个角色拆开生成、
+       主张提取和盲审核查
+           |
+           v
+结果: 幻觉更少,同一个8B底模
+      在多跳QA上也更强
 ```
 
 ## 增量
 
-**一句话**: MARCH之前,大模型在看着自己输出的同时验证它;MARCH之后,一个"盲"检查者孤立地验证原子声明,打破了确认循环。
+**一句话**: 在MARCH之前,所谓自检通常只是让模型回头看自己的答案;在MARCH之后,自检变成了一个由三种角色组成、验证器被刻意蒙眼、再通过强化学习联合优化的结构化博弈。
 
 ### 核心机制
 
-MARCH在流水线中编排三个专门的智能体。
+MARCH给同一个基础策略模型分配三个角色,只是系统提示不同。
 
-求解器(Solver)从查询和检索文档生成RAG响应。
+1. **Solver** 读取问题和检索文档,生成最终回答。
+2. **Proposer** 把这段回答拆成原子化的问答对,相当于把叙述文本切成可验证的事实主张。
+3. **Checker** 只拿到这些原子问题和源文档,拿不到Solver原始回答,必须仅凭证据重新作答。
 
-提议器(Proposer)将响应分解为原子命题——最小的、可独立验证的声明。
+关键点是 **信息不对称**。Checker不允许看到Solver原文,因此它不能偷懒式地点头同意。如果Proposer从回答中抽出“这家公司2023年的增长率是14.2%”这样的主张,Checker就必须只靠文档把这个答案重新找出来。只要两边有一个不匹配,整条响应轨迹就被视为有问题。
 
-检查器(Checker)然后对照证据验证每个命题,关键是它看不到求解器的原始输出。
-
-信息流是刻意不对称的。
-
-求解器看到查询+证据→生成响应。
-
-提议器看到响应→提取声明。
-
-检查器只看到声明+证据→输出验证结果。
-
-这个架构选择阻止了检查器锚定在求解器的推理路径上。
+奖励设计也很硬。MARCH使用 **Zero-Tolerance Reward**: 只有所有主张都与Checker基于证据给出的答案一致,这条轨迹才算成功;只要有一个主张失败,整条轨迹就受罚。随后作者用 **PPO** 联合优化Solver和Checker两条轨迹,让模型学到的不是“听起来像真话”,而是“先生成,再在盲审下也站得住”。
 
 ```
-查询 + 证据
-    |
-    v
-[求解器] -----> 响应
-                    |
-                    v
-                [提议器] -----> 原子声明
-                                      |
-                                      v
-证据 -----> [检查器] -----> 验证结果
-(无响应)        ^
-                |
-            信息不对称
+问题 + 检索文档
+       |
+       v
+    [Solver]
+       |
+       | 完整回答 y
+       v
+   [Proposer]
+       |
+       | 原子QA对 (qi, ai)
+       v
+    [Checker]
+       |
+       | 只看文档重新回答 âi
+       | (看不到 y)
+       v
+比较 ai 和 âi
+       |
+       +-- 全部一致 --> 奖励
+       |
+       +-- 任一不一致 --> 惩罚
 ```
 
-把MARCH想象成一个强制盲审的科学同行评审系统。
-
-求解器是写论文的研究者。
-
-提议器是从论文中提取单个声明的编辑。
-
-检查器是只收到声明和原始数据的审稿人——永远看不到原始论文。
-
-审稿人不会被论文的叙事或写作风格影响;他们必须纯粹基于证据判断每个声明。
-
-关键洞察：通过对审稿人隐藏论文,你强制进行独立验证。
-
-三个角色通过强化学习共同进化,就像一个评审委员会随时间学习哪些验证策略真正能抓住错误。
+你可以把它想成三个工位的协作流程。写作者先起草报告,分析员把报告拆成可以逐条核查的陈述,审计员则只能看原始材料,不能看报告本身。这个流程比“回头再读一遍自己写的东西”更慢,但更容易抓住自我说服造成的错误。MARCH做的,就是把这个流程变成强化学习信号。
 
 ### 关键概念
 
-- **原子命题**: 可以在没有其他声明上下文的情况下孤立验证的声明。
+- **信息不对称**: 这是全文最重要的设计点。很多LLM judge之所以不可靠,不是因为它们不会推理,而是因为它们看到了太多原答案内容,天然更容易被带偏。MARCH把这个捷径切掉了。Checker只看文档和问题,不看待验证答案。
 
-例子：不是"埃菲尔铁塔建于1889年,高330米",而是三个命题：(1)埃菲尔铁塔建于1889年,(2)埃菲尔铁塔高330米,(3)埃菲尔铁塔存在。
+- **主张级原子化**: MARCH不把最终回答当作一个整体去打分,而是先拆成原子QA对。这样训练信号更细。一段长回答可能大部分都对,但其中一个关键数字错了;原子化后,这个错误就不会被整体流畅性淹没。
 
-每个都可以独立对照证据检查。
+- **零容忍奖励**: 这个奖励是二值且严格的。只要有一个不被证据支持的主张,整条回答就算失败。它的意义在于拒绝“七成正确也算不错”这种优化方向,逼模型优先满足事实刚性约束。
 
-这种粒度防止验证者因为部分听起来对就接受一个半真半假的陈述。
-
-- **信息不对称**: 刻意对智能体隐瞒信息以改变其行为。
-
-在MARCH中,检查器永远看不到求解器的输出——只有声明和证据。
-
-这不是疏忽;这是核心机制。
-
-当你知道"预期答案"时,你会不自觉地寻找支持它的证据。
-
-通过让检查器对预期答案保持无知,它必须从零开始构建判断,消除锚定偏误。
-
-- **多智能体强化学习(MARL)**: 同时训练多个智能体,每个智能体的最优策略取决于其他智能体的策略。
-
-在MARCH中,求解器学习生成能经受分解和验证的响应。
-
-提议器学习提取既不太粗(隐藏错误)也不太细(产生噪音)的声明。
-
-检查器学习能抓住微妙幻觉的验证策略。
-
-它们像生态系统一样共同进化——检查器改进的检测迫使求解器更谨慎,这迫使提议器更精确,这给检查器更好的训练信号。
+- **生成与审计联合优化**: 这个框架不只训练Solver,也训练Checker轨迹。于是同一个基础模型会一起进化成生成者和审计者。论文的一个核心论点就是: 这种双角色共演化,会把事实对齐能力迁移到下游QA任务上。
 
 ## 框架转变
 
 ```
-之前(大模型作裁判):                之后(MARCH):
+之前:
+[生成答案] -> [Judge看答案+文档] -> [打分]
 
-查询 + 证据                        查询 + 证据
-    |                                  |
-    v                                  v
-[大模型生成器]                      [求解器]
-    |                                  |
-    v                                  v
-响应                                响应
-    |                                  |
-    +----------+                       v
-    |          |                   [提议器]
-    v          v                       |
-证据       响应                        v
-    |          |                   声明1, 声明2, ...
-    v          v                       |
-[大模型验证器] <--- 两者都看            v
-    |                              [检查器] <--- 只看
-    v                                  |      声明+证据
-验证结果                                v
-(有偏)                             验证结果
-                                   (无偏)
+MARCH之后:
+[生成答案]
+      |
+      v
+[拆成原子主张]
+      |
+      v
+[盲审Checker仅凭文档重答]
+      |
+      v
+[用主张一致性作为RL奖励]
 ```
 
-从整体式自检到对抗性分解,核心转变是强制无知作为去偏机制。
+**一句话**: 它把“带泄漏上下文的答案级自评”改成了“主张级盲审 + 强化学习”的训练框架。
 
 ## 专家评审
 
-**选题眼光**: 真缺口。
+**选题眼光**: 很强。RAG里的幻觉是少数真正会阻碍落地的故障类型之一,尤其是在法律、金融、医疗这些高风险场景。论文瞄准的是一个部署层面真的痛的问题,不是只在benchmark上刷分。
 
-自我验证中的确认偏误在心理学中有充分记录,并且明显损害大模型可靠性。
+**方法成熟度**: 设计是克制且讲究的。三智能体听起来像“又加了几个agent”,但真正的贡献并不在于角色数量,而在于不对称信息结构,以及中间那层主张级接口。这让方法比很多模糊的自我反思循环更可解释。代价当然也明显: 生成、拆解、核查都要进入训练路径,所以它不是一个廉价技巧。
 
-RAG场景让它变得紧迫——这些系统部署在高风险领域。
+**实验诚意**: 总体不错。论文评了RAGTruth、FaithBench、Facts Grounding、ContextualJudgeBench和多跳QA,覆盖面比很多事实性论文更广。headline数字也有说服力: 在RAGTruth + FaithBench平均分上,基线Llama3.1-8B从 **55.20** 提升到 **74.93**(MARCH-STEM)和 **75.23**(MARCH-General); 在Facts Grounding上从 **57.09** 提升到 **85.23**; 在ContextualJudgeBench平均分上从 **29.7** 提升到 **51.6/52.3**。这不是边角改进。
 
-不是人造的。
+**我最买账的点**: 更强的幻觉控制同时提升了多跳QA,这是全文最有分量的信号。MARCH看起来不只是训练出一个更严格的judge,而是真的把“基于证据生成”这件事灌进了底层策略里。HotpotQA、MuSiQue和2Wiki上的结果支持这一点。
 
-**方法成熟度**: 巧妙的架构洞察(信息不对称)结合标准MARL训练。
+**仍然担心的点**: 这个方法很依赖把回答拆成原子事实主张,尤其偏爱数字或高保真陈述。这非常适合数据密集型RAG,但对开放式解释、综合写作、或更创造性的知识任务是否同样有效,论文还没有给出足够证据。另外,零容忍奖励也可能让模型变得过于保守,宁可少说,也不愿说那些更难验证但可能有价值的细节。
 
-三智能体分解很优雅,但引发疑问：为什么不是两个智能体(生成器+盲检查器)?提议器看起来可以是确定性的基于规则的模块。
-
-论文没有证明为什么声明提取需要学习。
-
-另外,MARL出了名的不稳定——论文对训练动态轻描淡写。
-
-**实验诚意**: 基线公平(自洽性、思维链、现有RAG方法)。
-
-数字在多个基准上看起来扎实。
-
-一个警示：8B模型"与闭源模型竞争"的说法含糊——哪个闭源模型,在哪个指标上?论文展示了GPT-4对比,但挑选了有利的基准。
-
-另外,没有失败模式分析——信息不对称什么时候会损害性能?
-
-**写作功力**: 摘要和引言很强。
-
-方法部分把关键洞察(信息不对称)埋在MARL细节下。
-
-3.2节应该先讲"为什么盲检有效",再深入智能体架构。
-
-相关工作部分是流水账;重写它以将MARCH定位在偏误缓解文献(而非仅仅幻觉检测)中会提升框架。
-
-**判决**: 弱接收——有清晰洞察的扎实贡献,但执行感觉像在解决两个问题(偏误+MARL训练),而一个(偏误)就够了。
-
-MARL组件增加了复杂性,却没有清晰的消融实验表明它是必需的。
+**判决**: 接收 — 这篇论文抓住了真实故障模式,给出了一个结构上干净的修复方案,并且用较广的实验展示了收益。即使完整训练配方成本不低,它背后的设计原则也很值得借鉴。
 
 ## 要点总结
 
-偷走信息不对称原则：构建验证系统时,对验证者隐藏被验证的东西。
+**故意把验证器蒙上眼**: 如果验证器看到了它要检查的答案,审计其实已经被污染了。MARCH最好的想法不只是多智能体本身,而是把“答案泄漏”从核查环节里拿掉。
 
-这超越大模型——代码审查工具、事实核查流水线,甚至人类工作流。
+**把自由文本变成可核查接口**: Proposer本质上像一个编译器,把叙述文本编译成原子QA对。这个模式完全可以迁移到别处。只要你想做有依据的生成,就应该考虑先构造一个可以独立验证的中间表示。
 
-原子命题分解也可移植：在检查复杂输出之前,将其分解为最小可验证单元。
-
-具体技术：如果你在构建RAG系统,添加一个声明提取步骤,独立验证声明而非验证完整响应。
-
-你不需要MARL——即使是带冻结模型的简单流水线也会减少幻觉。
-
+**当事实错误不可接受时,奖励就该更苛刻**: 在一个错误数字就会破坏信任的任务里,部分得分式奖励函数很可能优化错目标。MARCH的零容忍奖励提醒我们: 奖励函数应该贴近真实业务的失败标准,而不是只服务于benchmark上的平均便利性。
 :::
