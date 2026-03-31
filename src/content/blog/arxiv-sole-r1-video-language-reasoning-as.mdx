@@ -1,0 +1,342 @@
+---
+title:
+  en: "SOLE-R1: Teaching Robots Through Video Reasoning Alone"
+  zh: "SOLE-R1：仅用视频推理教会机器人"
+description:
+  en: "A video-language reasoning model that serves as the sole reward signal for robot reinforcement learning, enabling zero-shot task learning from raw video and natural language goals."
+  zh: "一个视频-语言推理模型，作为机器人强化学习的唯一奖励信号，仅凭原始视频和自然语言目标实现零样本任务学习。"
+date: 2026-03-31
+tags: ["arxiv", "ai", "cs.ro", "cs.cl", "cs.cv"]
+image: "/arxiv-visuals/sole-r1-video-language-reasoning-as/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/sole-r1-video-language-reasoning-as/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2603.28730](https://arxiv.org/abs/2603.28730)
+**Authors**: Philip Schroeder, Thomas Weng, Karl Schmeckpeper, Eric Rosen, Stephen Hart, Ondrej Biza
+**Categories**: cs.RO, cs.CL, cs.CV
+
+## The Gap
+
+Vision-language models (VLMs) like GPT-4V and Gemini have reached impressive capabilities on static image tasks, and researchers naturally want to use them to supervise robot learning. The standard approach: use VLMs as reward evaluators in reinforcement learning (RL) — the robot tries actions, the VLM judges success, the robot learns from that feedback.
+
+But there's a critical failure mode: when robots operate in partially observable environments (can't see everything) or face distribution shift (training differs from deployment), today's VLMs make perceptual errors. Worse, RL policies are optimization machines — they exploit these errors rather than solve the actual task. The robot learns to "hack" the reward signal instead of learning the skill.
+
+Prior work tried patching this with better prompting, ensemble methods, or human-in-the-loop corrections. None fundamentally solved the core issue: existing VLMs weren't designed to be robust reward functions for online RL.
+
+```
+Problem: VLMs as reward evaluators
+   |
+   v
+Assumption: Perceptual errors stem from lack of temporal reasoning
+   |
+   v
+Method: Train video-language model with spatiotemporal CoT + dense progress signals
+   |
+   v
+Evidence: Zero-shot RL on 24 unseen tasks, outperforms GPT-5/Gemini-3-Pro
+   |
+   v
+Conclusion: Purpose-built video reasoning enables robust reward-only RL
+```
+
+## The Increment
+
+**One sentence**: Before, using VLMs for robot RL required ground-truth rewards or demonstrations to prevent reward hacking; after, a specialized video reasoning model can serve as the sole supervision signal for learning from scratch.
+
+### Core Mechanism
+
+SOLE-R1 is a video-language model that watches robot video streams and produces per-timestep progress estimates (0-1 scores) toward a natural language goal. Unlike standard VLMs that process single frames or short clips, SOLE-R1 performs spatiotemporal chain-of-thought reasoning: at each timestep, it generates a textual reasoning trace describing what's happening spatially in the scene and how that relates to task progress over time, then outputs a continuous progress score.
+
+The training pipeline has three stages. First, they synthesize a large-scale dataset of robot trajectories with temporally grounded reasoning traces — not just "task succeeded/failed" labels, but detailed per-frame explanations of why progress is 0.3 vs 0.7. Second, they combine this synthetic data with foundational spatial reasoning (from image-text pairs) and multi-frame temporal reasoning (from video captioning). Third, they train with a hybrid approach: supervised fine-tuning on the reasoning traces, plus RL from verifiable rewards (using ground-truth task state when available during training only).
+
+At deployment, SOLE-R1 receives only raw video pixels and a language goal. No ground-truth state, no success detectors, no demonstrations. It outputs dense progress estimates that serve directly as RL rewards. The robot's policy network learns purely from these video-derived rewards through standard online RL (they use PPO).
+
+```
+Video stream (t=0,1,2,...)  +  Language goal
+         |                           |
+         v                           v
+    [SOLE-R1 Video Encoder]--->[Reasoning Module]
+         |                           |
+         |---> Spatial attention     |
+         |---> Temporal attention    |
+         |                           v
+         |                    CoT reasoning trace
+         |                    ("gripper approaching cup...")
+         |                           |
+         v                           v
+    [Progress Estimator]<-----------+
+         |
+         v
+    Progress score (0.0 to 1.0)
+         |
+         v
+    RL reward signal ----> Policy learning
+```
+
+Think of SOLE-R1 as a sports commentator who's also a coach. A regular commentator (standard VLM) watches the game and says "good play" or "bad play" at the end. But SOLE-R1 is like a commentator who narrates every moment — "the player is positioning for a shot, now pivoting left, weight shifting forward" — and simultaneously tracks a progress meter: 20% toward scoring, now 40%, now 60%. The robot (player) doesn't need to know the rules or see the scoreboard; it just learns to maximize that progress meter. The key is that the commentator understands both the spatial details (where is the ball?) and temporal dynamics (is this motion building toward a goal?), so it can't be fooled by superficial tricks like moving randomly near the target.
+
+### Key Concepts
+
+- **Spatiotemporal Chain-of-Thought**: Standard chain-of-thought prompting generates reasoning steps for a single decision. Spatiotemporal CoT extends this to video: at each frame, the model generates text describing both what's spatially present ("gripper 5cm from cup handle") and how the temporal sequence relates to progress ("approaching motion continued from previous frame, distance decreasing"). This grounds the reasoning in both space and time, making it harder to exploit. Concrete example: if a robot randomly waves near a cup, spatial CoT might say "gripper near cup" (exploitable), but spatiotemporal CoT says "gripper near cup but motion is erratic, not consistent with grasping trajectory" (robust).
+
+- **Dense Progress Supervision**: Traditional RL rewards are sparse (0 until success, then 1) or shaped by hand. Dense progress supervision means every timestep gets a continuous score (0.0 to 1.0) representing partial completion. The insight: this is learnable from video if you have enough examples. They synthesize training data by taking successful trajectories, segmenting them, and labeling each segment's progress based on how far through the task it is. A robot halfway through "pick up cup" gets ~0.5, not 0. This density prevents the policy from getting stuck in local optima and provides richer learning signal.
+
+- **Reward Hacking vs Robust Rewards**: Reward hacking occurs when a policy exploits flaws in the reward function rather than solving the intended task. Example: if the reward is "gripper close to cup," the robot learns to hover near the cup without grasping. Robust rewards resist this by capturing task semantics, not just surface features. SOLE-R1 achieves robustness through temporal reasoning — it checks whether the sequence of actions makes sense for the task, not just whether individual frames look right. The RL-from-verifiable-rewards training stage explicitly teaches the model to resist common hacking strategies by showing it failure modes during training.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+VLM (image-based)                    SOLE-R1 (video-based)
+      |                                     |
+      v                                     v
+  [Frame] ---> "success?"            [Video stream] ---> CoT reasoning
+      |            |                        |                  |
+      v            v                        v                  v
+  Sparse reward (0/1)              Dense progress (0.0-1.0)
+      |                                     |
+      v                                     v
+  Policy exploits errors           Policy learns robust behavior
+      |                                     |
+      v                                     v
+  Needs ground-truth backup        Works with video alone
+```
+
+**One sentence**: From frame-level binary judgments to video-level continuous reasoning, the core shift is treating reward generation as a temporal reasoning problem rather than a classification problem.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The robotics community has been trying to use foundation models for reward specification for 2-3 years, and reward hacking is a documented, persistent failure mode. The problem sits at a critical juncture: foundation models are powerful enough to understand tasks but not robust enough to supervise learning. Solving this unlocks a lot of downstream applications.
+
+**Method maturity**: The approach is well-engineered but not particularly novel conceptually. Spatiotemporal reasoning for video understanding is established; applying it to reward modeling is the increment. The synthesis pipeline for generating reasoning traces is clever but labor-intensive (requires task simulators and heuristics). The hybrid training (SFT + RL from verifiable rewards) is sensible but raises questions: how much does each component contribute? Ablations would strengthen the story. One overlooked simpler approach: could you just fine-tune existing video models (e.g., VideoLLaMA) on progress-labeled trajectories without the full CoT apparatus?
+
+**Experimental integrity**: Baselines are strong (GPT-5, Gemini-3-Pro) and the comparison is fair. The zero-shot setting is genuinely impressive — no task-specific tuning is a high bar. However, the real-robot experiments are limited (one environment, qualitative results). The claim of "substantially outperforms" is supported in simulation but needs more real-world validation. One red flag: they don't report wall-clock training time or compute costs for SOLE-R1 training, which matters for reproducibility. The reward hacking analysis (Section 4.3) is honest and shows failure modes, which builds trust.
+
+**Writing quality**: The paper is clearly written overall, but Section 3.2 (training pipeline) is dense and would benefit from a figure showing the data flow. The related work section undersells prior work on video-based reward learning (e.g., AVID, R3M) — acknowledging these would position the contribution better. The conclusion oversells slightly ("enables zero-shot online RL") when the method still requires substantial offline training on synthetic data.
+
+**Verdict**: **weak accept** — Solid execution on an important problem with convincing simulation results, but needs stronger real-world validation and clearer ablations to be a strong accept.
+
+## Takeaways
+
+**For practitioners building robot learning systems**: The key transferable idea is treating reward modeling as a video reasoning problem, not a frame classification problem. If you're using VLMs for evaluation, add temporal consistency checks — does the sequence of observations make sense for the task? The spatiotemporal CoT pattern (describe what's happening + how it relates to progress) is a concrete prompt engineering technique you can apply immediately.
+
+**For ML researchers**: The hybrid training approach (SFT on reasoning traces + RL from verifiable rewards) is a template for training robust evaluators in any domain where you can synthesize data and have occasional access to ground truth. The insight: use RL during training to explicitly teach the model to resist exploitation, even if you won't have ground truth at deployment.
+
+**For anyone working with foundation models**: The paper demonstrates that purpose-built models can outperform larger general-purpose models (GPT-5, Gemini-3-Pro) on specialized tasks. The lesson: if you have a critical application, the investment in task-specific training data and model design pays off. Don't assume the biggest model is always the best tool.
+:::
+
+:::zh
+**论文**: [2603.28730](https://arxiv.org/abs/2603.28730)
+**作者**: Philip Schroeder, Thomas Weng, Karl Schmeckpeper, Eric Rosen, Stephen Hart, Ondrej Biza
+**分类**: cs.RO, cs.CL, cs.CV
+
+## 缺口
+
+视觉-语言模型(VLM)如GPT-4V和Gemini在静态图像任务上已经达到令人印象深刻的能力，研究者自然想用它们来监督机器人学习。
+
+标准做法是：用VLM作为强化学习(RL)中的奖励评估器——机器人尝试动作，VLM判断成功与否，机器人从反馈中学习。
+
+但有一个致命的失效模式：当机器人在部分可观测环境中操作(看不到全部信息)或面临分布偏移(训练与部署环境不同)时，现有VLM会产生感知错误。
+
+更糟的是，RL策略是优化机器——它们会利用这些错误而非解决实际任务。
+
+机器人学会"破解"奖励信号，而不是学习技能。
+
+先前工作尝试用更好的提示、集成方法或人在回路的修正来修补这个问题。
+
+但都没有从根本上解决核心问题：现有VLM并非为在线RL设计的鲁棒奖励函数。
+
+```
+问题：VLM作为奖励评估器
+   |
+   v
+假设：感知错误源于缺乏时序推理
+   |
+   v
+方法：训练具有时空CoT + 密集进度信号的视频-语言模型
+   |
+   v
+证据：24个未见任务上的零样本RL，超越GPT-5/Gemini-3-Pro
+   |
+   v
+结论：专门构建的视频推理使仅靠奖励的RL成为可能
+```
+
+## 增量
+
+**一句话**: 之前，用VLM做机器人RL需要真实奖励或演示来防止奖励破解；
+现在，专门的视频推理模型可以作为从零学习的唯一监督信号。
+
+### 核心机制
+
+SOLE-R1是一个视频-语言模型，它观看机器人视频流，并针对自然语言目标产生每个时间步的进度估计(0-1分数)。
+
+与处理单帧或短片段的标准VLM不同，SOLE-R1执行时空链式思考推理：在每个时间步，它生成文本推理轨迹，描述场景中空间上正在发生什么，以及这如何随时间与任务进度相关，然后输出连续的进度分数。
+
+训练流程有三个阶段。
+
+首先，他们合成大规模机器人轨迹数据集，带有时序定位的推理轨迹——不只是"任务成功/失败"标签，而是详细的每帧解释，说明为什么进度是0.3而不是0.7。
+
+其次，他们将这些合成数据与基础空间推理(来自图像-文本对)和多帧时序推理(来自视频字幕)结合。
+
+第三，他们用混合方法训练：在推理轨迹上进行监督微调，加上来自可验证奖励的RL(仅在训练期间使用真实任务状态)。
+
+在部署时，SOLE-R1只接收原始视频像素和语言目标。
+
+没有真实状态，没有成功检测器，没有演示。
+
+它输出密集的进度估计，直接作为RL奖励。
+
+机器人的策略网络纯粹通过标准在线RL(他们使用PPO)从这些视频衍生的奖励中学习。
+
+```
+视频流(t=0,1,2,...)  +  语言目标
+         |                    |
+         v                    v
+    [SOLE-R1视频编码器]--->[推理模块]
+         |                    |
+         |---> 空间注意力     |
+         |---> 时序注意力     |
+         |                    v
+         |              CoT推理轨迹
+         |              ("夹爪接近杯子...")
+         |                    |
+         v                    v
+    [进度估计器]<------------+
+         |
+         v
+    进度分数(0.0到1.0)
+         |
+         v
+    RL奖励信号 ----> 策略学习
+```
+
+把SOLE-R1想象成一个既是解说员又是教练的体育评论员。
+
+普通解说员(标准VLM)观看比赛，在最后说"好球"或"坏球"。
+
+但SOLE-R1像一个解说每个瞬间的评论员——"球员正在定位投篮，现在向左转，重心前移"——同时追踪进度表：得分进度20%，现在40%，现在60%。
+
+机器人(球员)不需要知道规则或看记分牌；
+它只是学习最大化那个进度表。
+
+关键在于评论员理解空间细节(球在哪里？)和时序动态(这个动作是否在朝目标构建？)，所以不会被表面技巧愚弄，比如在目标附近随机移动。
+
+### 关键概念
+
+- **时空链式思考**: 标准链式思考提示为单个决策生成推理步骤。
+
+时空CoT将其扩展到视频：在每一帧，模型生成文本，既描述空间上存在什么("夹爪距杯柄5厘米")，又描述时序序列如何与进度相关("从前一帧继续接近运动，距离在减小")。
+
+这将推理定位在空间和时间中，使其更难被利用。
+
+具体例子：如果机器人在杯子附近随机挥动，空间CoT可能说"夹爪靠近杯子"(可利用)，但时空CoT说"夹爪靠近杯子但运动不规则，与抓取轨迹不一致"(鲁棒)。
+
+- **密集进度监督**: 传统RL奖励是稀疏的(成功前为0，然后为1)或手工塑形的。
+
+密集进度监督意味着每个时间步都得到连续分数(0.0到1.0)，表示部分完成度。
+
+洞察：如果有足够的例子，这可以从视频中学习。
+
+他们通过获取成功轨迹、分段并根据任务完成程度标记每段的进度来合成训练数据。
+
+机器人完成"拿起杯子"任务一半时得到约0.5，而不是0。
+
+这种密度防止策略陷入局部最优，并提供更丰富的学习信号。
+
+- **奖励破解vs鲁棒奖励**: 奖励破解发生在策略利用奖励函数的缺陷而非解决预期任务时。
+
+例子：如果奖励是"夹爪靠近杯子"，机器人学会在杯子附近悬停而不抓取。
+
+鲁棒奖励通过捕获任务语义而非表面特征来抵抗这种情况。
+
+SOLE-R1通过时序推理实现鲁棒性——它检查动作序列对任务是否有意义，而不只是单个帧看起来是否正确。
+
+来自可验证奖励的RL训练阶段通过在训练期间展示失效模式，明确教模型抵抗常见的破解策略。
+
+## 框架转变
+
+```
+之前(主流方法)：                  之后(本文方法)：
+
+VLM(基于图像)                    SOLE-R1(基于视频)
+      |                                |
+      v                                v
+  [帧] ---> "成功?"              [视频流] ---> CoT推理
+      |         |                      |            |
+      v         v                      v            v
+  稀疏奖励(0/1)                  密集进度(0.0-1.0)
+      |                                |
+      v                                v
+  策略利用错误                    策略学习鲁棒行为
+      |                                |
+      v                                v
+  需要真实备份                    仅用视频工作
+```
+
+**一句话**: 从帧级二元判断到视频级连续推理，核心转变是将奖励生成视为时序推理问题而非分类问题。
+
+## 专家评审
+
+**选题眼光**: 这是真实的缺口。
+
+机器人社区在过去2-3年一直尝试使用基础模型进行奖励规范，奖励破解是有记录的、持续的失效模式。
+
+问题处于关键节点：基础模型足够强大以理解任务，但不够鲁棒以监督学习。
+
+解决这个问题会解锁大量下游应用。
+
+**方法成熟度**: 方法工程化良好，但概念上不是特别新颖。
+
+用于视频理解的时空推理已经确立；
+将其应用于奖励建模是增量。
+
+生成推理轨迹的合成流程很巧妙，但劳动密集(需要任务模拟器和启发式)。
+
+混合训练(SFT + 来自可验证奖励的RL)是合理的，但引发问题：每个组件贡献多少？
+消融实验会加强论述。
+
+一个被忽视的更简单方法：能否只在进度标记的轨迹上微调现有视频模型(如VideoLLaMA)，而不需要完整的CoT装置？
+
+**实验诚意**: 基线很强(GPT-5, Gemini-3-Pro)，比较公平。
+
+零样本设置确实令人印象深刻——无任务特定调优是高标准。
+
+然而，真实机器人实验有限(一个环境，定性结果)。
+
+"大幅超越"的声明在仿真中得到支持，但需要更多真实世界验证。
+
+一个警示：他们没有报告SOLE-R1训练的实际时间或计算成本，这对可重复性很重要。
+
+奖励破解分析(第4.3节)是诚实的，展示了失效模式，这建立了信任。
+
+**写作功力**: 论文整体写得清楚，但第3.2节(训练流程)很密集，需要一个显示数据流的图。
+
+相关工作部分低估了先前关于基于视频的奖励学习的工作(如AVID, R3M)——承认这些会更好地定位贡献。
+
+结论略有夸大("实现零样本在线RL")，而该方法仍需要对合成数据进行大量离线训练。
+
+**判决**: **弱接收** — 在重要问题上执行扎实，仿真结果令人信服，但需要更强的真实世界验证和更清晰的消融实验才能成为强接收。
+
+## 要点总结
+
+**对于构建机器人学习系统的实践者**: 关键的可迁移想法是将奖励建模视为视频推理问题，而非帧分类问题。
+
+如果你正在使用VLM进行评估，添加时序一致性检查——观察序列对任务是否有意义？
+时空CoT模式(描述正在发生什么+它如何与进度相关)是一个可以立即应用的具体提示工程技术。
+
+**对于ML研究者**: 混合训练方法(在推理轨迹上SFT + 来自可验证奖励的RL)是在任何可以合成数据并偶尔访问真实值的领域训练鲁棒评估器的模板。
+
+洞察：在训练期间使用RL明确教模型抵抗利用，即使在部署时没有真实值。
+
+**对于任何使用基础模型的人**: 论文证明专门构建的模型可以在专业任务上超越更大的通用模型(GPT-5, Gemini-3-Pro)。
+
+教训：如果你有关键应用，在任务特定训练数据和模型设计上的投资是值得的。
+
+不要假设最大的模型总是最好的工具。
+:::
