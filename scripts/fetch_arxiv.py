@@ -478,6 +478,7 @@ def sanitize_mdx(content):
     - Escape bare < followed by digits (MDX parses as JSX)
     - Repair mismatched bold markers (**text* → **text**)
     - Replace ASCII colons with full-width Chinese colons in :::zh sections
+    - Wrap LaTeX-style subscripts x_{y} in inline code to prevent JSX parsing
     """
     # Fix frontmatter quoting before anything else
     fm_match = re.match(r'^---\n(.*?\n)---', content, re.DOTALL)
@@ -543,6 +544,26 @@ def sanitize_mdx(content):
                             new_line += line[i]
                         i += 1
                     line = new_line
+
+            # Wrap LaTeX-style subscript notation in inline code
+            # Pattern: x_{y} gets parsed as JSX {y}, wrap in backticks
+            # Only apply outside of existing backticks to avoid double-wrapping
+            def _wrap_subscripts(match):
+                before = match.group(1)  # text before the subscript pattern
+                var = match.group(2)     # variable (e.g., "h")
+                sub = match.group(3)     # subscript content (e.g., "t-1")
+                after = match.group(4)   # text after
+                # Wrap just the subscript part in backticks
+                return f"{before}{var}`_{{{sub}}}`{after}"
+
+            # Match patterns like h_{t-1} or ∂h_t/∂h_{t-1}
+            # This regex finds: optional prefix + variable + _{content} + optional suffix
+            # But only when not already in backticks
+            line = re.sub(
+                r'([^`])([a-zA-Z∂∫∑])_\{([^}]+)\}([^`]|$)',
+                lambda m: f"{m.group(1)}{m.group(2)}`_{{{m.group(3)}}}`{m.group(4)}",
+                line
+            )
 
         result.append(line)
 
