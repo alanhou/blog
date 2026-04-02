@@ -1,0 +1,330 @@
+---
+title:
+  en: "Universal YOCO: Recursive Depth Scaling with Constant Memory"
+  zh: "Universal YOCO:常量内存下的递归深度扩展"
+description:
+  en: "YOCO-U combines decoder-decoder architecture with recursive computation to scale model depth efficiently while maintaining constant KV cache and linear pre-filling."
+  zh: "YOCO-U 将解码器-解码器架构与递归计算结合,在保持常量 KV 缓存和线性预填充的同时高效扩展模型深度。"
+date: 2026-04-02
+tags: ["arxiv", "ai", "cs.cl"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+![Concept animation](/arxiv-visuals/universal-yoco-for-efficient-depth-scaling/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2604.01220](https://arxiv.org/abs/2604.01220)
+**Authors**: Yutao Sun, Li Dong, Tianzhu Ye, Shaohan Huang, Jianyong Wang, Furu Wei
+**Categories**: cs.CL
+
+## The Gap
+
+Test-time scaling has become the new frontier for LLM reasoning, but standard Transformers hit a wall: every additional reasoning step inflates the KV cache proportionally to model depth, and conventional looping strategies carry massive computational overhead. Prior work splits into two camps: YOCO architecture achieves efficient attention but lacks depth flexibility, while recursive models gain depth through iteration but suffer from quadratic attention costs and exploding memory. Neither approach delivers both efficient inference and scalable depth.
+
+```
+Problem: Test-time scaling needs depth, but depth kills efficiency
+   |
+   v
+Assumption: Architecture + recursion can be synergistic, not additive
+   |
+   v
+Method: YOCO-U = YOCO decoder-decoder + recursive shallow layers
+   |
+   v
+Evidence: Constant KV cache + competitive benchmarks + better scaling
+   |
+   v
+Conclusion: Efficient-attention + partial recursion > either alone
+```
+
+## The Increment
+
+**One sentence**: Before this paper, you chose between efficient inference (YOCO) or flexible depth (recursion); after, you get both through architectural synergy.
+
+### Core Mechanism
+
+YOCO-U builds on the YOCO decoder-decoder architecture, which splits the model into a Self-Decoder (processes input with self-attention) and a Cross-Decoder (generates output attending to Self-Decoder states). The key innovation: make the Self-Decoder "Universal" by having it loop over itself multiple times through parameter sharing, but only in the shallow efficient-attention layers.
+
+Here's the data flow: input tokens first pass through the Self-Decoder, which now runs for N iterations instead of one. Each iteration refines the representation using the same parameters. Critically, the KV cache from the Self-Decoder stays constant across iterations because YOCO's architecture already confines global attention to the Cross-Decoder. After N iterations, the enriched representations feed into the Cross-Decoder for final output generation.
+
+The recursion happens only in the Self-Decoder's efficient-attention layers, not the full stack. This "partial recursion" gives you depth (N iterations = N× effective layers) without the memory explosion of full-model recursion. The Cross-Decoder remains non-recursive, maintaining linear pre-filling and constant global KV cache.
+
+```
+Input tokens
+    |
+    v
++-------------------+
+| Self-Decoder      |<----+
+| (efficient attn)  |     |
++-------------------+     | N iterations
+    |                     | (parameter sharing)
+    +---------------------+
+    |
+    v (constant KV cache)
++-------------------+
+| Cross-Decoder     |
+| (global attn)     |
++-------------------+
+    |
+    v
+Output tokens
+```
+
+Think of YOCO-U like a pottery wheel. The Self-Decoder is the wheel that spins the clay (input representations) multiple times—same wheel, same hands, but each rotation refines the shape. The Cross-Decoder is the kiln that fires the final piece. Traditional Transformers are like hand-building pottery: every layer is a new tool, a new workspace, and you need to store every intermediate form. YOCO's original design was like a wheel that only spins once—efficient but limited refinement. YOCO-U lets the wheel spin N times without needing N different wheels or N different storage shelves for intermediate forms. The magic: the wheel (Self-Decoder parameters) stays the same, and you only store the final refined clay state before firing, not every rotation's snapshot.
+
+### Key Concepts
+
+- **Decoder-Decoder Architecture (YOCO)**: Standard Transformers use encoder-decoder or decoder-only designs. YOCO introduces decoder-decoder: the first decoder (Self-Decoder) processes input with efficient attention (like linear attention or local windows), the second decoder (Cross-Decoder) generates output with full global attention to Self-Decoder states. Why this matters: the Self-Decoder's KV cache doesn't grow with output length because it only processes input once. The Cross-Decoder's KV cache is constant because it only attends to fixed Self-Decoder states, not the growing output sequence. Concrete example: translating a 1000-token document. Self-Decoder processes all 1000 tokens once with efficient attention (small cache). Cross-Decoder generates translation attending to those 1000 compressed states (constant cache), not the growing translation itself.
+
+- **Partial Recursion**: Instead of making the entire model recursive (which multiplies memory by iteration count), YOCO-U only loops the Self-Decoder's efficient-attention layers. The Cross-Decoder and any global-attention components remain non-recursive. This asymmetry is crucial: you get depth scaling (N iterations = deeper representation) in the cheap part of the model, while keeping the expensive global-attention part single-pass. Think of it like image compression: you can iteratively refine a low-resolution preview (cheap) before doing one high-resolution render (expensive), rather than iteratively rendering at full resolution.
+
+- **Parameter Sharing in Recursion**: When the Self-Decoder loops N times, it uses the same weights each iteration—this is parameter sharing. It's not N different layers; it's one layer applied N times. The benefit: model size stays constant while effective depth grows. The tradeoff: each iteration sees the same transformation, so you're betting that iterative refinement with fixed parameters beats having N distinct transformations. Analogy: it's like editing a photo with the same filter applied multiple times (parameter sharing) versus applying N different filters (distinct layers). Sometimes repeated application of one good filter (sharpen, sharpen, sharpen) works better than a sequence of mediocre filters.
+
+## Framework Shift
+
+```
+Before (Standard Transformer):       After (YOCO-U):
+
+Input                                Input
+  |                                    |
+  v                                    v
+[Layer 1] ---> KV cache 1          [Self-Decoder]<--+
+  |                                    |   ^         |
+  v                                    |   |         | N loops
+[Layer 2] ---> KV cache 2              |   +---------+ (same params)
+  |                                    |
+  v                                    v (constant cache)
+[Layer N] ---> KV cache N          [Cross-Decoder]
+  |                                    |
+  v                                    v
+Output                               Output
+
+Memory: O(N * L)                   Memory: O(1)
+Depth: Fixed N layers              Depth: Flexible N iterations
+```
+
+From fixed-depth sequential layers with growing memory to flexible-depth recursive refinement with constant memory, the core shift is trading architectural complexity for temporal complexity.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Test-time scaling is the current battleground, and the memory-depth tradeoff is a genuine bottleneck. The problem sits at the intersection of two active research threads (efficient attention and recursive models), which is a sweet spot.
+
+**Method maturity**: Clever architectural insight, not brute force. The synergy between YOCO's constant-cache property and partial recursion is non-obvious. However, the paper doesn't deeply explore why parameter sharing works well here—feels like an empirical bet that paid off rather than a principled design. A simpler approach might be progressive layer dropping or early exiting, but those don't address the depth-scaling angle.
+
+**Experimental integrity**: Baselines are fair (standard Transformers, original YOCO, other efficient-attention models). Numbers look solid across general and long-context benchmarks. One yellow flag: the paper doesn't show failure modes or tasks where YOCO-U underperforms. The "highly competitive" framing suggests it's not dominating everywhere, but we don't see where it struggles. Would benefit from ablations on iteration count vs performance saturation.
+
+**Writing quality**: The abstract and intro are crisp. The method section could use a clearer walk-through of the forward pass with concrete tensor shapes. The related work section is thorough but reads like a literature dump—cutting it by 30% would sharpen the narrative. The results section is competent but doesn't dig into why YOCO-U wins on specific tasks.
+
+**Verdict**: weak accept — Solid architectural contribution with clear practical benefits, but lacks depth in understanding why the approach works and where it fails.
+
+## Takeaways
+
+Practitioners can steal the "partial recursion" pattern: identify the cheap operations in your model (efficient attention, local processing, compression) and make only those recursive while keeping expensive operations (global attention, generation) single-pass. This asymmetry is broadly applicable beyond LLMs—think video processing (iteratively refine low-res frames, render high-res once) or hierarchical planning (iterate on abstract plans, execute concrete actions once).
+
+The decoder-decoder split is also transferable: if your model has a "processing" phase and a "generation" phase, consider making their memory footprints independent. The processing phase can use efficient attention with constant cache, while generation attends to processed states rather than raw input.
+
+Finally, the paper validates that parameter sharing in recursion isn't just a memory hack—it can improve token utility and scaling behavior. If you're building models where depth matters but memory is constrained, don't default to stacking more layers; try looping fewer layers with shared parameters.
+:::
+
+:::zh
+**论文**: [2604.01220](https://arxiv.org/abs/2604.01220)
+**作者**: Yutao Sun, Li Dong, Tianzhu Ye, Shaohan Huang, Jianyong Wang, Furu Wei
+**分类**: cs.CL
+
+## 缺口
+
+测试时扩展已成为大语言模型推理的新前沿,但标准 Transformer 遇到了瓶颈：每增加一步推理,KV 缓存就会随模型深度成比例膨胀,而传统的循环策略带来巨大的计算开销。
+
+此前的工作分为两个阵营：YOCO 架构实现了高效注意力但缺乏深度灵活性,而递归模型通过迭代获得深度但遭受二次方注意力成本和内存爆炸。
+
+两种方法都无法同时提供高效推理和可扩展深度。
+
+```
+问题:测试时扩展需要深度,但深度会扼杀效率
+   |
+   v
+假设:架构 + 递归可以协同,而非简单叠加
+   |
+   v
+方法:YOCO-U = YOCO 解码器-解码器 + 递归浅层
+   |
+   v
+证据:常量 KV 缓存 + 竞争力基准 + 更好扩展性
+   |
+   v
+结论:高效注意力 + 部分递归 > 单独使用任一方法
+```
+
+## 增量
+
+**一句话**: 这篇论文之前,你要在高效推理(YOCO)和灵活深度(递归)之间二选一;之后,通过架构协同两者兼得。
+
+### 核心机制
+
+YOCO-U 建立在 YOCO 解码器-解码器架构之上,该架构将模型分为自解码器(用自注意力处理输入)和交叉解码器(生成输出时关注自解码器状态)。
+
+关键创新：通过参数共享让自解码器对自身循环多次,使其成为"通用"解码器,但仅在浅层高效注意力层中进行。
+
+数据流如下：输入 token 首先通过自解码器,现在它运行 N 次迭代而非一次。
+
+每次迭代使用相同参数精炼表示。
+
+关键在于,自解码器的 KV 缓存在迭代间保持恒定,因为 YOCO 架构已将全局注意力限制在交叉解码器中。
+
+N 次迭代后,丰富的表示输入交叉解码器进行最终输出生成。
+
+递归仅发生在自解码器的高效注意力层,而非完整堆栈。
+
+这种"部分递归"给你深度(N 次迭代 = N 倍有效层数),而不会出现全模型递归的内存爆炸。
+
+交叉解码器保持非递归,维持线性预填充和常量全局 KV 缓存。
+
+```
+输入 tokens
+    |
+    v
++-------------------+
+| 自解码器          |<----+
+| (高效注意力)      |     |
++-------------------+     | N 次迭代
+    |                     | (参数共享)
+    +---------------------+
+    |
+    v (常量 KV 缓存)
++-------------------+
+| 交叉解码器        |
+| (全局注意力)      |
++-------------------+
+    |
+    v
+输出 tokens
+```
+
+把 YOCO-U 想象成陶艺转盘。
+
+自解码器是转动泥土(输入表示)多次的转盘——同一个转盘,同一双手,但每次旋转都精炼形状。
+
+交叉解码器是烧制最终作品的窑。
+
+传统 Transformer 像手工制陶：每一层都是新工具、新工作台,你需要存储每个中间形态。
+
+YOCO 的原始设计像只转一次的转盘——高效但精炼有限。
+
+YOCO-U 让转盘转 N 次,而不需要 N 个不同的转盘或 N 个不同的货架来存储中间形态。
+
+魔力在于：转盘(自解码器参数)保持不变,你只存储烧制前的最终精炼泥土状态,而非每次旋转的快照。
+
+### 关键概念
+
+- **解码器-解码器架构(YOCO)**: 标准 Transformer 使用编码器-解码器或纯解码器设计。
+
+YOCO 引入解码器-解码器：第一个解码器(自解码器)用高效注意力(如线性注意力或局部窗口)处理输入,第二个解码器(交叉解码器)用对自解码器状态的全局注意力生成输出。
+
+为何重要：自解码器的 KV 缓存不随输出长度增长,因为它只处理输入一次。
+
+交叉解码器的 KV 缓存是常量,因为它只关注固定的自解码器状态,而非增长的输出序列。
+
+具体例子：翻译 1000 token 的文档。
+
+自解码器用高效注意力处理全部 1000 个 token 一次(小缓存)。
+
+交叉解码器生成翻译时关注这 1000 个压缩状态(常量缓存),而非增长的翻译本身。
+
+- **部分递归**: YOCO-U 不让整个模型递归(会将内存乘以迭代次数),而只循环自解码器的高效注意力层。
+
+交叉解码器和任何全局注意力组件保持非递归。
+
+这种不对称至关重要：你在模型的廉价部分获得深度扩展(N 次迭代 = 更深表示),同时保持昂贵的全局注意力部分单次通过。
+
+想象图像压缩：你可以迭代精炼低分辨率预览(廉价),然后做一次高分辨率渲染(昂贵),而非迭代地以全分辨率渲染。
+
+- **递归中的参数共享**: 当自解码器循环 N 次时,每次迭代使用相同权重——这就是参数共享。
+
+不是 N 个不同的层;而是一个层应用 N 次。
+
+好处：模型大小保持恒定,有效深度增长。
+
+权衡：每次迭代看到相同变换,所以你在赌用固定参数的迭代精炼胜过拥有 N 个不同变换。
+
+类比：这像用同一滤镜多次编辑照片(参数共享),而非应用 N 个不同滤镜(不同层)。
+
+有时一个好滤镜的重复应用(锐化、锐化、锐化)比一系列平庸滤镜效果更好。
+
+## 框架转变
+
+```
+之前(标准 Transformer):          之后(YOCO-U):
+
+输入                              输入
+  |                                 |
+  v                                 v
+[层 1] ---> KV 缓存 1            [自解码器]<--+
+  |                                 |   ^       |
+  v                                 |   |       | N 次循环
+[层 2] ---> KV 缓存 2               |   +-------+ (相同参数)
+  |                                 |
+  v                                 v (常量缓存)
+[层 N] ---> KV 缓存 N            [交叉解码器]
+  |                                 |
+  v                                 v
+输出                              输出
+
+内存: O(N * L)                   内存: O(1)
+深度: 固定 N 层                  深度: 灵活 N 次迭代
+```
+
+从内存增长的固定深度顺序层到常量内存的灵活深度递归精炼,核心转变是用架构复杂度换时间复杂度。
+
+## 专家评审
+
+**选题眼光**: 真实缺口。
+
+测试时扩展是当前战场,内存-深度权衡是真正的瓶颈。
+
+问题位于两个活跃研究线索(高效注意力和递归模型)的交叉点,这是个甜蜜点。
+
+**方法成熟度**: 巧妙的架构洞察,非蛮力。
+
+YOCO 的常量缓存特性与部分递归的协同并不显而易见。
+
+然而,论文没有深入探讨为何参数共享在这里效果好——感觉像是碰巧成功的经验性赌注,而非原则性设计。
+
+更简单的方法可能是渐进式层丢弃或早期退出,但那些不解决深度扩展角度。
+
+**实验诚意**: 基线公平(标准 Transformer、原始 YOCO、其他高效注意力模型)。
+
+数字在通用和长上下文基准上看起来扎实。
+
+一个黄色警示：论文没展示失败模式或 YOCO-U 表现不佳的任务。
+
+"高度竞争力"的措辞暗示它并非处处占优,但我们看不到它在哪里挣扎。
+
+需要关于迭代次数与性能饱和的消融实验。
+
+**写作功力**: 摘要和引言简洁。
+
+方法部分需要更清晰的前向传播演示,配上具体张量形状。
+
+相关工作部分详尽但读起来像文献堆砌——削减 30% 会让叙事更锐利。
+
+结果部分称职但没深挖 YOCO-U 为何在特定任务上获胜。
+
+**判决**: 弱接收 — 扎实的架构贡献,有明确实用价值,但缺乏对方法为何有效及何处失效的深度理解。
+
+## 要点总结
+
+实践者可以偷走"部分递归"模式：识别模型中的廉价操作(高效注意力、局部处理、压缩),只让这些递归,同时保持昂贵操作(全局注意力、生成)单次通过。
+
+这种不对称广泛适用于 LLM 之外——想想视频处理(迭代精炼低分辨率帧,渲染高分辨率一次)或分层规划(迭代抽象计划,执行具体动作一次)。
+
+解码器-解码器分离也可迁移：如果你的模型有"处理"阶段和"生成"阶段,考虑让它们的内存占用独立。
+
+处理阶段可用常量缓存的高效注意力,而生成关注处理后的状态而非原始输入。
+
+最后,论文验证了递归中的参数共享不只是内存技巧——它能改善 token 利用率和扩展行为。
+
+如果你在构建深度重要但内存受限的模型,别默认堆叠更多层;试试用共享参数循环更少的层。
+
+:::
