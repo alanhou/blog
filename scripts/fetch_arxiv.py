@@ -93,8 +93,11 @@ def fetch_recent_papers(categories, max_results=20):
     }
 
     # Retry logic for rate limiting
-    max_retries = 3
-    retry_delay = 5  # seconds
+    max_retries = 5
+    retry_delay = 10  # seconds
+
+    # Add initial delay to respect arxiv rate limits
+    time.sleep(3)
 
     for attempt in range(max_retries):
         try:
@@ -113,8 +116,14 @@ def fetch_recent_papers(categories, max_results=20):
             else:
                 raise
         except Exception as e:
-            print(f"Error fetching papers: {e}")
-            raise
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (attempt + 1)
+                print(f"Error fetching papers: {e}")
+                print(f"Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                print(f"Error fetching papers: {e}")
+                raise
 
     ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
     root = ET.fromstring(resp.text)
