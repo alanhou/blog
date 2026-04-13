@@ -64,13 +64,17 @@ try:
 
     visuals = generate_paper_visuals(client, model, provider, paper, slug, title_zh=title_zh)
 
-    if visuals.get("hero"):
+    # Use cover image (from GIF) as frontmatter image, fallback to hero
+    if visuals.get("cover"):
+        print(f"✓ Cover image generated: {visuals['cover']}")
+        content = patch_frontmatter_image(content, visuals["cover"])
+    elif visuals.get("hero"):
         print(f"✓ Hero image generated: {visuals['hero']}")
         content = patch_frontmatter_image(content, visuals["hero"])
         hero_md = f"![Hero diagram]({visuals['hero']})\n\n"
         content = insert_after_frontmatter(content, hero_md)
     else:
-        print("✗ Hero image generation failed")
+        print("✗ Hero/cover image generation failed")
 
     if visuals.get("concept"):
         print(f"✓ Concept animation generated: {visuals['concept']}")

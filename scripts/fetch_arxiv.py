@@ -687,6 +687,26 @@ def generate_paper_visuals(client, model, provider, paper, slug: str, title_zh: 
         if path:
             results["concept"] = f"/arxiv-visuals/{slug}/ConceptScene.gif"
 
+            # Generate cover image from GIF (frame at 5 seconds to avoid black frame)
+            print(f"  Generating cover image from animation...")
+            cover_path = VISUALS_DIR / f"arxiv-{slug}.png"
+            try:
+                import subprocess
+                cmd = [
+                    "ffmpeg", "-ss", "5", "-i", str(path),
+                    "-vframes", "1",
+                    "-vf", "scale=1200:630:force_original_aspect_ratio=decrease,pad=1200:630:(ow-iw)/2:(oh-ih)/2:black",
+                    str(cover_path), "-y"
+                ]
+                result = subprocess.run(cmd, capture_output=True, timeout=30)
+                if result.returncode == 0 and cover_path.exists():
+                    results["cover"] = f"/arxiv-visuals/arxiv-{slug}.png"
+                    print(f"  ✓ Cover image created")
+                else:
+                    print(f"  ✗ Cover image generation failed")
+            except Exception as e:
+                print(f"  ✗ Cover image error: {e}")
+
     return results
 
 
@@ -779,10 +799,15 @@ def main():
             print(f"  Generating visuals for: {paper['title']}...")
             title_zh = extract_title_zh(content)
             visuals = generate_paper_visuals(client, model, provider, paper, slug, title_zh=title_zh)
-            if visuals.get("hero"):
+
+            # Use cover image (from GIF) as frontmatter image, fallback to hero
+            if visuals.get("cover"):
+                content = patch_frontmatter_image(content, visuals["cover"])
+            elif visuals.get("hero"):
                 content = patch_frontmatter_image(content, visuals["hero"])
                 hero_md = f"![Hero diagram]({visuals['hero']})\n\n"
                 content = insert_after_frontmatter(content, hero_md)
+
             if visuals.get("concept"):
                 concept_md = f"![Concept animation]({visuals['concept']})\n\n"
                 content = insert_after_frontmatter(content, concept_md)
