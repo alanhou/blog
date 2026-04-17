@@ -1,0 +1,348 @@
+---
+title:
+  en: "GlobalSplat: Compact 3D Reconstruction via Global Scene Tokens"
+  zh: "GlobalSplat：通过全局场景令牌实现紧凑3D重建"
+description:
+  en: "A feed-forward 3D Gaussian Splatting method that learns compact global scene representations before decoding geometry, achieving 4MB reconstructions with 16K Gaussians in under 78ms."
+  zh: "一种前馈式3D高斯溅射方法，在解码几何之前学习紧凑的全局场景表示，用16K个高斯实现4MB重建，耗时不到78毫秒。"
+date: 2026-04-17
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/globalsplat-efficient-feed-forward-3d-gaussian/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/globalsplat-efficient-feed-forward-3d-gaussian/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2604.15284](https://arxiv.org/abs/2604.15284)
+**Authors**: Roni Itkin, Noam Issachar, Yehonatan Keypur, Yehonatan Keypur, Anpei Chen, Sagie Benaim
+**Categories**: cs.CV
+
+## The Gap
+
+3D Gaussian Splatting has a spatial allocation problem. Iterative methods like the original 3DGS are slow but compact. Feed-forward methods are fast but bloated — they unproject pixels into dense, view-aligned primitives, baking redundancy into the 3D asset. Add more input views, and the representation balloons. The core issue: current feed-forward approaches lack global scene awareness. They're pixel-aligned or voxel-aligned, making local decisions without understanding cross-view correspondences. You get speed, but you pay in storage and consistency.
+
+```
+Problem: Feed-forward 3DGS bloats with more views
+   |
+   v
+Diagnosis: Pixel/voxel alignment = local decisions
+   |                                without global context
+   v
+Assumption: Global latent representation can resolve
+   |          correspondences before geometry decode
+   v
+Method: Encode multi-view -> global tokens -> decode sparse Gaussians
+   |
+   v
+Evidence: 16K Gaussians (4MB) vs dense baselines (100K+)
+   |        78ms inference, competitive quality
+   v
+Conclusion: "Align first, decode later" prevents bloat
+```
+
+## The Increment
+
+**One sentence**: Before — feed-forward 3DGS unprojected every pixel into dense 3D primitives; after — GlobalSplat encodes multi-view input into compact global tokens, then decodes only necessary Gaussians.
+
+### Core Mechanism
+
+GlobalSplat operates in two stages. First, a transformer encoder processes multi-view images and camera poses, producing a fixed set of global scene tokens (think 256 or 512 tokens total, regardless of input view count). These tokens are learned representations that capture the entire scene's structure and appearance in a compact latent space. Crucially, this encoding stage resolves cross-view correspondences — the model figures out which pixels across different views correspond to the same 3D point before committing to any explicit geometry.
+
+Second, a decoder transforms these global tokens into 3D Gaussians. The decoder outputs position, rotation, scale, opacity, and spherical harmonic coefficients for each Gaussian. The key innovation: the number of decoded Gaussians is fixed and small (16K in their experiments), not tied to input resolution or view count. The model learns to allocate these Gaussians efficiently because it has global context.
+
+Training uses a coarse-to-fine curriculum. Early in training, the model decodes fewer Gaussians (say, 4K). As training progresses, capacity gradually increases to the final 16K. This prevents the model from learning to spam primitives everywhere — it must learn efficient allocation from the start.
+
+```
+Input Views (N images) -> Encoder -> Global Tokens (fixed 256-512)
+                                          |
+                                          v
+                                     Decoder
+                                          |
+                                          v
+                                  3D Gaussians (fixed 16K)
+                                          |
+                                          v
+                                  Differentiable Rasterizer
+                                          |
+                                          v
+                                  Rendered Views -> Loss
+```
+
+Think of it like a compression algorithm with a fixed bitrate. Traditional feed-forward methods are like storing every frame of a video separately — redundancy everywhere. GlobalSplat is like a video codec: it finds a compact representation of the entire sequence (global tokens), then decodes only what's needed for reconstruction (sparse Gaussians). The encoder is the analysis pass that finds redundancies across views. The decoder is the synthesis pass that reconstructs geometry from the compressed representation. The fixed token count is your bitrate budget — the model must learn to use it wisely.
+
+### Key Concepts
+
+- **Global Scene Tokens**: Instead of processing each view independently, the encoder produces a fixed set of learned vectors that represent the entire scene. These aren't tied to specific pixels or voxels — they're abstract representations that the model learns to use for encoding 3D structure. Imagine you're describing a room to someone. You don't describe every pixel of every photo you took. You say "there's a couch on the left, a window behind it, wooden floor." Those high-level descriptors are like global tokens — compact summaries that capture what matters. The model learns what "matters" through training.
+
+- **Align First, Decode Later**: This is the core philosophy. Traditional methods decode geometry immediately from each view (pixel unprojection), then try to merge redundant primitives. GlobalSplat flips this: first figure out the global 3D structure by aligning all views in latent space, then decode geometry once. It's like solving a jigsaw puzzle — you don't glue pieces down immediately. You first figure out how pieces relate (alignment), then commit to placement (decode). This prevents the "glue down every piece from every angle" problem that causes bloat.
+
+- **Coarse-to-Fine Capacity Curriculum**: The model doesn't start with full 16K Gaussian capacity. It begins with 4K, then gradually increases. Why? If you give a model too much capacity from day one, it learns lazy solutions — spam primitives everywhere. By forcing it to work with limited capacity early, it learns efficient allocation strategies. It's like learning to pack a suitcase with weight limits. Start with a tiny bag, learn to pack essentials. Gradually increase bag size, but the efficient packing habits stick.
+
+## Framework Shift
+
+```
+Before (pixel-aligned feed-forward):
+
+View 1 -> Unproject -> Dense Gaussians ----+
+View 2 -> Unproject -> Dense Gaussians ----+-> Merge/Prune -> Bloated 3D
+View 3 -> Unproject -> Dense Gaussians ----+
+(More views = more primitives = bigger asset)
+
+
+After (GlobalSplat):
+
+View 1 ---+
+View 2 ---+-> Encoder -> Global Tokens (fixed) -> Decoder -> Sparse Gaussians
+View 3 ---+
+(More views = better tokens = same asset size)
+```
+
+From local unprojection to global encoding, the core shift is decoupling representation size from input view count.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Feed-forward 3DGS methods have been struggling with the bloat-vs-quality tradeoff since pixelSplat. This isn't manufactured — practitioners actually care about model size for deployment. The problem sits at a sweet spot: important enough to matter, tractable enough to solve.
+
+**Method maturity**: Solid engineering rather than deep insight. The "encode globally, decode sparsely" idea isn't revolutionary — it's borrowed from NeRF literature (see pixelNeRF's latent codes). The curriculum training is sensible but not novel. What's clever is the execution: they actually made it work without pretrained backbones, which many competitors rely on. No obvious simpler approach is being overlooked.
+
+**Experimental integrity**: Baselines are fair (pixelSplat, MVSplat, LGM). Numbers look reasonable — 16K Gaussians achieving competitive PSNR is believable given global context. One yellow flag: they don't compare against iterative 3DGS with similar Gaussian budgets. Would be interesting to see if their 16K feed-forward matches 16K iterative in quality. Inference speed claims (78ms) need hardware specs for reproducibility, but the order of magnitude seems right.
+
+**Writing quality**: Abstract and intro are crisp. Method section gets dense around the transformer architecture details — they could cut 30% of the notation without losing clarity. The "align first, decode later" framing is good marketing but undersells the curriculum training, which seems equally important. Figure 2 (architecture diagram) is cluttered; a cleaner version would help.
+
+**Verdict**: weak accept — Solid incremental work that solves a real problem with competent engineering, though not groundbreaking conceptually.
+
+## Takeaways
+
+The coarse-to-fine capacity curriculum is the stealable idea. If you're training any model that allocates discrete resources (attention heads, mixture components, primitives), don't give it full capacity from the start. Force it to learn efficient allocation with limited budget, then gradually increase. This prevents lazy "use everything everywhere" solutions.
+
+The "fixed latent budget" principle transfers beyond 3D. Anytime you're aggregating information from multiple sources (views, sensors, documents), consider: encode everything into a fixed-size latent representation first, then decode task-specific outputs. This forces the encoder to learn what's redundant and what's essential. It's the opposite of "process each source independently then merge" — and it scales better.
+
+For practitioners deploying 3D models: 4MB for a scene is actually deployable on mobile. If your use case needs fast inference and compact storage more than it needs pixel-perfect quality, this architecture pattern (global tokens + sparse decode) is worth exploring.
+:::
+
+:::zh
+**论文**: [2604.15284](https://arxiv.org/abs/2604.15284)
+**作者**: Roni Itkin, Noam Issachar, Yehonatan Keypur, Yehonatan Keypur, Anpei Chen, Sagie Benaim
+**分类**: cs.CV
+
+## 缺口
+
+3D高斯溅射有个空间分配问题。
+
+迭代方法（如原始3DGS）慢但紧凑。
+
+前馈方法快但臃肿——它们把像素反投影成密集的、视角对齐的基元，把冗余烤进3D资产里。
+
+加更多输入视角，表示就膨胀。
+
+核心问题：当前前馈方法缺乏全局场景感知。
+
+它们是像素对齐或体素对齐的，在不理解跨视角对应关系的情况下做局部决策。
+
+你得到了速度，但付出了存储和一致性的代价。
+
+```
+问题：前馈3DGS随视角增多而膨胀
+   |
+   v
+诊断：像素/体素对齐 = 局部决策
+   |                  缺乏全局上下文
+   v
+假设：全局潜在表示可在几何解码前
+   |    解决对应关系
+   v
+方法：编码多视角 -> 全局令牌 -> 解码稀疏高斯
+   |
+   v
+证据：16K高斯(4MB) vs 密集基线(100K+)
+   |    78ms推理，质量相当
+   v
+结论："先对齐，后解码"防止膨胀
+```
+
+## 增量
+
+**一句话**: 之前——前馈3DGS把每个像素反投影成密集3D基元；
+之后——GlobalSplat把多视角输入编码成紧凑全局令牌，然后只解码必要的高斯。
+
+### 核心机制
+
+GlobalSplat分两个阶段运作。
+
+第一阶段，transformer编码器处理多视角图像和相机姿态，产生固定数量的全局场景令牌（比如总共256或512个令牌，与输入视角数无关）。
+
+这些令牌是学习到的表示，在紧凑的潜在空间中捕获整个场景的结构和外观。
+
+关键是，这个编码阶段解决了跨视角对应关系——模型在承诺任何显式几何之前，就搞清楚了不同视角的哪些像素对应同一个3D点。
+
+第二阶段，解码器把这些全局令牌转换成3D高斯。
+
+解码器为每个高斯输出位置、旋转、缩放、不透明度和球谐系数。
+
+关键创新：解码的高斯数量是固定且少的（实验中是16K），不与输入分辨率或视角数绑定。
+
+模型学会高效分配这些高斯，因为它有全局上下文。
+
+训练使用从粗到细的课程。
+
+训练早期，模型解码更少的高斯（比如4K）。
+
+随着训练进行，容量逐渐增加到最终的16K。
+
+这防止模型学会到处乱撒基元——它必须从一开始就学习高效分配。
+
+```
+输入视角(N张图) -> 编码器 -> 全局令牌(固定256-512)
+                                    |
+                                    v
+                               解码器
+                                    |
+                                    v
+                            3D高斯(固定16K)
+                                    |
+                                    v
+                            可微光栅化器
+                                    |
+                                    v
+                            渲染视角 -> 损失
+```
+
+把它想象成固定比特率的压缩算法。
+
+传统前馈方法像分别存储视频的每一帧——到处都是冗余。
+
+GlobalSplat像视频编解码器：它找到整个序列的紧凑表示（全局令牌），然后只解码重建所需的内容（稀疏高斯）。
+
+编码器是分析过程，找到跨视角的冗余。
+
+解码器是合成过程，从压缩表示重建几何。
+
+固定令牌数是你的比特率预算——模型必须学会明智地使用它。
+
+### 关键概念
+
+- **全局场景令牌**: 编码器不是独立处理每个视角，而是产生固定数量的学习向量来表示整个场景。
+
+这些向量不绑定到特定像素或体素——它们是抽象表示，模型学会用它们编码3D结构。
+
+想象你在向别人描述一个房间。
+
+你不会描述你拍的每张照片的每个像素。
+
+你会说"左边有个沙发，后面有扇窗，木地板。"那些高层描述符就像全局令牌——捕获重要内容的紧凑摘要。
+
+模型通过训练学习什么"重要"。
+
+- **先对齐，后解码**: 这是核心哲学。
+
+传统方法立即从每个视角解码几何（像素反投影），然后尝试合并冗余基元。
+
+GlobalSplat翻转了这个过程：先通过在潜在空间对齐所有视角来搞清楚全局3D结构，然后一次性解码几何。
+
+这就像拼拼图——你不会立即粘住碎片。
+
+你先搞清楚碎片如何关联（对齐），然后再承诺放置（解码）。
+
+这防止了"从每个角度粘住每个碎片"导致的膨胀问题。
+
+- **从粗到细的容量课程**: 模型不是从完整的16K高斯容量开始。
+
+它从4K开始，然后逐渐增加。
+
+为什么？如果你从第一天就给模型太多容量，它会学到懒惰的解决方案——到处乱撒基元。
+
+通过强迫它早期使用有限容量工作，它学会了高效分配策略。
+
+这就像学习在重量限制下打包行李箱。
+
+从小包开始，学会打包必需品。
+
+逐渐增加包的大小，但高效打包的习惯保留下来了。
+
+## 框架转变
+
+```
+之前（像素对齐前馈）：
+
+视角1 -> 反投影 -> 密集高斯 ----+
+视角2 -> 反投影 -> 密集高斯 ----+-> 合并/修剪 -> 臃肿3D
+视角3 -> 反投影 -> 密集高斯 ----+
+(更多视角 = 更多基元 = 更大资产)
+
+
+之后（GlobalSplat）：
+
+视角1 ---+
+视角2 ---+-> 编码器 -> 全局令牌(固定) -> 解码器 -> 稀疏高斯
+视角3 ---+
+(更多视角 = 更好令牌 = 相同资产大小)
+```
+
+从局部反投影到全局编码，核心转变是解耦表示大小与输入视角数。
+
+## 专家评审
+
+**选题眼光**: 真实缺口。
+
+自pixelSplat以来，前馈3DGS方法一直在与膨胀-质量权衡作斗争。
+
+这不是人造的——实践者确实关心部署的模型大小。
+
+问题处于甜蜜点：足够重要，足够可解。
+
+**方法成熟度**: 扎实的工程而非深刻洞见。
+
+"全局编码，稀疏解码"的想法不是革命性的——它借鉴自NeRF文献（见pixelNeRF的潜在编码）。
+
+课程训练合理但不新颖。
+
+巧妙之处在于执行：他们真的让它在没有预训练骨干的情况下工作了，而许多竞争者依赖预训练。
+
+没有明显被忽略的更简单方法。
+
+**实验诚意**: 基线公平（pixelSplat、MVSplat、LGM）。
+
+数字看起来合理——16K高斯达到相当的PSNR是可信的，考虑到全局上下文。
+
+一个黄旗：他们没有与类似高斯预算的迭代3DGS比较。
+
+看看他们的16K前馈是否在质量上匹配16K迭代会很有趣。
+
+推理速度声明（78ms）需要硬件规格以便复现，但数量级看起来对。
+
+**写作功力**: 摘要和引言简洁。
+
+方法部分在transformer架构细节处变得密集——他们可以在不失清晰度的情况下删减30%的符号。
+
+"先对齐，后解码"的框架是好营销，但低估了课程训练，后者似乎同样重要。
+
+图2（架构图）杂乱；
+更清晰的版本会有帮助。
+
+**判决**: 弱接收——扎实的增量工作，用称职的工程解决了真实问题，尽管概念上不是突破性的。
+
+## 要点总结
+
+从粗到细的容量课程是可偷的想法。
+
+如果你在训练任何分配离散资源的模型（注意力头、混合组件、基元），不要从一开始就给它全部容量。
+
+强迫它用有限预算学习高效分配，然后逐渐增加。
+
+这防止懒惰的"到处使用一切"解决方案。
+
+"固定潜在预算"原则超越3D。
+
+任何时候你从多个来源（视角、传感器、文档）聚合信息，考虑：先把一切编码成固定大小的潜在表示，然后解码特定任务的输出。
+
+这强迫编码器学习什么是冗余的、什么是本质的。
+
+这与"独立处理每个来源然后合并"相反——而且扩展性更好。
+
+对于部署3D模型的实践者：一个场景4MB实际上可以在移动端部署。
+
+如果你的用例需要快速推理和紧凑存储多于像素完美质量，这种架构模式（全局令牌+稀疏解码）值得探索。
+
+:::

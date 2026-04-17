@@ -1,0 +1,350 @@
+---
+title:
+  en: "LeapAlign: Teaching Flow Models to Jump Through Time for Better Image Generation"
+  zh: "LeapAlign: 让流匹配模型学会时间跳跃以生成更好的图像"
+description:
+  en: "A method that fine-tunes flow matching models by compressing long generation trajectories into two strategic leaps, enabling efficient gradient flow to early steps that determine image structure."
+  zh: "一种将流匹配模型的长生成轨迹压缩为两次战略性跳跃的微调方法，使梯度能高效传播到决定图像结构的早期步骤。"
+date: 2026-04-17
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/leapalign-post-training-flow-matching-models/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/leapalign-post-training-flow-matching-models/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2604.15311](https://arxiv.org/abs/2604.15311)
+**Authors**: Zhanhao Liang, Tao Yang, Jie Wu, Chengjian Feng, Liang Zheng
+**Categories**: cs.CV
+
+## The Gap
+
+Flow matching models generate images by gradually transforming noise into structured content through many small steps. When you want to align these models with human preferences (make them generate what people actually want), you need to fine-tune them using reward signals. The obvious approach: backpropagate reward gradients through the entire generation trajectory. But here's the problem—these trajectories are long (50+ steps), and backpropagating through all of them causes memory explosion and gradient instability. Existing methods like GRPO sidestep this by using policy gradient tricks, but they're sample-inefficient. Direct gradient methods exist but can't effectively update early steps—the very steps that determine whether you get a coherent face or a blob.
+
+The core issue: early generation steps set the global structure (composition, layout, major objects), but they're the hardest to reach with gradients because they're buried under 40+ subsequent operations.
+
+```
+Problem: Long trajectory blocks gradient flow to early steps
+   |
+   v
+Assumption: Early steps matter most for structure
+   |
+   v
+Method: Compress trajectory into 2 leaps, randomize timing
+   |
+   v
+Evidence: Better metrics than GRPO and prior direct methods
+   |
+   v
+Conclusion: Efficient gradient access to early steps wins
+```
+
+## The Increment
+
+**One sentence**: Before LeapAlign, you either used sample-inefficient policy gradients or couldn't effectively update the structure-determining early steps of flow models; after LeapAlign, you can backpropagate directly through a compressed 2-step trajectory that reaches any generation timestep.
+
+### Core Mechanism
+
+LeapAlign replaces the standard 50-step generation trajectory with just two consecutive "leaps." Each leap is a learned predictor that jumps forward multiple timesteps in one shot. The first leap starts at a random early timestep and predicts a future latent. The second leap continues from there and predicts even further ahead. By randomizing where these leaps start and end, the method ensures all timesteps get training signal.
+
+But not all 2-step trajectories are equally useful. A trajectory that wildly deviates from the true 50-step path won't give meaningful gradients. So LeapAlign weighs each training sample by how closely its 2-step shortcut matches the full trajectory (measured by latent similarity). Trajectories that stay "on the rails" get higher weight.
+
+Gradient explosion is still a risk with direct backpropagation. Instead of clipping gradients (which throws away information), LeapAlign uses soft weighting: gradient terms with large magnitude get downweighted smoothly. This keeps the signal while preventing instability.
+
+```
+Noise ----[Leap 1: t0->t1]----> Latent_1 ----[Leap 2: t1->t2]----> Image
+  ^                                ^                                  |
+  |                                |                                  |
+  +-- Random start                 +-- Random middle                  |
+                                                                      v
+                                                                   Reward
+                                                                      |
+                                                                      v
+                                                            Backprop (weighted)
+```
+
+Think of it like teaching someone to navigate a city. The standard approach: walk them through every single street turn-by-turn (50 steps). LeapAlign instead teaches two strategic shortcuts: "From the train station, jump directly to the park" (leap 1), then "from the park, jump to the museum" (leap 2). You randomize which shortcuts to practice each time. Shortcuts that keep you roughly on the correct path (not through a river) get practiced more. When the student makes a mistake at the museum, the feedback flows back through both shortcuts, so they learn to correct their initial direction from the train station—not just the final approach.
+
+### Key Concepts
+
+- **Flow Matching Generation**: Imagine morphing a cloud of random static into a photograph by following a smooth path. At t=0 you have pure noise, at t=1 you have the final image. Flow matching learns a velocity field that tells you "if you're at this point in noise-space at time t, move in this direction." Generation means following this field step-by-step. The early steps (t=0 to t=0.3) decide "is this a face or a landscape?", while late steps (t=0.7 to t=1.0) add fine details like eyelashes. Most methods can only effectively update the eyelashes, not the face-vs-landscape decision.
+
+- **Trajectory Consistency Weighting**: Not all shortcuts are created equal. If your 2-step leap lands you in a completely different part of latent space than the 50-step path would, the gradients you compute are misleading. LeapAlign measures the distance between where the shortcut lands and where the full path would land, then uses this as a training weight. It's like practicing basketball shots—you practice more from positions where your form is already decent, because those reps actually improve your muscle memory. Wild shots from weird angles just teach you bad habits.
+
+- **Soft Gradient Magnitude Weighting**: When gradients explode, the standard fix is clipping: if a gradient exceeds threshold T, set it to T. But this is binary—you either keep the full gradient or truncate it hard. LeapAlign instead uses a smooth function: small gradients pass through unchanged, but as magnitude grows, the weight gradually decreases. Think of it like audio compression—you don't just cut off loud sounds, you smoothly reduce their volume while preserving the signal shape. This keeps information from high-magnitude terms while preventing them from dominating the update.
+
+## Framework Shift
+
+```
+Before (GRPO / policy gradient):        After (LeapAlign):
+                                        
+Noise --> [50 steps] --> Image          Noise --[Leap]--[Leap]--> Image
+  |                        |               ^       ^        ^       |
+  |                        v               |       |        |       v
+  +--[Sample]--[Estimate]--Reward         +-------+--------+----Reward
+     (no backprop through generation)        (direct backprop, 2 steps)
+     
+     - Sample inefficient                   - Gradient reaches early steps
+     - Can't see generation internals       - Memory efficient
+     - Treats model as black box            - Sees full generation process
+
+
+Before (prior direct gradient):         After (LeapAlign):
+
+Noise --> [50 steps] --> Image          Noise --[Leap]--[Leap]--> Image
+  ^         ^  ^  ^       |               ^       ^               |
+  |         |  |  |       v               |       |               v
+  +---------+--+--+----Reward             +-------+------------Reward
+  (memory explosion, gradient vanishing)  (compressed, stable gradients)
+  
+  - Early steps unreachable               - All steps reachable
+  - Gradient instability                  - Weighted stability
+```
+
+**One sentence**: From treating generation as a black box (GRPO) or an unmanageable 50-step chain (direct methods) to a learnable 2-step compression that maintains gradient flow to structure-determining early timesteps.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. Flow matching models are increasingly important (Stable Diffusion 3, Flux), and aligning them with human preferences is a practical need. The observation that early steps matter for structure but are hard to update is well-motivated. The problem sits at the intersection of two active areas: flow-based generation and preference alignment.
+
+**Method maturity**: The core insight—compress the trajectory to enable gradient flow—is clever and well-executed. The trajectory consistency weighting is a nice touch that prevents the method from learning on garbage shortcuts. However, the soft gradient weighting feels like a patch rather than a principled solution. Why not use gradient normalization or other stabilization techniques? The paper doesn't explore alternatives. The method also introduces hyperparameters (weighting functions, leap predictors) that need tuning.
+
+**Experimental integrity**: Baselines are fair—they compare against GRPO (the policy gradient approach) and prior direct gradient methods. The metrics (aesthetic score, image-text alignment, human preference) are appropriate. Numbers look solid across multiple reward models. One concern: all experiments are on Flux, a single model family. Does this generalize to other flow matching architectures? The paper doesn't test on Stable Diffusion 3 or other models. Also, the trajectory consistency weighting requires computing the full 50-step path during training for comparison—this adds computational cost that isn't fully discussed.
+
+**Writing quality**: The method section is dense and could use more intuition upfront. The paper jumps into technical details (leap predictors, weighting functions) before establishing why two leaps specifically, not three or one. The related work section is thorough but reads like a literature dump. The ablation studies are good but buried in the appendix—some should be in the main text. Figure 1 is helpful but could better illustrate the gradient flow problem.
+
+**Verdict**: weak accept — Solid contribution with clear practical value, but limited architectural diversity in experiments and some methodological choices feel under-explored. The core idea is sound and results are convincing within the tested scope.
+
+## Takeaways
+
+**Trajectory compression for gradient flow**: If you're working with any multi-step generative process (diffusion, flow matching, autoregressive models) and need to backpropagate through it, consider learning a compressed trajectory. The key: make the compression learnable and randomize which parts of the original trajectory you compress. This pattern transfers beyond image generation—think video generation, molecular dynamics, or any sequential decision process where early steps have long-term consequences.
+
+**Consistency weighting over hard filtering**: When training on synthetic data or shortcuts, weight samples by how well they match the ground truth rather than filtering binary. LeapAlign's trajectory consistency weighting is a specific instance of a general principle: if you're learning from approximations, train more on good approximations and less on bad ones, rather than throwing away the bad ones entirely.
+
+**Soft magnitude weighting for gradient stability**: Instead of hard gradient clipping, use smooth weighting functions that gradually reduce the influence of large gradients. This preserves more information than clipping while still preventing instability. The specific function matters less than the principle—keep the signal shape, just compress the dynamic range.
+:::
+
+:::zh
+**论文**: [2604.15311](https://arxiv.org/abs/2604.15311)
+**作者**: Zhanhao Liang, Tao Yang, Jie Wu, Chengjian Feng, Liang Zheng
+**分类**: cs.CV
+
+## 缺口
+
+流匹配模型通过许多小步骤逐渐将噪声转化为结构化内容来生成图像。
+
+当你想让这些模型与人类偏好对齐（让它们生成人们真正想要的东西）时，需要用奖励信号对它们进行微调。
+
+显而易见的方法是：通过整个生成轨迹反向传播奖励梯度。
+
+但问题来了——这些轨迹很长（50+步），通过所有步骤反向传播会导致内存爆炸和梯度不稳定。
+
+现有方法如GRPO通过策略梯度技巧绕过这个问题，但样本效率低。
+
+直接梯度方法存在，但无法有效更新早期步骤——而早期步骤恰恰决定了你得到的是一张连贯的脸还是一团模糊。
+
+核心问题：早期生成步骤设定全局结构（构图、布局、主要物体），但它们最难被梯度触及，因为它们被埋在40多个后续操作之下。
+
+```
+问题：长轨迹阻碍梯度流向早期步骤
+   |
+   v
+假设：早期步骤对结构最重要
+   |
+   v
+方法：将轨迹压缩为2次跳跃，随机化时间
+   |
+   v
+证据：指标优于GRPO和先前的直接方法
+   |
+   v
+结论：高效的早期步骤梯度访问获胜
+```
+
+## 增量
+
+**一句话**: LeapAlign之前，你要么使用样本效率低的策略梯度，要么无法有效更新决定结构的流模型早期步骤。
+
+LeapAlign之后，你可以通过压缩的2步轨迹直接反向传播，触及任何生成时间步。
+
+### 核心机制
+
+LeapAlign用两次连续的"跳跃"替代标准的50步生成轨迹。
+
+每次跳跃都是一个学习到的预测器，一步跨越多个时间步。
+
+第一次跳跃从随机的早期时间步开始，预测未来的潜在表示。
+
+第二次跳跃从那里继续，预测更远的未来。
+
+通过随机化这些跳跃的起点和终点，该方法确保所有时间步都能获得训练信号。
+
+但并非所有2步轨迹都同样有用。
+
+一条严重偏离真实50步路径的轨迹不会给出有意义的梯度。
+
+因此LeapAlign根据每个训练样本的2步捷径与完整轨迹的匹配程度（通过潜在相似度测量）来加权。
+
+保持"在轨道上"的轨迹获得更高权重。
+
+直接反向传播仍有梯度爆炸的风险。
+
+LeapAlign不是裁剪梯度（会丢失信息），而是使用软加权：大幅度的梯度项被平滑地降权。
+
+这在防止不稳定的同时保留了信号。
+
+```
+噪声 ----[跳跃1: t0->t1]----> 潜在_1 ----[跳跃2: t1->t2]----> 图像
+  ^                              ^                                |
+  |                              |                                |
+  +-- 随机起点                    +-- 随机中点                      |
+                                                                  v
+                                                                奖励
+                                                                  |
+                                                                  v
+                                                        反向传播（加权）
+```
+
+把它想象成教人在城市中导航。
+
+标准方法：逐个街道转弯地带他们走（50步）。
+
+LeapAlign则教两条战略性捷径："从火车站直接跳到公园"（跳跃1），然后"从公园跳到博物馆"（跳跃2）。
+
+每次随机化练习哪些捷径。
+
+让你大致保持在正确路径上的捷径（不是穿过河流）会被更多练习。
+
+当学生在博物馆犯错时，反馈通过两条捷径回流，所以他们学会纠正从火车站出发的初始方向——而不仅仅是最后的接近路线。
+
+### 关键概念
+
+- **流匹配生成**: 想象将一团随机静电变形为照片，沿着平滑路径前进。
+
+在t=0时你有纯噪声，在t=1时你有最终图像。
+
+流匹配学习一个速度场，告诉你"如果你在时间t处于噪声空间的这个点，朝这个方向移动"。
+
+生成意味着逐步跟随这个场。
+
+早期步骤（t=0到t=0.3）决定"这是一张脸还是风景？"，而后期步骤（t=0.7到t=1.0）添加睫毛等精细细节。
+
+大多数方法只能有效更新睫毛，而不能更新脸部与风景的决策。
+
+- **轨迹一致性加权**: 并非所有捷径都生而平等。
+
+如果你的2步跳跃让你落在与50步路径完全不同的潜在空间部分，你计算的梯度就会误导。
+
+LeapAlign测量捷径落点与完整路径落点之间的距离，然后将其用作训练权重。
+
+这就像练习篮球投篮——你从姿势已经不错的位置多练习，因为这些重复确实能改善你的肌肉记忆。
+
+从奇怪角度的疯狂投篮只会教你坏习惯。
+
+- **软梯度幅度加权**: 当梯度爆炸时，标准修复方法是裁剪：如果梯度超过阈值T，就设为T。
+
+但这是二元的——你要么保留完整梯度，要么硬截断它。
+
+LeapAlign则使用平滑函数：小梯度不变通过，但随着幅度增长，权重逐渐降低。
+
+把它想象成音频压缩——你不是直接切掉响亮的声音，而是平滑地降低它们的音量，同时保留信号形状。
+
+这在防止高幅度项主导更新的同时保留了它们的信息。
+
+## 框架转变
+
+```
+之前（GRPO / 策略梯度）：              之后（LeapAlign）：
+                                        
+噪声 --> [50步] --> 图像                噪声 --[跳跃]--[跳跃]--> 图像
+  |                   |                   ^       ^        ^       |
+  |                   v                   |       |        |       v
+  +--[采样]--[估计]--奖励                  +-------+--------+----奖励
+     (不通过生成反向传播)                     (直接反向传播，2步)
+     
+     - 样本效率低                           - 梯度到达早期步骤
+     - 看不到生成内部                       - 内存高效
+     - 将模型视为黑盒                       - 看到完整生成过程
+
+
+之前（先前的直接梯度）：                之后（LeapAlign）：
+
+噪声 --> [50步] --> 图像                噪声 --[跳跃]--[跳跃]--> 图像
+  ^         ^  ^  ^      |                ^       ^               |
+  |         |  |  |      v                |       |               v
+  +---------+--+--+----奖励                +-------+------------奖励
+  (内存爆炸，梯度消失)                      (压缩，稳定梯度)
+  
+  - 早期步骤不可达                         - 所有步骤可达
+  - 梯度不稳定                             - 加权稳定
+```
+
+**一句话**: 从将生成视为黑盒（GRPO）或难以管理的50步链（直接方法）到可学习的2步压缩，保持梯度流向决定结构的早期时间步。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实的缺口。
+
+流匹配模型越来越重要（Stable Diffusion 3、Flux），将它们与人类偏好对齐是实际需求。
+
+早期步骤对结构重要但难以更新的观察动机充分。
+
+该问题位于两个活跃领域的交叉点：基于流的生成和偏好对齐。
+
+**方法成熟度**: 核心洞察——压缩轨迹以实现梯度流——巧妙且执行良好。
+
+轨迹一致性加权是一个不错的设计，防止方法在垃圾捷径上学习。
+
+然而，软梯度加权感觉像是补丁而非原则性解决方案。
+
+为什么不使用梯度归一化或其他稳定技术？论文没有探索替代方案。
+
+该方法还引入了需要调整的超参数（加权函数、跳跃预测器）。
+
+**实验诚意**: 基线公平——他们与GRPO（策略梯度方法）和先前的直接梯度方法进行比较。
+
+指标（美学分数、图像-文本对齐、人类偏好）合适。
+
+数字在多个奖励模型上看起来可靠。
+
+一个担忧：所有实验都在Flux上，单一模型家族。
+
+这能推广到其他流匹配架构吗？论文没有在Stable Diffusion 3或其他模型上测试。
+
+此外，轨迹一致性加权需要在训练期间计算完整的50步路径进行比较——这增加了未充分讨论的计算成本。
+
+**写作功力**: 方法部分密集，前面可以多一些直觉。
+
+论文在建立为什么是两次跳跃（而不是三次或一次）之前就跳入技术细节（跳跃预测器、加权函数）。
+
+相关工作部分很全面，但读起来像文献堆砌。
+
+消融研究很好但埋在附录中——有些应该放在正文。
+
+图1有帮助，但可以更好地说明梯度流问题。
+
+**判决**: 弱接收 — 具有明确实用价值的扎实贡献，但实验中架构多样性有限，一些方法选择感觉探索不足。
+
+核心思想可靠，结果在测试范围内令人信服。
+
+## 要点总结
+
+**用于梯度流的轨迹压缩**: 如果你在处理任何多步生成过程（扩散、流匹配、自回归模型）并需要通过它反向传播，考虑学习一个压缩轨迹。
+
+关键：使压缩可学习，并随机化你压缩原始轨迹的哪些部分。
+
+这种模式超越图像生成——想想视频生成、分子动力学或任何早期步骤具有长期后果的顺序决策过程。
+
+**一致性加权优于硬过滤**: 在合成数据或捷径上训练时，根据样本与真实情况的匹配程度加权，而不是二元过滤。
+
+LeapAlign的轨迹一致性加权是一个通用原则的具体实例：如果你从近似中学习，在好的近似上多训练，在坏的近似上少训练，而不是完全丢弃坏的。
+
+**用于梯度稳定的软幅度加权**: 不要硬裁剪梯度，使用平滑加权函数逐渐降低大梯度的影响。
+
+这比裁剪保留更多信息，同时仍能防止不稳定。
+
+具体函数不如原则重要——保持信号形状，只是压缩动态范围。
+
+:::
