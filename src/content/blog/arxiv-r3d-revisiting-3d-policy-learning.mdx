@@ -1,0 +1,354 @@
+---
+title:
+  en: "R3D: Fixing 3D Robot Learning with Better Architecture and Training"
+  zh: "R3D：用更好的架构和训练修复3D机器人学习"
+description:
+  en: "Diagnoses why 3D policy learning fails at scale and proposes a transformer-diffusion architecture that actually works for robot manipulation."
+  zh: "诊断3D策略学习为何无法规模化，提出真正适用于机器人操作的transformer-diffusion架构。"
+date: 2026-04-17
+tags: ["arxiv", "ai", "cs.cv", "cs.ro"]
+image: "/arxiv-visuals/r3d-revisiting-3d-policy-learning/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/r3d-revisiting-3d-policy-learning/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2604.15281](https://arxiv.org/abs/2604.15281)
+**Authors**: Zhengdong Hong, Shenrui Wu, Haozhe Cui, Boyi Zhao, Ran Ji, Yiyang He, Hangxing Zhang, Zundong Ke, Jun Wang, Guofeng Zhang
+**Categories**: cs.CV, cs.RO
+
+## The Gap
+
+3D policy learning should be the future of robot manipulation — point clouds capture geometry independent of viewpoint, promising better generalization and cross-embodiment transfer than 2D image-based methods. But in practice, 3D approaches consistently underperform. Prior work like PerAct and 3D Diffusion Policy showed promise but hit a wall: training becomes unstable at scale, models overfit severely, and you can't leverage powerful pre-trained 3D encoders without everything collapsing.
+
+The field assumed the problem was inherent to 3D representations. This paper says no — it's a training and architecture problem. Specifically: (1) everyone forgot to do 3D data augmentation properly, and (2) Batch Normalization, standard in 3D networks, actively sabotages policy learning by coupling batch statistics to action distributions.
+
+```
+Problem: 3D policies fail at scale
+    |
+    v
+Diagnosis: Missing 3D augmentation + BatchNorm toxicity
+    |
+    v
+Method: Transformer encoder + Diffusion decoder + LayerNorm
+    |
+    v
+Evidence: Outperforms baselines on RLBench/CALVIN
+    |
+    v
+Conclusion: 3D policy learning is viable with correct training recipe
+```
+
+## The Increment
+
+**One sentence**: Before R3D, 3D policy learning was theoretically superior but practically broken at scale; after R3D, it's a viable path with concrete training recipes and architecture choices that actually work.
+
+### Core Mechanism
+
+R3D has three components working in sequence. First, a 3D encoder (PointNext or pre-trained Point-MAE) processes point clouds into feature tokens. This encoder uses LayerNorm instead of BatchNorm — a seemingly minor swap that prevents training collapse. Second, a transformer processes these tokens alongside proprioceptive state and language instructions, building a unified representation. Third, a diffusion decoder generates actions through iterative denoising, starting from Gaussian noise and refining over multiple steps.
+
+The data flow is straightforward: point cloud → tokenization → transformer fusion with language/state → diffusion denoising → action sequence. The critical operations happen in two places: (1) aggressive 3D augmentation (rotation, jitter, dropout) applied to point clouds before encoding, and (2) cross-attention between visual tokens and language embeddings in the transformer.
+
+```
+Point Cloud ──> [3D Encoder] ──> Visual Tokens
+                   (LayerNorm)         |
+                                       v
+Language ──────────────────> [Transformer] <── Proprioception
+                                       |
+                                       v
+Noise ──────────────────> [Diffusion Decoder]
+                                       |
+                                       v
+                                   Actions
+```
+
+Think of R3D like a chef preparing a dish from raw ingredients. The 3D encoder is the prep station — it takes messy, varied ingredients (point clouds from different angles) and standardizes them into mise en place (feature tokens). The aggressive augmentation is like a chef who practices with ingredients in different states (wilted, fresh, chopped differently) so they can handle any kitchen condition. The transformer is the cooking process itself, where you combine prepared ingredients (visual features) with seasoning (language instructions) and technique (proprioceptive feedback). The diffusion decoder is the plating — starting with a rough arrangement and iteratively refining until it looks right. The LayerNorm vs BatchNorm distinction? BatchNorm is like a chef who adjusts their technique based on what other dishes are being made simultaneously in the kitchen (batch statistics) — it creates unpredictable coupling. LayerNorm is a chef who follows the recipe consistently regardless of what else is cooking.
+
+### Key Concepts
+
+- **3D Data Augmentation for Policies**: In computer vision, you augment images with crops, flips, color jitter. For 3D point clouds in robotics, you need geometric augmentations: random rotations around the vertical axis (the robot might approach from any angle), point dropout (sensors are noisy), and coordinate jitter (measurement noise). The key insight: these augmentations must be applied in the world frame before the point cloud is processed, not in the camera frame. Why? Because the robot needs to learn that "grasp the mug" is the same task whether the mug is rotated 30 degrees or not. Without this, the model memorizes specific object orientations from the training set and fails on slight variations. Concrete example: if all training mugs have handles pointing right, an unaugmented model will fail when the handle points left at test time.
+
+- **BatchNorm Toxicity in Policy Learning**: Batch Normalization computes mean and variance across the current batch, then normalizes features using these statistics. In image classification, this is fine — cat photos don't influence each other. In policy learning, it's poison. Here's why: your batch contains different demonstrations with different action distributions (some trajectories move fast, some slow). BatchNorm couples these together — the normalization statistics for one trajectory depend on what other trajectories are in the batch. This creates a hidden dependency: the same observation can produce different features depending on batch composition. During training with large batches, this averages out. During inference with batch size 1, the statistics shift dramatically, causing distribution mismatch and failure. LayerNorm normalizes each sample independently, breaking this coupling.
+
+- **Diffusion for Action Generation**: Instead of directly predicting actions with a feedforward network, diffusion models generate actions through iterative refinement. Start with pure Gaussian noise (random actions). At each denoising step, the model predicts what noise to remove based on the current noisy action and the observation. After multiple steps (typically 10-100), you converge to a clean action sequence. Why bother? Diffusion naturally handles multimodal action distributions — situations where multiple valid actions exist (e.g., grasp the mug from the left or right). A direct regression model would average these modes and produce an invalid action (grasping through the middle). Diffusion can represent both modes and sample from them. The cost: slower inference due to multiple denoising steps.
+
+## Framework Shift
+
+```
+Before (PerAct, 3D-DP):              After (R3D):
+
+Point Cloud                          Point Cloud
+     |                                    |
+     v                                    v
+[3D CNN/PointNet]                   [Augmentation]
+  (BatchNorm)                             |
+     |                                    v
+     v                               [Transformer Encoder]
+[Voxel Features]                      (LayerNorm)
+     |                                    |
+     v                                    v
+[Action Head]                       [Diffusion Decoder]
+     |                                    |
+     v                                    v
+  Actions                              Actions
+
+Key: Fixed architecture,            Key: Scalable architecture,
+     no augmentation,                    proper augmentation,
+     BatchNorm coupling                  LayerNorm independence
+```
+
+From rigid 3D CNNs with implicit batch coupling to flexible transformers with explicit independence, the core shift is treating 3D policy learning as a scaling problem, not a representation problem.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The 3D policy learning community has been stuck for years — everyone knows it should work better than 2D, but it doesn't. This paper doesn't manufacture the problem; it diagnoses an existing failure mode that's been blocking progress. The gap sits at a critical juncture: between small-scale 3D proofs-of-concept and production-ready systems.
+
+**Method maturity**: Mostly engineering insight, not algorithmic novelty. The components (transformers, diffusion, point cloud encoders) are off-the-shelf. The contribution is identifying what breaks and fixing it — unglamorous but valuable. The BatchNorm diagnosis is clever detective work. The augmentation strategy is obvious in hindsight but apparently not obvious to prior work. No simpler approach is being overlooked; the paper systematically ablates each component.
+
+**Experimental integrity**: Baselines are fair — they compare against published 3D methods (PerAct, 3D-DP) and strong 2D methods (RVT). The numbers hold up: consistent improvements across two benchmarks (RLBench, CALVIN) with multiple tasks. One red flag: the paper doesn't report wall-clock inference time. Diffusion decoders are slow; how much does this cost in practice? The ablations are thorough, but I'd want to see failure case analysis — when does R3D still fail?
+
+**Writing quality**: The diagnosis section (Section 3) is excellent — clear problem identification with evidence. The related work is too long and defensive. Section 4.2 (architecture details) buries critical information in dense paragraphs; a table comparing design choices would help. The results section front-loads numbers without enough qualitative analysis of what the model learned. Rewriting Section 5 to lead with failure modes and learned behaviors, then supporting with numbers, would elevate the paper from "we got better results" to "we understand why 3D policies work now."
+
+**Verdict**: weak accept — Solves a real problem blocking the field, but the solution is more engineering recipe than scientific insight. The value is high for practitioners; the intellectual contribution is moderate.
+
+## Takeaways
+
+**Steal the augmentation strategy**: If you're doing any 3D learning for robotics, implement their augmentation pipeline (SO(3) rotation, point dropout, coordinate jitter). It's embarrassingly simple and apparently everyone forgot to do it. The key: augment in world frame, not camera frame.
+
+**Check your normalization layers**: If you're using BatchNorm in any sequential decision-making model (not just robotics — this applies to time series, RL, anything where batch composition matters), you're probably introducing hidden dependencies. Swap to LayerNorm or GroupNorm. The paper provides clear evidence this matters.
+
+**Diffusion for multimodal outputs**: If your task has multiple valid solutions and you're using regression (MSE loss), you're averaging modes and getting garbage. Diffusion is overkill for unimodal problems but essential for multimodal ones. The paper demonstrates this works at scale for robotics; the technique transfers to any domain with action ambiguity.
+
+**Pre-training matters, but not how you think**: The paper shows Point-MAE pre-training helps, but not dramatically. The bigger win is architecture choices that allow you to use pre-trained models at all (LayerNorm enabling stable training). Don't assume pre-training is a magic bullet; fix your training recipe first.
+:::
+
+:::zh
+**论文**: [2604.15281](https://arxiv.org/abs/2604.15281)
+**作者**: Zhengdong Hong, Shenrui Wu, Haozhe Cui, Boyi Zhao, Ran Ji, Yiyang He, Hangxing Zhang, Zundong Ke, Jun Wang, Guofeng Zhang
+**分类**: cs.CV, cs.RO
+
+## 缺口
+
+3D策略学习本应是机器人操作的未来——点云捕捉几何结构而不依赖视角，理论上比基于2D图像的方法有更好的泛化能力和跨embodiment迁移能力。
+
+但实践中，3D方法一直表现不佳。
+
+PerAct和3D Diffusion Policy等先前工作展现了希望，但撞上了墙：训练在规模化时变得不稳定，模型严重过拟合，你无法利用强大的预训练3D编码器而不让一切崩溃。
+
+领域内假设问题出在3D表示本身。
+
+这篇论文说不——这是训练和架构问题。
+
+具体来说：(1) 所有人都忘了正确做3D数据增强，(2) Batch Normalization（3D网络的标配）通过将批次统计量耦合到动作分布上，主动破坏了策略学习。
+
+```
+问题：3D策略无法规模化
+    |
+    v
+诊断：缺失3D增强 + BatchNorm毒性
+    |
+    v
+方法：Transformer编码器 + Diffusion解码器 + LayerNorm
+    |
+    v
+证据：在RLBench/CALVIN上超越基线
+    |
+    v
+结论：正确的训练配方让3D策略学习可行
+```
+
+## 增量
+
+**一句话**：R3D之前，3D策略学习理论上优越但实践中在规模化时失效；R3D之后，它成为一条可行路径，有具体的训练配方和真正有效的架构选择。
+
+### 核心机制
+
+R3D有三个顺序工作的组件。
+
+首先，3D编码器（PointNext或预训练的Point-MAE）将点云处理成特征token。
+
+这个编码器使用LayerNorm而非BatchNorm——看似微小的替换却防止了训练崩溃。
+
+其次，transformer处理这些token以及本体感受状态和语言指令，构建统一表示。
+
+第三，diffusion解码器通过迭代去噪生成动作，从高斯噪声开始，经过多步精炼。
+
+数据流很直接：点云 → token化 → transformer融合语言/状态 → diffusion去噪 → 动作序列。
+
+关键操作发生在两处：(1) 在编码前对点云应用激进的3D增强（旋转、抖动、dropout），(2) transformer中视觉token与语言嵌入之间的交叉注意力。
+
+```
+点云 ──> [3D编码器] ──> 视觉Token
+          (LayerNorm)        |
+                             v
+语言 ──────────────────> [Transformer] <── 本体感受
+                             |
+                             v
+噪声 ──────────────────> [Diffusion解码器]
+                             |
+                             v
+                          动作
+```
+
+把R3D想象成厨师用原料准备菜肴。
+
+3D编码器是备菜台——它接收杂乱、多样的原料（不同角度的点云），将它们标准化成备好的食材（特征token）。
+
+激进的增强就像厨师用不同状态的食材练习（蔫的、新鲜的、切法不同的），这样能应对任何厨房条件。
+
+Transformer是烹饪过程本身，你把准备好的食材（视觉特征）与调味料（语言指令）和技法（本体感受反馈）结合。
+
+Diffusion解码器是摆盘——从粗糙的排列开始，迭代精炼直到看起来对了。
+
+LayerNorm vs BatchNorm的区别？BatchNorm像是根据厨房里同时在做的其他菜（批次统计量）来调整技法的厨师——这造成不可预测的耦合。
+
+LayerNorm是无论其他什么在煮都始终如一遵循配方的厨师。
+
+### 关键概念
+
+- **策略的3D数据增强**：在计算机视觉中，你用裁剪、翻转、颜色抖动来增强图像。
+
+对于机器人学中的3D点云，你需要几何增强：绕垂直轴随机旋转（机器人可能从任何角度接近）、点dropout（传感器有噪声）、坐标抖动（测量噪声）。
+
+关键洞见：这些增强必须在点云处理前应用于世界坐标系，而非相机坐标系。
+
+为什么？因为机器人需要学习"抓取杯子"是同一个任务，无论杯子旋转30度还是没旋转。
+
+没有这个，模型会记住训练集中的特定物体朝向，在轻微变化时失败。
+
+具体例子：如果所有训练杯子的把手都朝右，未增强的模型在测试时把手朝左就会失败。
+
+- **策略学习中的BatchNorm毒性**：Batch Normalization在当前批次上计算均值和方差，然后用这些统计量归一化特征。
+
+在图像分类中，这没问题——猫的照片不会互相影响。
+
+在策略学习中，这是毒药。
+
+原因如下：你的批次包含不同的演示，有不同的动作分布（有些轨迹移动快，有些慢）。
+
+BatchNorm把它们耦合在一起——一条轨迹的归一化统计量取决于批次中有哪些其他轨迹。
+
+这造成隐藏依赖：同样的观察可能因批次组成不同而产生不同的特征。
+
+训练时用大批次，这会被平均掉。
+
+推理时批次大小为1，统计量剧烈偏移，造成分布不匹配和失败。
+
+LayerNorm独立归一化每个样本，打破这种耦合。
+
+- **用于动作生成的Diffusion**：不是用前馈网络直接预测动作，diffusion模型通过迭代精炼生成动作。
+
+从纯高斯噪声（随机动作）开始。
+
+每个去噪步骤，模型基于当前的噪声动作和观察预测要移除什么噪声。
+
+经过多步（通常10-100步），你收敛到干净的动作序列。
+
+为什么费这个劲？Diffusion自然处理多模态动作分布——存在多个有效动作的情况（例如从左边或右边抓杯子）。
+
+直接回归模型会平均这些模态，产生无效动作（从中间抓）。
+
+Diffusion可以表示两个模态并从中采样。
+
+代价：因多个去噪步骤导致推理更慢。
+
+## 框架转变
+
+```
+之前（PerAct, 3D-DP）：          之后（R3D）：
+
+点云                            点云
+  |                              |
+  v                              v
+[3D CNN/PointNet]             [增强]
+ (BatchNorm)                     |
+  |                              v
+  v                         [Transformer编码器]
+[体素特征]                    (LayerNorm)
+  |                              |
+  v                              v
+[动作头]                      [Diffusion解码器]
+  |                              |
+  v                              v
+动作                            动作
+
+关键：固定架构，              关键：可扩展架构，
+     无增强，                      适当增强，
+     BatchNorm耦合                 LayerNorm独立
+```
+
+从带隐式批次耦合的刚性3D CNN到带显式独立性的灵活transformer，核心转变是把3D策略学习当作扩展问题而非表示问题。
+
+## 专家评审
+
+**选题眼光**：真实缺口。
+
+3D策略学习社区卡了好几年——所有人都知道它应该比2D效果更好，但就是不行。
+
+这篇论文没有制造问题；它诊断了一个阻碍进展的现有失效模式。
+
+这个缺口处于关键节点：在小规模3D概念验证和生产就绪系统之间。
+
+**方法成熟度**：主要是工程洞见，不是算法创新。
+
+组件（transformer、diffusion、点云编码器）都是现成的。
+
+贡献在于识别什么坏了并修复它——不光鲜但有价值。
+
+BatchNorm诊断是聪明的侦探工作。
+
+增强策略事后看来显而易见，但显然先前工作没意识到。
+
+没有被忽略的更简单方法；论文系统地消融了每个组件。
+
+**实验诚意**：基线公平——他们与已发表的3D方法（PerAct、3D-DP）和强2D方法（RVT）比较。
+
+数字站得住：在两个基准（RLBench、CALVIN）的多个任务上持续改进。
+
+一个警示：论文没报告实际推理时间。
+
+Diffusion解码器很慢；实践中这代价多大？消融很彻底，但我想看失败案例分析——R3D什么时候还是会失败？
+
+**写作功力**：诊断部分（第3节）很出色——清晰的问题识别和证据。
+
+相关工作太长且防御性强。
+
+第4.2节（架构细节）把关键信息埋在密集段落里；一张比较设计选择的表会有帮助。
+
+结果部分先堆数字，对模型学到了什么的定性分析不够。
+
+重写第5节，先讲失败模式和学到的行为，再用数字支撑，会把论文从"我们得到了更好结果"提升到"我们现在理解为什么3D策略有效了"。
+
+**判决**：弱接收——解决了阻碍领域的真实问题，但解决方案更像工程配方而非科学洞见。
+
+对实践者价值高；智识贡献中等。
+
+## 要点总结
+
+**偷走增强策略**：如果你在做任何机器人的3D学习，实现他们的增强管线（SO(3)旋转、点dropout、坐标抖动）。
+
+简单得尴尬，显然所有人都忘了做。
+
+关键：在世界坐标系增强，不是相机坐标系。
+
+**检查你的归一化层**：如果你在任何序列决策模型中使用BatchNorm（不只是机器人——这适用于时间序列、RL、任何批次组成重要的地方），你可能在引入隐藏依赖。
+
+换成LayerNorm或GroupNorm。
+
+论文提供了清晰证据这很重要。
+
+**用Diffusion处理多模态输出**：如果你的任务有多个有效解，而你在用回归（MSE损失），你在平均模态并得到垃圾。
+
+Diffusion对单模态问题是过度设计，但对多模态问题必不可少。
+
+论文展示了这在机器人规模上有效；技术可迁移到任何有动作歧义的领域。
+
+**预训练重要，但不是你想的那样**：论文显示Point-MAE预训练有帮助，但不是戏剧性的。
+
+更大的收益是让你能用预训练模型的架构选择（LayerNorm实现稳定训练）。
+
+别假设预训练是魔法子弹；先修复你的训练配方。
+
+:::
