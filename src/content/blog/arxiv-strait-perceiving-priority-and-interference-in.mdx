@@ -1,0 +1,265 @@
+---
+title:
+  en: "Strait: Priority-Aware ML Inference Serving Through Contention Modeling"
+  zh: "Strait：通过竞争建模实现优先级感知的机器学习推理服务"
+description:
+  en: "A GPU inference serving system that models data transfer contention and kernel interference to improve deadline satisfaction for high-priority tasks under heavy load."
+  zh: "一个通过建模数据传输竞争和内核干扰来提升高负载下高优先级任务截止时间满足率的 GPU 推理服务系统。"
+date: 2026-05-01
+tags: ["arxiv", "ai", "cs.lg"]
+image: "/arxiv-visuals/arxiv-strait-perceiving-priority-and-interference-in.png"
+---
+
+![Concept animation](/arxiv-visuals/strait-perceiving-priority-and-interference-in/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2604.28175](https://arxiv.org/abs/2604.28175)
+**Authors**: Haidong Zhao, Nikolaos Georgantas
+**Categories**: cs.LG
+
+## The Gap
+
+Existing ML inference serving systems like TensorFlow Serving, TorchServe, and Triton handle request scheduling across GPUs but treat all requests equally. When you have dual-priority traffic (urgent user-facing requests mixed with batch analytics), these systems lack two critical capabilities: accurate latency prediction when multiple requests compete for GPU resources, and priority-aware scheduling that protects high-priority deadlines. Prior work either ignores interference effects during concurrent execution or relies on software preemption (context switching), which introduces overhead and fairness issues.
+
+```
+Problem: High-priority requests miss deadlines under GPU contention
+   |
+   v
+Assumption: Interference is predictable + priority can guide scheduling
+   |
+   v
+Method: Model data transfer contention + adaptive kernel interference prediction
+   |                                    + priority-aware scheduler
+   v
+Evidence: 1.02-11.18pp fewer deadline violations for high-priority tasks
+   |
+   v
+Conclusion: Contention modeling enables better priority differentiation than preemption
+```
+
+## The Increment
+
+**One sentence**: Before Strait, inference servers scheduled blindly under contention; after Strait, they predict interference and schedule accordingly to protect priority deadlines.
+
+### Core Mechanism
+
+Strait has three components working in sequence. First, a **contention-aware data transfer model** tracks PCIe bandwidth usage and predicts delays when multiple requests transfer data simultaneously between CPU and GPU. Second, an **adaptive kernel interference predictor** estimates how much slower a GPU kernel runs when sharing the GPU with other kernels—this uses a lightweight profiling phase to build a model, then updates predictions online as actual interference is observed. Third, a **priority-aware scheduler** uses these latency predictions to decide which requests to admit and when to launch them, prioritizing high-priority requests when resources are tight.
+
+```
+Request arrives
+   |
+   v
+[Contention Model] --predicts data transfer delay--> Estimated latency
+   |                                                        |
+   v                                                        v
+[Interference Model] --predicts kernel slowdown--> Adjusted latency
+   |                                                        |
+   v                                                        v
+[Scheduler] --admits/rejects based on priority + deadline--> GPU execution
+```
+
+Think of Strait like an airport managing two types of flights: commercial (high-priority) and cargo (low-priority). Most airports just queue planes first-come-first-serve, causing delays when runways get congested. Strait is like an air traffic controller who: (1) predicts taxi time based on current runway traffic (contention model), (2) estimates how much longer takeoff takes when multiple planes use the runway simultaneously (interference model), and (3) holds cargo flights on the ground when commercial flights risk missing their departure windows (priority scheduler). The controller doesn't stop a plane mid-takeoff (no preemption)—instead, it makes smarter admission decisions upfront.
+
+### Key Concepts
+
+- **Kernel interference**: When multiple GPU kernels execute concurrently, they compete for compute units, memory bandwidth, and caches, causing each kernel to run slower than it would in isolation. The slowdown isn't uniform—it depends on which kernels are paired and their resource usage patterns. Strait measures this by profiling kernel pairs offline, then adapts the model online as it observes actual execution times. For example, two memory-intensive kernels might slow each other down by 40%, while a compute-bound kernel paired with a memory-bound one might only see 10% slowdown.
+
+- **Contention-aware data transfer**: PCIe bandwidth is shared between all data transfers happening at the same time. If three requests each need to transfer 100MB from CPU to GPU, and PCIe bandwidth is 16GB/s, naive estimation would predict 6.25ms per transfer. But if all three transfer simultaneously, they share the bandwidth, so each takes ~18.75ms. Strait tracks active transfers and adjusts predictions accordingly, avoiding the optimistic bias that causes deadline misses.
+
+- **Priority-aware admission control**: Instead of accepting all requests and hoping for the best, Strait predicts whether a new request can meet its deadline given current GPU load. For low-priority requests, it admits them only if there's slack. For high-priority requests, it may reject low-priority requests already queued to make room. This is fundamentally different from preemption (interrupting running tasks) because it makes decisions before execution starts, avoiding the overhead of context switching.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+Request queue (FIFO)                 Request queue (priority-sorted)
+   |                                    |
+   v                                    v
+Scheduler (blind to contention)      Contention predictor
+   |                                    |
+   v                                    v
+GPU (concurrent execution)           Interference predictor
+   |                                    |
+   v                                    v
+Measure actual latency               Priority-aware scheduler
+   |                                    |
+   v                                    v
+React to deadline misses             GPU (controlled concurrency)
+```
+
+From reactive scheduling to predictive admission control, the core shift is moving the intelligence from post-execution measurement to pre-execution estimation.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. On-premises deployments often mix latency-sensitive and batch workloads on shared GPU clusters, and existing systems genuinely struggle with priority differentiation. The problem sits at the intersection of systems and ML, which is currently active territory.
+
+**Method maturity**: Solid engineering rather than algorithmic novelty. The contention model is straightforward queuing theory, and the interference predictor is a simple regression model updated online. The insight is recognizing that these two sources of unpredictability (data transfer + kernel execution) need separate modeling. No simpler approach is being overlooked—this is the right level of complexity for the problem.
+
+**Experimental integrity**: Baselines are fair (compares against Clockwork, a strong prior system, and software preemption). The 1.02-11.18pp improvement range is honest reporting—shows the method works better in some scenarios than others. One weakness: experiments use synthetic workloads with fixed priority ratios. Real deployments have bursty, unpredictable priority distributions, and it's unclear how Strait adapts when the workload shifts suddenly.
+
+**Writing quality**: The paper front-loads motivation well but buries implementation details. Section 4 (system design) would benefit from a clearer separation between offline profiling and online adaptation—readers have to piece together the workflow from scattered paragraphs. The evaluation section is thorough but could use a failure case analysis: when does Strait's prediction model break down?
+
+**Verdict**: weak accept — Solves a real problem with practical engineering, but the contribution is incremental rather than transformative.
+
+## Takeaways
+
+Practitioners building multi-tenant GPU systems can steal two ideas: (1) Model data transfer and compute interference separately—they have different characteristics and need different prediction strategies. (2) Admission control beats preemption for priority differentiation when tasks are short-lived (inference requests). Preemption makes sense for long-running training jobs, but for inference, the overhead of context switching often exceeds the benefit. If you're building a serving system, invest in better latency prediction rather than fancier preemption mechanisms.
+:::
+
+:::zh
+**论文**: [2604.28175](https://arxiv.org/abs/2604.28175)
+**作者**: Haidong Zhao, Nikolaos Georgantas
+**分类**: cs.LG
+
+## 缺口
+
+现有的机器学习推理服务系统如 TensorFlow Serving、TorchServe 和 Triton 能够跨 GPU 调度请求，但对所有请求一视同仁。
+
+当你有双优先级流量（紧急的面向用户请求混合批量分析任务）时，这些系统缺少两个关键能力：多个请求竞争 GPU 资源时的准确延迟预测，以及保护高优先级截止时间的优先级感知调度。
+
+先前工作要么忽略并发执行时的干扰效应，要么依赖软件抢占（上下文切换），这会引入开销和公平性问题。
+
+```
+问题：GPU 竞争下高优先级请求错过截止时间
+   |
+   v
+假设：干扰可预测 + 优先级可指导调度
+   |
+   v
+方法：建模数据传输竞争 + 自适应内核干扰预测
+   |                      + 优先级感知调度器
+   v
+证据：高优先级任务截止时间违反减少 1.02-11.18 个百分点
+   |
+   v
+结论：竞争建模比抢占更好地实现优先级区分
+```
+
+## 增量
+
+**一句话**: Strait 之前，推理服务器在竞争下盲目调度；Strait 之后，它们预测干扰并据此调度以保护优先级截止时间。
+
+### 核心机制
+
+Strait 有三个按顺序工作的组件。
+
+首先，**竞争感知数据传输模型**跟踪 PCIe 带宽使用情况，预测多个请求同时在 CPU 和 GPU 之间传输数据时的延迟。
+
+其次，**自适应内核干扰预测器**估计 GPU 内核与其他内核共享 GPU 时运行速度会慢多少——这使用轻量级分析阶段构建模型，然后在观察到实际干扰时在线更新预测。
+
+第三，**优先级感知调度器**使用这些延迟预测来决定接受哪些请求以及何时启动它们，在资源紧张时优先处理高优先级请求。
+
+```
+请求到达
+   |
+   v
+[竞争模型] --预测数据传输延迟--> 估计延迟
+   |                                  |
+   v                                  v
+[干扰模型] --预测内核减速--> 调整后延迟
+   |                              |
+   v                              v
+[调度器] --基于优先级+截止时间接受/拒绝--> GPU 执行
+```
+
+把 Strait 想象成管理两类航班的机场：商业航班（高优先级）和货运航班（低优先级）。
+
+大多数机场只是按先来先服务排队飞机，导致跑道拥堵时延误。
+
+Strait 就像一个空中交通管制员：(1) 根据当前跑道流量预测滑行时间（竞争模型），(2) 估计多架飞机同时使用跑道时起飞需要多长时间（干扰模型），(3) 当商业航班有错过起飞窗口的风险时，让货运航班在地面等待（优先级调度器）。
+
+管制员不会在飞机起飞途中叫停（无抢占）——而是预先做出更明智的准入决策。
+
+### 关键概念
+
+- **内核干扰**：当多个 GPU 内核并发执行时，它们竞争计算单元、内存带宽和缓存，导致每个内核运行速度比单独运行时慢。
+
+减速不是均匀的——取决于哪些内核配对以及它们的资源使用模式。
+
+Strait 通过离线分析内核对来测量这一点，然后在观察到实际执行时间时在线调整模型。
+
+例如，两个内存密集型内核可能使彼此减速 40%，而计算密集型内核与内存密集型内核配对可能只看到 10% 的减速。
+
+- **竞争感知数据传输**：PCIe 带宽在同时发生的所有数据传输之间共享。
+
+如果三个请求各需要从 CPU 向 GPU 传输 100MB，PCIe 带宽为 16GB/s，朴素估计会预测每次传输 6.25ms。
+
+但如果三个同时传输，它们共享带宽，所以每个需要约 18.75ms。
+
+Strait 跟踪活跃传输并相应调整预测，避免导致截止时间错过的乐观偏差。
+
+- **优先级感知准入控制**：Strait 不是接受所有请求并寄希望于最好的结果，而是预测新请求在当前 GPU 负载下能否满足其截止时间。
+
+对于低优先级请求，只有在有空闲时才接受它们。
+
+对于高优先级请求，可能会拒绝已排队的低优先级请求以腾出空间。
+
+这与抢占（中断正在运行的任务）根本不同，因为它在执行开始前做出决策，避免了上下文切换的开销。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+
+请求队列（FIFO）                  请求队列（优先级排序）
+   |                                 |
+   v                                 v
+调度器（对竞争盲目）              竞争预测器
+   |                                 |
+   v                                 v
+GPU（并发执行）                   干扰预测器
+   |                                 |
+   v                                 v
+测量实际延迟                      优先级感知调度器
+   |                                 |
+   v                                 v
+对截止时间错过做出反应            GPU（受控并发）
+```
+
+从反应式调度到预测式准入控制，核心转变是将智能从执行后测量转移到执行前估计。
+
+## 专家评审
+
+**选题眼光**：真实缺口。
+
+本地部署经常在共享 GPU 集群上混合延迟敏感和批处理工作负载，现有系统确实在优先级区分上挣扎。
+
+问题位于系统和机器学习的交叉点，这是当前活跃的领域。
+
+**方法成熟度**：扎实的工程而非算法创新。
+
+竞争模型是直接的排队论，干扰预测器是在线更新的简单回归模型。
+
+洞察在于认识到这两个不可预测性来源（数据传输 + 内核执行）需要分别建模。
+
+没有被忽略的更简单方法——这是问题的正确复杂度级别。
+
+**实验诚意**：基线公平（与 Clockwork 这一强大的先前系统以及软件抢占进行比较）。
+
+1.02-11.18 个百分点的改进范围是诚实的报告——显示方法在某些场景下比其他场景效果更好。
+
+一个弱点：实验使用具有固定优先级比率的合成工作负载。
+
+真实部署具有突发的、不可预测的优先级分布，当工作负载突然变化时 Strait 如何适应尚不清楚。
+
+**写作功力**：论文前置动机做得好，但埋没了实现细节。
+
+第 4 节（系统设计）将受益于更清晰地分离离线分析和在线适应——读者必须从分散的段落中拼凑工作流程。
+
+评估部分很全面，但可以使用失败案例分析：Strait 的预测模型何时会崩溃？
+
+**判决**：弱接收 — 用实用工程解决真实问题，但贡献是渐进式而非变革性的。
+
+## 要点总结
+
+构建多租户 GPU 系统的实践者可以偷走两个想法：(1) 分别建模数据传输和计算干扰——它们具有不同的特征，需要不同的预测策略。
+
+(2) 对于短期任务（推理请求），准入控制在优先级区分上胜过抢占。
+
+抢占对长期运行的训练作业有意义，但对于推理，上下文切换的开销通常超过收益。
+
+如果你正在构建服务系统，投资于更好的延迟预测而不是更花哨的抢占机制。
+:::
