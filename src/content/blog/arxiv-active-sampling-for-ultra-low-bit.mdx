@@ -1,0 +1,386 @@
+---
+title:
+  en: "ActDiff-VC: Compressing Video to Almost Nothing by Teaching Diffusion Models to Hallucinate Wisely"
+  zh: "ActDiff-VC：通过教扩散模型「明智幻觉」将视频压缩到极致"
+description:
+  en: "A diffusion-based video codec that achieves ultra-low bitrates by transmitting only keyframes and sparse point trajectories, then hallucinating the rest with perceptual quality."
+  zh: "一种基于扩散模型的视频编解码器，仅传输关键帧和稀疏点轨迹就能达到超低码率，然后用感知质量「幻觉」出其余内容。"
+date: 2026-05-05
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2605.02849](https://arxiv.org/abs/2605.02849)
+**Authors**: Amirhosein Javadi, Shirin Saeedi Bidokhti, Tara Javidi
+**Categories**: cs.CV
+
+## The Gap
+
+Traditional video codecs (H.264, H.265) hit a wall below 0.1 bpp — they produce blocky, blurry mush. Learned codecs (neural compression) improve perceptual quality but still struggle under extreme rate constraints. Recent diffusion-based approaches can hallucinate plausible content, but they lack a principled way to control what gets hallucinated using minimal transmitted data. The core tension: you need rich conditioning signals to guide generation, but you have almost no bits to spare.
+
+Prior work either transmits dense features (too expensive) or uses fixed keyframe intervals (wastes bits on static scenes, starves dynamic ones). No one has solved: how do you adaptively decide what minimal information to send, and how do you make a diffusion model reconstruct video from that sparse signal alone?
+
+```
+Problem: Ultra-low bitrate video is perceptually broken
+   |
+   v
+Assumption: Diffusion models can hallucinate plausible content
+            if given the right sparse conditioning
+   |
+   v
+Method: Adaptive keyframe selection + sparse point trajectories
+        -> feed into conditional diffusion decoder
+   |
+   v
+Evidence: 64.6% bitrate reduction at matched perceptual quality
+          vs. learned codecs (UVG, MCL-JCV benchmarks)
+   |
+   v
+Conclusion: Content-adaptive conditioning enables practical
+            diffusion-based video compression at <0.1 bpp
+```
+
+## The Increment
+
+**One sentence**: Before this paper, diffusion-based video compression required dense conditioning signals that defeated the purpose of compression; after, you can compress video to keyframes + sparse trajectories and still get perceptually plausible reconstruction.
+
+### Core Mechanism
+
+ActDiff-VC operates in three stages. First, it partitions the video into variable-length segments based on content complexity — static scenes get longer segments (fewer keyframes), dynamic scenes get shorter ones. Second, for each segment, it selects a keyframe and tracks a small set of salient points across frames, encoding their trajectories. Third, it transmits only the keyframe and trajectory data, then uses a conditional diffusion model to synthesize the missing frames.
+
+The diffusion decoder is conditioned on two signals: the keyframe (provides appearance) and the point trajectories (provide motion). The trajectories are sparse — typically 50-200 points per frame — but they capture the dominant motion patterns. The decoder learns to interpolate plausible content between these sparse constraints, leveraging the diffusion prior's ability to generate realistic textures and structures.
+
+Two adaptive mechanisms make this work. Content-adaptive keyframe selection monitors scene complexity and inserts keyframes only when the current segment's motion exceeds a threshold. Budget-aware trajectory selection ranks points by saliency (using optical flow magnitude and spatial distribution) and transmits only the top-k points that fit within the rate budget. Together, these mechanisms allocate bits where they matter most.
+
+```
+Input Video
+    |
+    v
+[Segment Partitioner] ---> variable-length segments
+    |                      (adaptive to content)
+    v
+[Keyframe Selector] -----> transmit keyframe (JPEG/learned)
+    |
+    v
+[Point Tracker] ---------> track salient points
+    |
+    v
+[Trajectory Encoder] ----> compress trajectories (entropy coding)
+    |
+    v
+    ========== TRANSMISSION (ultra-low bitrate) ==========
+    |
+    v
+[Conditional Diffusion Decoder]
+    ^       ^
+    |       |
+keyframe  trajectories
+    |
+    v
+Reconstructed Video
+```
+
+Think of it like animating a cartoon with keyframes and motion paths. A traditional codec is like filming every frame with a camera — you capture everything, but the file is huge. ActDiff-VC is like an animator's workflow: you draw keyframes (the important poses), sketch motion paths for key features (the trajectories), then let a skilled artist (the diffusion model) fill in the in-between frames. The artist has seen thousands of videos during training, so it knows how fabric wrinkles, how faces move, how shadows fall. You don't need to transmit every pixel — just enough constraints to guide the artist's hand. The magic is in choosing which keyframes and which motion paths are essential, and trusting the artist to hallucinate the rest plausibly.
+
+### Key Concepts
+
+- **Conditional Diffusion Decoder**: Standard diffusion models generate images from pure noise by iteratively denoising. Conditional diffusion adds control: you inject extra information (here, keyframes and trajectories) at each denoising step, steering the generation toward content consistent with those constraints. The model learns during training to respect these conditions while still producing perceptually realistic outputs. Think of it as sculpting clay: the conditions are your armature (the skeleton), and the diffusion process fills in the flesh around it. Without conditions, you get random plausible images; with conditions, you get plausible images that match your constraints.
+
+- **Sparse Point Trajectories**: Instead of transmitting dense optical flow (which costs too many bits), ActDiff-VC tracks a small set of salient points across frames and encodes their (x, y) positions over time. These points are chosen to capture the dominant motion — corners, edges, high-texture regions. The decoder interpolates motion between these sparse samples. It's like navigating with a few landmarks instead of a detailed map: you know the river bends here, the mountain is there, and you infer the terrain in between. The key insight: human perception is forgiving of interpolation errors in low-saliency regions, so you can get away with extreme sparsity.
+
+- **Content-Adaptive Keyframe Selection**: Not all video segments need the same keyframe density. A static talking-head shot can go 60 frames without a keyframe; a fast action scene needs one every 10 frames. ActDiff-VC monitors accumulated motion (via optical flow magnitude) and inserts a keyframe when motion exceeds a threshold. This is rate-distortion optimization at the segment level: spend bits on keyframes only when the diffusion model's hallucination would drift too far from ground truth. It's like deciding when to recalibrate a compass — if you're walking straight, you can go a long time; if you're zigzagging through a forest, you need frequent checks.
+
+## Framework Shift
+
+```
+Before (learned codecs):              After (ActDiff-VC):
+
+Video --> [Encoder] --> latent        Video --> [Segment] --> keyframes
+             |          features                    |            + 
+          [Quantize]       |                   [Track Points]  trajectories
+             |             |                        |             |
+          [Entropy    <----+                   [Compress]        |
+           Coding]                                  |             |
+             |                              ========|=============|====
+          TRANSMIT                                  v             v
+             |                            [Diffusion Decoder]
+             v                                 (hallucinate
+          [Entropy                           missing frames)
+           Decoding]                               |
+             |                                     v
+          [Dequantize]                      Reconstructed Video
+             |
+          [Decoder]
+             |
+             v
+       Reconstructed Video
+
+Dense representation,                 Sparse conditioning,
+every frame encoded                   generative reconstruction
+```
+
+**One sentence**: From transmitting compressed representations of every frame to transmitting only sparse control signals and letting a generative model hallucinate the rest.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. Ultra-low-bitrate video compression (&lt;0.1 bpp) is practically important (streaming over poor networks, archival storage) but perceptually broken with traditional methods. The insight to use diffusion models as a generative prior is timely — diffusion models have matured enough to be controllable, and the field is ready for this application. The problem sits at the intersection of compression and generative modeling, which is a hot area.
+
+**Method maturity**: The core idea is elegant: adaptive keyframes + sparse trajectories as conditioning. The two adaptive mechanisms (keyframe selection, trajectory selection) are straightforward but effective. However, the paper doesn't deeply explore failure modes — what happens when point tracking fails (occlusions, fast motion)? The reliance on optical flow and point tracking is a potential brittleness. A more robust approach might use learned motion representations, but that would cost more bits. The method feels like a solid first step, not a final solution.
+
+**Experimental integrity**: Baselines are reasonable (H.265, learned codecs like DCVC, diffusion-based methods like LDMVC). The perceptual metrics (NIQE, KID, FID) are appropriate for ultra-low bitrates where pixel-level metrics (PSNR, SSIM) are meaningless. The 64.6% bitrate reduction claim is at matched NIQE, which is fair. However, the paper doesn't show user studies — perceptual quality is ultimately subjective, and automated metrics can be gamed. The benchmarks (UVG, MCL-JCV) are standard but small. I'd want to see results on more diverse content (sports, animation, low-light) before declaring victory.
+
+**Writing quality**: The abstract and introduction are clear. The method section is dense but complete. The experiments section could be stronger — the ablation studies are minimal (only one table on keyframe/trajectory selection), and there's no analysis of where the method fails. The related work section name-drops many papers but doesn't clearly position the contribution relative to concurrent diffusion-based video compression work. If I were reviewing, I'd ask for: (1) failure case analysis, (2) user study, (3) deeper ablations on trajectory sparsity vs. quality tradeoff.
+
+**Verdict**: **weak accept** — The problem is important, the method is novel and shows strong empirical results, but the evaluation could be more thorough and the failure modes need exploration. This is a solid contribution that will likely inspire follow-up work, but it's not a slam dunk.
+
+## Takeaways
+
+**Adaptive conditioning for generative models**: The idea of dynamically allocating your "conditioning budget" based on content complexity transfers beyond video compression. If you're using a generative model (diffusion, VAE, GAN) and have limited capacity to condition it (tokens, features, etc.), you can monitor when the model's prior is sufficient vs. when you need to inject more control. This applies to image editing (where to place control points), text-to-image (which regions need detailed prompts), and even LLM steering (when to provide examples vs. let the model freewheel).
+
+**Sparse trajectories as motion representation**: Point trajectories are a surprisingly compact way to encode motion. If you're building any system that needs to transmit or store motion data (animation, robotics, AR/VR), consider tracking sparse salient points instead of dense flow fields. The key is choosing the right points (high-gradient regions, corners) and trusting interpolation for the rest. This is a 10x-100x compression over dense representations.
+
+**Perceptual metrics for generative tasks**: The paper's use of NIQE, KID, FID instead of PSNR/SSIM is a reminder that pixel-level metrics are often the wrong objective for generative tasks. If your goal is perceptual quality, optimize for perceptual metrics from the start. This applies to any domain where you're generating content for human consumption (image synthesis, audio generation, text rendering).
+:::
+
+:::zh
+**论文**: [2605.02849](https://arxiv.org/abs/2605.02849)
+**作者**: Amirhosein Javadi, Shirin Saeedi Bidokhti, Tara Javidi
+**分类**: cs.CV
+
+## 缺口
+
+传统视频编解码器（H.264、H.265）在 0.1 bpp 以下就撞墙了——输出的是块状模糊的糊状物。
+
+学习型编解码器（神经压缩）改善了感知质量，但在极端码率约束下仍然吃力。
+
+最近的基于扩散的方法可以幻觉出合理的内容，但缺乏一种原则性的方法来用最少的传输数据控制幻觉内容。
+
+核心矛盾：你需要丰富的条件信号来引导生成，但你几乎没有比特可用。
+
+先前的工作要么传输密集特征（太贵），要么使用固定关键帧间隔（在静态场景浪费比特，在动态场景饿死）。
+
+没人解决过：如何自适应地决定发送什么最小信息，以及如何让扩散模型仅从那个稀疏信号重建视频？
+
+```
+问题：超低码率视频在感知上是坏的
+   |
+   v
+假设：扩散模型可以幻觉出合理内容
+      如果给予正确的稀疏条件
+   |
+   v
+方法：自适应关键帧选择 + 稀疏点轨迹
+      -> 输入条件扩散解码器
+   |
+   v
+证据：在匹配感知质量下比学习型编解码器
+      减少 64.6% 码率（UVG、MCL-JCV 基准）
+   |
+   v
+结论：内容自适应条件使基于扩散的视频压缩
+      在 <0.1 bpp 下可行
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，基于扩散的视频压缩需要密集的条件信号，这违背了压缩的目的；之后，你可以把视频压缩到关键帧 + 稀疏轨迹，仍能得到感知上合理的重建。
+
+### 核心机制
+
+ActDiff-VC 分三个阶段运作。
+
+首先，它根据内容复杂度将视频分割成可变长度的片段——静态场景得到更长的片段（更少的关键帧），动态场景得到更短的片段。
+
+其次，对于每个片段，它选择一个关键帧并跟踪一小组显著点跨帧，编码它们的轨迹。
+
+第三，它只传输关键帧和轨迹数据，然后使用条件扩散模型合成缺失的帧。
+
+扩散解码器由两个信号条件化：关键帧（提供外观）和点轨迹（提供运动）。
+
+轨迹是稀疏的——通常每帧 50-200 个点——但它们捕获了主要的运动模式。
+
+解码器学会在这些稀疏约束之间插值出合理的内容，利用扩散先验生成真实纹理和结构的能力。
+
+两个自适应机制使这个工作。
+
+内容自适应关键帧选择监控场景复杂度，仅在当前片段的运动超过阈值时插入关键帧。
+
+预算感知轨迹选择按显著性（使用光流幅度和空间分布）对点进行排序，只传输适合码率预算的前 k 个点。
+
+这些机制一起将比特分配到最重要的地方。
+
+```
+输入视频
+    |
+    v
+[片段分割器] ---> 可变长度片段
+    |             （自适应内容）
+    v
+[关键帧选择器] --> 传输关键帧（JPEG/学习型）
+    |
+    v
+[点跟踪器] ------> 跟踪显著点
+    |
+    v
+[轨迹编码器] ----> 压缩轨迹（熵编码）
+    |
+    v
+    ========== 传输（超低码率）==========
+    |
+    v
+[条件扩散解码器]
+    ^       ^
+    |       |
+关键帧  轨迹
+    |
+    v
+重建视频
+```
+
+把它想象成用关键帧和运动路径制作动画。
+
+传统编解码器就像用摄像机拍摄每一帧——你捕获了一切，但文件巨大。
+
+ActDiff-VC 就像动画师的工作流程：你画关键帧（重要的姿势），为关键特征勾勒运动路径（轨迹），然后让一个熟练的艺术家（扩散模型）填充中间帧。
+
+艺术家在训练期间看过数千个视频，所以它知道织物如何起皱，脸如何移动，阴影如何落下。
+
+你不需要传输每个像素——只需足够的约束来引导艺术家的手。
+
+魔法在于选择哪些关键帧和哪些运动路径是必需的，并相信艺术家能合理地幻觉出其余部分。
+
+### 关键概念
+
+- **条件扩散解码器**: 标准扩散模型通过迭代去噪从纯噪声生成图像。
+
+条件扩散增加了控制：你在每个去噪步骤注入额外信息（这里是关键帧和轨迹），引导生成朝向与这些约束一致的内容。
+
+模型在训练期间学会尊重这些条件，同时仍然产生感知上真实的输出。
+
+把它想象成雕刻粘土：条件是你的骨架（骨骼），扩散过程在它周围填充肉。
+
+没有条件，你得到随机的合理图像；有条件，你得到匹配你约束的合理图像。
+
+- **稀疏点轨迹**: 与其传输密集光流（成本太多比特），ActDiff-VC 跟踪一小组显著点跨帧并编码它们随时间的 (x, y) 位置。
+
+这些点被选择来捕获主要运动——角点、边缘、高纹理区域。
+
+解码器在这些稀疏样本之间插值运动。
+
+这就像用几个地标导航而不是详细地图：你知道河在这里弯曲，山在那里，你推断中间的地形。
+
+关键洞察：人类感知对低显著性区域的插值误差是宽容的，所以你可以用极端稀疏性逃脱。
+
+- **内容自适应关键帧选择**: 并非所有视频片段都需要相同的关键帧密度。
+
+静态说话头镜头可以 60 帧不用关键帧；快速动作场景每 10 帧需要一个。
+
+ActDiff-VC 监控累积运动（通过光流幅度），当运动超过阈值时插入关键帧。
+
+这是片段级别的率失真优化：仅在扩散模型的幻觉会偏离真实太远时才在关键帧上花费比特。
+
+这就像决定何时重新校准指南针——如果你直走，你可以走很长时间；如果你在森林中曲折前进，你需要频繁检查。
+
+## 框架转变
+
+```
+之前（学习型编解码器）：          之后（ActDiff-VC）：
+
+视频 --> [编码器] --> 潜在        视频 --> [分割] --> 关键帧
+             |        特征                    |          + 
+          [量化]       |                  [跟踪点]    轨迹
+             |         |                      |         |
+          [熵      <---+                  [压缩]        |
+           编码]                               |         |
+             |                          ========|=========|====
+          传输                                  v         v
+             |                        [扩散解码器]
+             v                           （幻觉
+          [熵                           缺失帧）
+           解码]                             |
+             |                               v
+          [反量化]                      重建视频
+             |
+          [解码器]
+             |
+             v
+       重建视频
+
+密集表示，                          稀疏条件，
+每帧编码                            生成式重建
+```
+
+**一句话**: 从传输每帧的压缩表示到只传输稀疏控制信号并让生成模型幻觉其余部分。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实的缺口。
+
+超低码率视频压缩（&lt;0.1 bpp）在实践中很重要（在差网络上流式传输、归档存储），但用传统方法在感知上是坏的。
+
+使用扩散模型作为生成先验的洞察是及时的——扩散模型已经成熟到可以控制，该领域已经为这个应用做好准备。
+
+问题位于压缩和生成建模的交叉点，这是一个热门领域。
+
+**方法成熟度**: 核心思想很优雅：自适应关键帧 + 稀疏轨迹作为条件。
+
+两个自适应机制（关键帧选择、轨迹选择）简单但有效。
+
+然而，论文没有深入探索失败模式——当点跟踪失败时会发生什么（遮挡、快速运动）？
+
+对光流和点跟踪的依赖是潜在的脆弱性。
+
+更稳健的方法可能使用学习的运动表示，但那会花费更多比特。
+
+方法感觉像一个坚实的第一步，而不是最终解决方案。
+
+**实验诚意**: 基线是合理的（H.265、学习型编解码器如 DCVC、基于扩散的方法如 LDMVC）。
+
+感知指标（NIQE、KID、FID）适合超低码率，其中像素级指标（PSNR、SSIM）是无意义的。
+
+64.6% 码率减少的声明是在匹配 NIQE 下，这是公平的。
+
+然而，论文没有显示用户研究——感知质量最终是主观的，自动化指标可以被操纵。
+
+基准（UVG、MCL-JCV）是标准的但很小。
+
+我想在宣布胜利之前看到更多样化内容（体育、动画、低光）的结果。
+
+**写作功力**: 摘要和引言很清楚。
+
+方法部分密集但完整。
+
+实验部分可以更强——消融研究很少（只有一个关于关键帧/轨迹选择的表），没有对方法失败位置的分析。
+
+相关工作部分提到了许多论文，但没有清楚地相对于并发的基于扩散的视频压缩工作定位贡献。
+
+如果我在审稿，我会要求：（1）失败案例分析，（2）用户研究，（3）关于轨迹稀疏性与质量权衡的更深入消融。
+
+**判决**: **弱接收** — 问题很重要，方法新颖并显示出强大的实证结果，但评估可以更彻底，失败模式需要探索。
+
+这是一个坚实的贡献，可能会激发后续工作，但不是一个确定无疑的胜利。
+
+## 要点总结
+
+**生成模型的自适应条件**: 根据内容复杂度动态分配你的"条件预算"的想法超越了视频压缩。
+
+如果你正在使用生成模型（扩散、VAE、GAN）并且有限的能力来条件化它（令牌、特征等），你可以监控何时模型的先验足够与何时你需要注入更多控制。
+
+这适用于图像编辑（在哪里放置控制点）、文本到图像（哪些区域需要详细提示）、甚至 LLM 引导（何时提供示例与让模型自由发挥）。
+
+**稀疏轨迹作为运动表示**: 点轨迹是一种令人惊讶的紧凑方式来编码运动。
+
+如果你正在构建任何需要传输或存储运动数据的系统（动画、机器人、AR/VR），考虑跟踪稀疏显著点而不是密集流场。
+
+关键是选择正确的点（高梯度区域、角点）并信任其余部分的插值。
+
+这比密集表示压缩 10 倍到 100 倍。
+
+**生成任务的感知指标**: 论文使用 NIQE、KID、FID 而不是 PSNR/SSIM 提醒我们，像素级指标通常是生成任务的错误目标。
+
+如果你的目标是感知质量，从一开始就优化感知指标。
+
+这适用于任何你为人类消费生成内容的领域（图像合成、音频生成、文本渲染）。
+
+:::
