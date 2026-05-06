@@ -201,8 +201,8 @@ def call_llm(client, model, provider, messages, temperature=0.5, max_tokens=4096
                 return response.choices[0].message.content
         except Exception as e:
             err_str = str(e)
-            # Retry on transient errors (timeouts, server errors, rate limits)
-            is_transient = any(code in err_str for code in ["524", "529", "500", "502", "503", "429", "overloaded"])
+            # Retry on transient errors (timeouts, server errors, rate limits, 404s)
+            is_transient = any(code in err_str for code in ["404", "524", "529", "500", "502", "503", "429", "overloaded"])
             if is_transient and attempt < retries - 1:
                 wait = 2 ** (attempt + 1)
                 print(f"  LLM call failed (attempt {attempt + 1}/{retries}): {err_str[:120]}")
