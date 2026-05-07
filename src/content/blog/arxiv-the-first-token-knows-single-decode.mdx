@@ -1,0 +1,346 @@
+---
+title:
+  en: "First-Token Confidence: A Zero-Cost Hallucination Detector"
+  zh: "首词置信度：零成本的幻觉检测器"
+description:
+  en: "A single greedy decode's first token entropy matches multi-sample semantic consistency for detecting LLM hallucinations, eliminating the need for expensive repeated sampling."
+  zh: "单次贪婪解码的首词熵即可匹配多样本语义一致性的幻觉检测效果，无需昂贵的重复采样。"
+date: 2026-05-07
+tags: ["arxiv", "ai", "cs.cl", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2605.05166](https://arxiv.org/abs/2605.05166)
+**Authors**: Mina Gabriel
+**Categories**: cs.CL, cs.AI
+
+## The Gap
+
+Self-consistency detects hallucinations by generating multiple answers and checking agreement, but costs N×decode_time. Semantic self-consistency improves accuracy by clustering answers by meaning rather than surface form, but adds both sampling overhead and external NLI model inference. The field assumes uncertainty estimation requires multiple samples.
+
+This paper asks: is the multi-sample signal already present in a single decode?
+
+```
+Problem: Hallucination detection is expensive
+   |
+   v
+Assumption: Uncertainty requires multiple samples
+   |
+   v
+Method: Extract entropy from first answer token (phi_first)
+   |
+   v
+Evidence: AUROC 0.820 vs 0.793 (semantic) on 3 models × 2 benchmarks
+   |
+   v
+Conclusion: First-token distribution captures most uncertainty signal
+```
+
+## The Increment
+
+**One sentence**: Before this paper, hallucination detection required generating multiple answers; after, a single decode's first token entropy achieves comparable accuracy at 1/N the cost.
+
+### Core Mechanism
+
+The method computes phi_first from a single greedy decode. At the first content-bearing answer token (skipping "The answer is" preambles), extract the top-K logits, normalize them into a probability distribution, and compute entropy. High entropy = model is uncertain = likely hallucination. Low entropy = model is confident = likely correct.
+
+The key insight: the model's uncertainty about what word to start the answer with correlates strongly with whether the entire answer will be factually correct. If the model hesitates between "Paris", "London", "Berlin" at token 1, the full answer is probably wrong. If it confidently outputs "Paris" with 0.95 probability, the answer is likely right.
+
+```
+Input: "What is the capital of France?"
+   |
+   v
+Greedy decode: "The answer is Paris."
+   |
+   v
+Extract first content token: "Paris"
+   |
+   v
+Top-K logits at that position: [Paris: 0.85, Lyon: 0.08, ...]
+   |
+   v
+Normalize & compute entropy: H = -sum(p * log(p))
+   |
+   v
+phi_first = 1 - (H / H_max)  [normalized to [0,1]]
+   |
+   v
+Threshold: phi_first < 0.5 → flag as hallucination
+```
+
+Think of the model as a student taking a multiple-choice test. When the student immediately circles an answer without hesitation, they usually know it. When they hover between options, erasing and rewriting, they're guessing. You don't need to watch them take the test five times to know they're uncertain—their first moment of hesitation tells you everything. phi_first is that hesitation, quantified. The model's probability distribution at the first answer token is the "hover time" over the answer choices. High entropy = long hover = guessing. Low entropy = instant circle = knows it.
+
+### Key Concepts
+
+- **Entropy as uncertainty**: Entropy measures how "spread out" a probability distribution is. If a model assigns 0.99 to one token and 0.01 to all others, entropy is near zero—the model is certain. If it assigns 0.25 to four tokens, entropy is high—the model is confused. Formally: H = -Σ p(x) log p(x). Imagine a bag of colored marbles. If 99 are red and 1 is blue, you're almost certain to draw red (low entropy). If 25 are red, 25 blue, 25 green, 25 yellow, you have no idea what you'll draw (high entropy). The model's logits are the marble counts; entropy is your uncertainty about the draw.
+
+- **First-token privilege**: Not all tokens are equal. The first content token sets the trajectory for the entire answer. If the model starts with the wrong entity name, the rest of the answer will rationalize that error. If it starts correctly, the rest usually follows. This is why first-token entropy is diagnostic: it's the fork in the road where the model commits to a factual claim. Later tokens are mostly elaboration.
+
+- **Greedy decode sufficiency**: Sampling-based methods assume you need to explore the model's uncertainty by generating multiple diverse outputs. But the uncertainty is already encoded in the logit distribution. Greedy decode (always pick the highest-probability token) gives you one path, but the logits at each step show you all the paths the model considered. phi_first reads those logits directly instead of sampling from them repeatedly.
+
+## Framework Shift
+
+```
+Before (semantic self-consistency):        After (phi_first):
+
+Generate N samples (N=5-20)                Generate 1 greedy decode
+   |                                          |
+   v                                          v
+Cluster by semantic similarity             Extract first answer token
+(requires NLI model)                          |
+   |                                          v
+   v                                       Read top-K logits
+Measure agreement within clusters             |
+   |                                          v
+   v                                       Compute entropy
+Output: agreement score                       |
+                                              v
+Cost: N × decode + NLI inference          Output: phi_first
+
+                                          Cost: 1 × decode
+```
+
+From "sample the space to estimate uncertainty" to "read the uncertainty directly from the distribution."
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Hallucination detection is a bottleneck in production LLM systems, and current methods (self-consistency, semantic clustering) are too expensive for real-time use. The paper targets a practical pain point, not an academic curiosity.
+
+**Method maturity**: Elegant simplicity. The method is almost trivial—compute entropy at one token—but the insight is non-obvious: that first-token entropy is sufficient. The paper could have explored **why* first-token entropy works (does the model front-load uncertainty? is this an artifact of instruction tuning?), but the empirical result is strong enough to stand alone. No simpler baseline is being overlooked; this *is* the simplest baseline.
+
+**Experimental integrity**: Solid. Three models (Llama-2-7B-chat, Mistral-7B-Instruct-v0.2, Llama-3-8B-Instruct), two benchmarks (TriviaQA, NQ-Open), fair comparison to semantic self-consistency (the current best method). AUROC differences are modest but consistent. The subsumption test (correlation between phi_first and semantic agreement) is the right analysis—it shows phi_first isn't just lucky, it's capturing the same signal. One weakness: all models are 7-8B instruction-tuned. Does this hold for base models? For larger models (70B+)? Unknown.
+
+**Writing quality**: The abstract and intro are crisp. The method section is almost too brief—Figure 1 does heavy lifting, but the text could walk through an example. The results section is thorough. The related work section is perfunctory (2 paragraphs). If I were revising, I'd expand the analysis section: **why* does first-token entropy work? Is it because instruction tuning teaches models to "commit" early? Is it specific to factual QA, or does it generalize to reasoning tasks?
+
+**Verdict**: **strong accept** — Practical, simple, well-executed. This should become the default baseline for hallucination detection.
+
+## Takeaways
+
+1. **Check first-token entropy before sampling**: If you're building a hallucination detector, compute phi_first first. If it's already giving you AUROC > 0.80, you may not need the complexity of multi-sample methods.
+
+2. **Logits are underused**: Most practitioners treat LLMs as text-in-text-out black boxes. This paper shows that reading the logits directly (not just the sampled tokens) gives you rich signal for free. Apply this to other tasks: Can logit entropy at key decision points predict reasoning errors? Can it detect out-of-distribution inputs?
+
+3. **First-token privilege is real**: In your own prompts, pay attention to how the model starts its answer. If you're doing chain-of-thought, the first reasoning step is disproportionately important. If the model hedges or equivocates at the start ("It could be X, but also Y..."), the rest of the reasoning is probably shaky.
+
+4. **Simplicity as a research strategy**: This paper didn't invent a new architecture or training method. It just measured something obvious (first-token entropy) that no one had systematically tested. Sometimes the best research is noticing what everyone assumed away.
+:::
+
+:::zh
+**论文**: [2605.05166](https://arxiv.org/abs/2605.05166)
+**作者**: Mina Gabriel
+**分类**: cs.CL, cs.AI
+
+## 缺口
+
+自洽性方法通过生成多个答案并检查一致性来检测幻觉,但成本是 N×解码时间。
+
+语义自洽性通过按语义而非表面形式聚类答案来提高准确率,但既增加了采样开销,又需要外部 NLI 模型推理。
+
+该领域默认假设：不确定性估计需要多个样本。
+
+本文追问：多样本信号是否已经存在于单次解码中?
+
+```
+问题:幻觉检测成本高昂
+   |
+   v
+假设:不确定性需要多样本
+   |
+   v
+方法:从首个答案词元提取熵(phi_first)
+   |
+   v
+证据:AUROC 0.820 vs 0.793(语义) 在3模型×2基准上
+   |
+   v
+结论:首词元分布已捕获大部分不确定性信号
+```
+
+## 增量
+
+**一句话**: 本文之前,幻觉检测需要生成多个答案;本文之后,单次解码的首词元熵即可达到相当准确率,成本降至 1/N。
+
+### 核心机制
+
+该方法从单次贪婪解码计算 phi_first。
+
+在首个实质性答案词元处(跳过"答案是"之类的前导词),提取 top-K logits,归一化为概率分布,计算熵。
+
+高熵=模型不确定=可能幻觉。
+
+低熵=模型自信=可能正确。
+
+关键洞察：模型对答案开头用什么词的不确定性,与整个答案是否事实正确高度相关。
+
+如果模型在词元1处在"巴黎""伦敦""柏林"之间犹豫,完整答案很可能错误。
+
+如果它以0.95概率自信输出"巴黎",答案很可能正确。
+
+```
+输入:"法国首都是什么?"
+   |
+   v
+贪婪解码:"答案是巴黎。"
+   |
+   v
+提取首个内容词元:"巴黎"
+   |
+   v
+该位置的 top-K logits:[巴黎:0.85, 里昂:0.08, ...]
+   |
+   v
+归一化并计算熵:H = -sum(p * log(p))
+   |
+   v
+phi_first = 1 - (H / H_max)  [归一化到[0,1]]
+   |
+   v
+阈值:phi_first < 0.5 → 标记为幻觉
+```
+
+把模型想象成做选择题的学生。
+
+学生毫不犹豫地立刻圈选答案时,通常是真的知道。
+
+当他们在选项间徘徊,涂涂改改时,是在猜测。
+
+你不需要看他们做五遍题才知道他们不确定——首次犹豫就说明了一切。
+
+phi_first 就是这种犹豫的量化。
+
+模型在首个答案词元处的概率分布,就是在答案选项上的"悬停时间"。
+
+高熵=长时间悬停=猜测。
+
+低熵=瞬间圈选=知道答案。
+
+### 关键概念
+
+- **熵即不确定性**: 熵衡量概率分布的"分散程度"。
+
+如果模型给一个词元分配0.99,给其他所有词元分配0.01,熵接近零——模型确定。
+
+如果它给四个词元各分配0.25,熵很高——模型困惑。
+
+形式化： H = -Σ p(x) log p(x)。
+
+想象一袋彩色弹珠。
+
+如果99颗是红色,1颗是蓝色,你几乎确定会抽到红色(低熵)。
+
+如果25颗红色,25颗蓝色,25颗绿色,25颗黄色,你完全不知道会抽到什么(高熵)。
+
+模型的 logits 是弹珠数量;熵是你对抽取结果的不确定性。
+
+- **首词元特权**: 并非所有词元地位相等。
+
+首个内容词元为整个答案设定了轨迹。
+
+如果模型以错误的实体名开头,后续答案会为这个错误辩护。
+
+如果开头正确,后续通常也会正确。
+
+这就是首词元熵具有诊断性的原因：它是模型承诺事实主张的分岔路口。
+
+后续词元大多是阐述。
+
+- **贪婪解码充分性**: 基于采样的方法假设你需要通过生成多个不同输出来探索模型的不确定性。
+
+但不确定性已经编码在 logit 分布中。
+
+贪婪解码(总是选择最高概率词元)给你一条路径,但每步的 logits 显示了模型考虑的所有路径。
+
+phi_first 直接读取这些 logits,而非反复从中采样。
+
+## 框架转变
+
+```
+之前(语义自洽性):                  之后(phi_first):
+
+生成 N 个样本(N=5-20)              生成1次贪婪解码
+   |                                  |
+   v                                  v
+按语义相似度聚类                    提取首个答案词元
+(需要 NLI 模型)                       |
+   |                                  v
+   v                               读取 top-K logits
+测量簇内一致性                         |
+   |                                  v
+   v                               计算熵
+输出:一致性分数                        |
+                                      v
+成本:N × 解码 + NLI 推理           输出:phi_first
+
+                                  成本:1 × 解码
+```
+
+从"采样空间以估计不确定性"到"直接从分布读取不确定性"。
+
+## 专家评审
+
+**选题眼光**: 真实缺口。
+
+幻觉检测是生产环境 LLM 系统的瓶颈,现有方法(自洽性、语义聚类)对实时使用来说太昂贵。
+
+论文针对实际痛点,而非学术好奇心。
+
+**方法成熟度**: 优雅的简洁性。
+
+方法几乎平凡——在一个词元处计算熵——但洞察非显而易见：首词元熵就足够了。
+
+论文本可探索*为什么*首词元熵有效(模型是否前置不确定性?这是指令微调的产物吗?),但实证结果足够强,可以独立成立。
+
+没有被忽略的更简单基线;这*就是*最简单的基线。
+
+**实验诚意**: 扎实。
+
+三个模型(Llama-2-7B-chat, Mistral-7B-Instruct-v0.2, Llama-3-8B-Instruct),两个基准(TriviaQA, NQ-Open),与语义自洽性(当前最佳方法)公平比较。
+
+AUROC 差异适度但一致。
+
+包容性测试(phi_first 与语义一致性的相关性)是正确的分析——它表明 phi_first 不只是运气好,而是捕获了相同信号。
+
+一个弱点：所有模型都是7-8B指令微调模型。
+
+这对基础模型成立吗?对更大模型(70B+)成立吗?未知。
+
+**写作功力**: 摘要和引言简洁。
+
+方法部分几乎过于简短——图1承担了重任,但文本可以走查一个例子。
+
+结果部分详尽。
+
+相关工作部分敷衍(2段)。
+
+如果我修订,会扩展分析部分：*为什么*首词元熵有效?是因为指令微调教会模型"早承诺"吗?这特定于事实问答,还是泛化到推理任务?
+
+**判决**: **强接收** — 实用、简单、执行良好。
+
+这应该成为幻觉检测的默认基线。
+
+## 要点总结
+
+1. **采样前先检查首词元熵**: 如果你在构建幻觉检测器,先计算 phi_first。
+
+如果它已经给你 AUROC > 0.80,你可能不需要多样本方法的复杂性。
+
+2. **Logits 被低估了**: 大多数实践者把 LLM 当作文本进文本出的黑盒。
+
+本文表明直接读取 logits(而非仅采样的词元)能免费给你丰富信号。
+
+应用到其他任务：关键决策点的 logit 熵能预测推理错误吗?能检测分布外输入吗?
+
+3. **首词元特权是真实的**: 在你自己的提示中,注意模型如何开始答案。
+
+如果你在做思维链,首个推理步骤重要性不成比例。
+
+如果模型在开头犹豫或模棱两可("可能是X,但也可能是Y..."),后续推理很可能不稳。
+
+4. **简洁作为研究策略**: 本文没有发明新架构或训练方法。
+
+它只是测量了一个显而易见的东西(首词元熵),而没人系统测试过。
+
+有时最好的研究是注意到所有人都假设掉的东西。
+
+:::
