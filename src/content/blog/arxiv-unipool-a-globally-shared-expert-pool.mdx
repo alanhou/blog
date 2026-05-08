@@ -1,0 +1,398 @@
+---
+title:
+  en: "UniPool: Breaking the Per-Layer Expert Ownership Rule in Mixture-of-Experts"
+  zh: "UniPool：打破混合专家模型的逐层专家所有权规则"
+description:
+  en: "Challenges the convention that each transformer layer needs its own expert set, proposing a globally shared expert pool that reduces parameters while improving performance."
+  zh: "挑战每个 Transformer 层需要独立专家集的惯例，提出全局共享专家池，在减少参数的同时提升性能。"
+date: 2026-05-08
+tags: ["arxiv", "ai", "cs.lg", "cs.ai"]
+image: "/arxiv-visuals/unipool-a-globally-shared-expert-pool/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/unipool-a-globally-shared-expert-pool/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2605.06665](https://arxiv.org/abs/2605.06665)
+**Authors**: Minbin Huang, Han Shi, Chuanyang Zheng, Yimeng Wu, Guoxuan Chen, Xintong Yu, Yichun Yin, Hong Cheng
+**Categories**: cs.LG, cs.AI
+
+## The Gap
+
+Mixture-of-Experts (MoE) models follow a rigid allocation rule: each transformer layer owns a separate set of experts. This means if you have 32 layers and 8 experts per layer, you need 256 expert networks total. The field assumed this isolation was necessary—that each layer needs its own specialized capacity to handle different abstraction levels.
+
+But the authors ran a simple probe: they replaced learned routers in deeper layers with uniform random routing. The accuracy drop? Only 1.0-1.6 points across production models. This suggests massive redundancy—layers aren't using their exclusive expert capacity as efficiently as assumed. The gap: expert parameters scale linearly with depth, but the actual need for isolated per-layer capacity is questionable.
+
+```
+Problem: Per-layer expert ownership
+   |
+   v
+Assumption: Each layer needs isolated expert capacity
+   |
+   v
+Probe: Replace deep-layer routers with random routing
+   |
+   v
+Evidence: Only 1.0-1.6 point accuracy drop
+   |
+   v
+Conclusion: Expert capacity is redundantly allocated
+   |
+   v
+Method: Share a global expert pool across all layers
+   |
+   v
+Result: Better performance with 41.6%-66.7% fewer experts
+```
+
+## The Increment
+
+**One sentence**: Before this paper, expert parameters grew linearly with model depth because each layer owned separate experts; after, expert capacity becomes a global budget that can grow sublinearly while outperforming the linear baseline.
+
+### Core Mechanism
+
+UniPool replaces per-layer expert ownership with a single shared pool. Instead of Layer 1 having Experts 1-8, Layer 2 having Experts 9-16, etc., all layers route into the same pool of experts. Each layer still has its own learned router that decides which experts to activate, but the experts themselves are shared infrastructure.
+
+The challenge is training stability. When multiple layers compete for the same experts, you can get collapse—some experts become overused while others are ignored. UniPool addresses this with two components: (1) a pool-level auxiliary loss that balances expert utilization across the entire pool rather than per-layer, and (2) NormRouter, which provides sparse and scale-stable routing by normalizing router logits before the top-k selection.
+
+Data flows like this: a token enters a layer, the layer's router computes affinity scores for all experts in the pool, top-k experts are selected, the token is processed by those experts, and outputs are combined. The next layer repeats this process with the same expert pool but its own independent router. The pool-level loss monitors which experts are being used across all layers and penalizes imbalance.
+
+```
+Token Input
+    |
+    v
+Layer 1 Router ---> [Expert Pool: E1 E2 E3 ... En]
+    |                      ^  ^  ^
+    +----------------------+  |  |
+    |                         |  |
+    v                         |  |
+Layer 2 Router ---------------+  |
+    |                            |
+    +----------------------------+
+    |
+    v
+Layer 3 Router
+    |
+    v
+Output
+
+Pool-Level Loss: monitors expert usage across all layers
+NormRouter: normalizes logits before top-k selection
+```
+
+Think of it like a city's public transportation system versus private cars. In the old MoE design, each neighborhood (layer) owns its own fleet of buses (experts). If you live in Neighborhood 5, you can only use buses from Fleet 5. This means every neighborhood needs to maintain a full fleet, even if some buses sit idle while others are packed.
+
+UniPool is like converting to a citywide bus system. All buses belong to a shared pool. Neighborhood 5's dispatch center (router) still decides which buses to call based on local demand, but those buses come from the shared fleet. Neighborhood 12's dispatch center makes independent decisions, but draws from the same pool. The pool-level loss is like a central coordinator ensuring no bus is perpetually idle or overworked. NormRouter is the standardized dispatch protocol that prevents any single neighborhood from monopolizing resources.
+
+The key insight: neighborhoods don't need exclusive bus ownership—they need routing authority. Sharing the fleet reduces total buses needed while improving service quality because high-demand routes can access more capacity.
+
+### Key Concepts
+
+- **Expert Pool as Architectural Budget**: Traditional MoE treats expert count as a per-layer decision: "Each layer gets 8 experts." UniPool reframes this as a global budget: "The entire model gets 64 experts, allocated across 8 layers." This decouples expert capacity from depth. You can have a 32-layer model with only 64 experts instead of 256. The pool size becomes an explicit hyperparameter you tune independently of depth, like choosing how many buses a city needs regardless of how many neighborhoods it has.
+
+- **Pool-Level Auxiliary Loss**: Standard MoE uses per-layer load balancing—Layer 3 tries to balance its own 8 experts. But with sharing, this breaks down. If Layer 3 balances its usage but Layer 7 ignores half the pool, you still have collapse. Pool-level loss monitors expert utilization across all layers simultaneously. It's computed by tracking how often each expert is selected by any layer, then penalizing deviation from uniform usage. This prevents the scenario where Layers 1-10 love Expert 5 while Layers 11-20 never touch it.
+
+- **Sublinear Expert Scaling**: The paper's most striking finding. In traditional MoE, doubling depth means doubling expert parameters. UniPool shows you can grow expert count sublinearly—41.6% to 66.7% of the vanilla budget—and still outperform. Why? Because layers share capacity, redundancy is eliminated. It's like discovering that a city with twice the population doesn't need twice the buses if you optimize routes and sharing. The relationship between depth and expert capacity is revealed to be flexible, not fixed.
+
+## Framework Shift
+
+```
+Before (Vanilla MoE):                After (UniPool):
+
+Layer 1: [E1 E2 E3 E4]              Layer 1 Router
+         |  |  |  |                      |
+Layer 2: [E5 E6 E7 E8]              Layer 2 Router ----+
+         |  |  |  |                      |             |
+Layer 3: [E9 E10 E11 E12]           Layer 3 Router    |
+         |  |  |  |                      |             v
+                                         +-----> [E1 E2 E3 E4 E5 E6]
+Experts = Layers * Experts/Layer                 (Shared Pool)
+(Linear scaling)                     
+                                     Experts = Independent Budget
+                                     (Sublinear scaling possible)
+```
+
+From isolated per-layer ownership to centralized capacity with distributed routing, the core shift is treating expert parameters as a global resource rather than a per-layer allocation.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The field inherited the per-layer expert convention from early MoE designs without questioning it. The random routing probe is simple but devastating—it directly challenges a foundational assumption. The problem sits at a critical juncture: MoE models are scaling up, and parameter efficiency is becoming a bottleneck. Questioning the linear scaling assumption is timely and important.
+
+**Method maturity**: The solution is elegant—share the pool, balance globally, use stable routing. But there's a missed opportunity: the paper doesn't deeply explore why random routing works so well in deeper layers. Is it because deeper layers need less specialization? Because the routing learned patterns are redundant? A mechanistic analysis of what the shared pool learns versus per-layer experts would strengthen the contribution. The method feels like 80% insight, 20% unexplored depth.
+
+**Experimental integrity**: Baselines are fair—matched parameter counts, same training data, consistent architecture. The experiments span five model scales (182M to 978M parameters) and show consistent improvements. The reduced-pool variants (41.6%-66.7% of vanilla budget) are particularly convincing because they demonstrate efficiency gains, not just performance gains. One concern: all experiments use LLaMA architecture on the Pile dataset. Generalization to other architectures (T5, GPT) and domains (code, multilingual) is untested. The 30B token training budget is also modest by modern standards.
+
+**Writing quality**: The abstract and introduction are strong—they clearly state the problem and contribution. The method section is dense but complete. The weakness is in the analysis section: the paper shows that UniPool works but doesn't deeply explain why. The routing visualization (Figure 4) hints at interesting patterns but isn't thoroughly interpreted. Rewriting Section 5 to include mechanistic analysis—what do shared experts specialize in? how do layer routers differentiate?—would elevate this from a solid empirical paper to a foundational one.
+
+**Verdict**: weak accept — Challenges a fundamental assumption with strong empirical evidence, but lacks the mechanistic depth to fully explain why sharing works better than isolation.
+
+## Takeaways
+
+**Decouple resource allocation from architectural depth**: The core idea transfers beyond MoE. Anytime you have a resource that scales linearly with depth (attention heads, hidden dimensions, expert sets), ask: does each layer need exclusive ownership, or can we share a global pool with per-layer routing? This framing applies to neural architecture search, federated learning (shared model pool across clients), and even database query optimization (shared execution plan pool).
+
+**Global balancing for shared resources**: When multiple agents (layers, clients, processes) compete for a shared resource, per-agent balancing fails. You need a global loss or coordinator that monitors aggregate usage. This pattern appears in load balancing, resource scheduling, and multi-agent systems. The pool-level auxiliary loss is a clean implementation of this principle.
+
+**Probe assumptions with minimal interventions**: The random routing experiment is a masterclass in assumption testing. Instead of building a complex alternative, they made the smallest possible change (replace learned routing with random) and measured the gap. If the gap is small, the assumption is weak. This technique—minimal intervention probing—is underused in ML research. Apply it to other conventions: do we need layer normalization at every layer? do we need separate embeddings for encoder and decoder?
+:::
+
+:::zh
+**论文**: [2605.06665](https://arxiv.org/abs/2605.06665)
+**作者**: Minbin Huang, Han Shi, Chuanyang Zheng, Yimeng Wu, Guoxuan Chen, Xintong Yu, Yichun Yin, Hong Cheng
+**分类**: cs.LG, cs.AI
+
+## 缺口
+
+混合专家（MoE）模型遵循一个刚性分配规则：每个 Transformer 层拥有独立的专家集。
+
+这意味着如果你有 32 层、每层 8 个专家，就需要总共 256 个专家网络。
+
+该领域一直假设这种隔离是必要的——每层需要自己的专用容量来处理不同的抽象层级。
+
+但作者做了一个简单的探测实验：他们把深层的学习路由器替换成均匀随机路由。
+
+准确率下降了多少？
+
+在生产模型上只有 1.0-1.6 个百分点。
+
+这表明存在大量冗余——各层并没有像假设的那样高效使用其独占的专家容量。
+
+缺口在于：专家参数随深度线性增长，但对逐层隔离容量的实际需求存疑。
+
+```
+问题：逐层专家所有权
+   |
+   v
+假设：每层需要隔离的专家容量
+   |
+   v
+探测：用随机路由替换深层路由器
+   |
+   v
+证据：准确率仅下降 1.0-1.6 个点
+   |
+   v
+结论：专家容量被冗余分配
+   |
+   v
+方法：在所有层间共享全局专家池
+   |
+   v
+结果：用 41.6%-66.7% 的专家数获得更好性能
+```
+
+## 增量
+
+**一句话**：这篇论文之前，专家参数随模型深度线性增长，因为每层拥有独立专家；
+
+之后，专家容量变成全局预算，可以亚线性增长，同时性能超过线性基线。
+
+### 核心机制
+
+UniPool 用单个共享池替代逐层专家所有权。
+
+不再是第 1 层拥有专家 1-8、第 2 层拥有专家 9-16，而是所有层都路由到同一个专家池。
+
+每层仍有自己的学习路由器来决定激活哪些专家，但专家本身是共享基础设施。
+
+挑战在于训练稳定性。
+
+当多层竞争同一批专家时，可能出现崩溃——某些专家被过度使用，其他专家被忽略。
+
+UniPool 用两个组件解决这个问题：(1) 池级辅助损失，在整个池而非逐层平衡专家利用率；
+
+(2) NormRouter，通过在 top-k 选择前归一化路由器 logits 来提供稀疏且尺度稳定的路由。
+
+数据流动如下：token 进入一层，该层的路由器计算池中所有专家的亲和分数，选择 top-k 专家，token 被这些专家处理，输出被组合。
+
+下一层用同一个专家池但自己独立的路由器重复这个过程。
+
+池级损失监控哪些专家在所有层中被使用，并惩罚不平衡。
+
+```
+Token 输入
+    |
+    v
+第 1 层路由器 ---> [专家池：E1 E2 E3 ... En]
+    |                    ^  ^  ^
+    +--------------------+  |  |
+    |                       |  |
+    v                       |  |
+第 2 层路由器 ---------------+  |
+    |                          |
+    +--------------------------+
+    |
+    v
+第 3 层路由器
+    |
+    v
+输出
+
+池级损失：监控所有层的专家使用情况
+NormRouter：在 top-k 选择前归一化 logits
+```
+
+把它想象成城市公共交通系统与私家车的对比。
+
+在旧的 MoE 设计中，每个街区（层）拥有自己的公交车队（专家）。
+
+如果你住在第 5 街区，只能用第 5 车队的公交车。
+
+这意味着每个街区都需要维护完整车队，即使有些车闲置而其他车爆满。
+
+UniPool 就像转换成全市公交系统。
+
+所有公交车属于共享车队。
+
+第 5 街区的调度中心（路由器）仍根据本地需求决定叫哪些车，但这些车来自共享车队。
+
+第 12 街区的调度中心做独立决策，但从同一个池中调车。
+
+池级损失就像中央协调员，确保没有车永远闲置或过载。
+
+NormRouter 是标准化调度协议，防止任何单个街区垄断资源。
+
+关键洞察：街区不需要独占车辆所有权——它们需要路由权限。
+
+共享车队减少了所需的总车辆数，同时提升服务质量，因为高需求路线可以获得更多容量。
+
+### 关键概念
+
+- **专家池作为架构预算**：传统 MoE 把专家数量当作逐层决策："每层 8 个专家。"
+
+UniPool 将其重构为全局预算："整个模型 64 个专家，分配到 8 层。"
+
+这解耦了专家容量与深度。
+
+你可以有 32 层模型但只用 64 个专家而非 256 个。
+
+池大小成为独立于深度调优的显式超参数，就像选择城市需要多少公交车，与有多少街区无关。
+
+- **池级辅助损失**：标准 MoE 使用逐层负载均衡——第 3 层试图平衡自己的 8 个专家。
+
+但在共享情况下，这会失效。
+
+如果第 3 层平衡了使用，但第 7 层忽略了一半的池，仍会崩溃。
+
+池级损失同时监控所有层的专家利用率。
+
+它通过跟踪每个专家被任何层选择的频率来计算，然后惩罚偏离均匀使用的情况。
+
+这防止了第 1-10 层都喜欢专家 5 而第 11-20 层从不碰它的场景。
+
+- **亚线性专家扩展**：论文最惊人的发现。
+
+在传统 MoE 中，深度翻倍意味着专家参数翻倍。
+
+UniPool 表明你可以让专家数量亚线性增长——vanilla 预算的 41.6% 到 66.7%——仍能超越性能。
+
+为什么？
+
+因为层共享容量，冗余被消除。
+
+就像发现人口翻倍的城市不需要翻倍的公交车，如果你优化路线和共享。
+
+深度与专家容量的关系被揭示为灵活的，而非固定的。
+
+## 框架转变
+
+```
+之前（Vanilla MoE）：              之后（UniPool）：
+
+第 1 层：[E1 E2 E3 E4]            第 1 层路由器
+         |  |  |  |                    |
+第 2 层：[E5 E6 E7 E8]            第 2 层路由器 ----+
+         |  |  |  |                    |             |
+第 3 层：[E9 E10 E11 E12]         第 3 层路由器    |
+         |  |  |  |                    |             v
+                                       +-----> [E1 E2 E3 E4 E5 E6]
+专家数 = 层数 * 每层专家数                      （共享池）
+（线性扩展）                       
+                                  专家数 = 独立预算
+                                  （可亚线性扩展）
+```
+
+从隔离的逐层所有权到集中容量配分布式路由，核心转变是把专家参数当作全局资源而非逐层分配。
+
+## 专家评审
+
+**选题眼光**：这是真缺口。
+
+该领域从早期 MoE 设计继承了逐层专家惯例，却没有质疑它。
+
+随机路由探测实验简单但致命——它直接挑战了一个基础假设。
+
+问题处于关键节点：MoE 模型正在扩大规模，参数效率正成为瓶颈。
+
+质疑线性扩展假设是及时且重要的。
+
+**方法成熟度**：解决方案优雅——共享池、全局平衡、稳定路由。
+
+但有个错失的机会：论文没有深入探索为什么随机路由在深层效果这么好。
+
+是因为深层需要更少专业化？
+
+因为路由学到的模式是冗余的？
+
+对共享池学到什么与逐层专家的机制分析会加强贡献。
+
+方法感觉像 80% 洞察、20% 未探索深度。
+
+**实验诚意**：基线公平——匹配参数数量、相同训练数据、一致架构。
+
+实验跨越五个模型规模（182M 到 978M 参数）并显示一致改进。
+
+减少池变体（vanilla 预算的 41.6%-66.7%）特别有说服力，因为它们展示了效率增益，而非仅性能增益。
+
+一个担忧：所有实验都用 LLaMA 架构在 Pile 数据集上。
+
+对其他架构（T5、GPT）和领域（代码、多语言）的泛化未经测试。
+
+30B token 训练预算按现代标准也算适度。
+
+**写作功力**：摘要和引言很强——清楚陈述问题和贡献。
+
+方法部分密集但完整。
+
+弱点在分析部分：论文展示了 UniPool 有效，但没有深入解释为什么。
+
+路由可视化（图 4）暗示了有趣模式但未被充分解读。
+
+重写第 5 节加入机制分析——共享专家专门化什么？
+
+层路由器如何区分？
+
+——会把这篇从扎实的实证论文提升为基础性论文。
+
+**判决**：弱接收 — 用强实证证据挑战基础假设，但缺乏机制深度来充分解释为什么共享优于隔离。
+
+## 要点总结
+
+**解耦资源分配与架构深度**：核心思想可迁移到 MoE 之外。
+
+任何时候你有随深度线性扩展的资源（注意力头、隐藏维度、专家集），问：每层需要独占所有权吗，还是可以用全局池配逐层路由？
+
+这个框架适用于神经架构搜索、联邦学习（客户端间共享模型池）、甚至数据库查询优化（共享执行计划池）。
+
+**共享资源的全局平衡**：当多个代理（层、客户端、进程）竞争共享资源时，逐代理平衡会失效。
+
+你需要监控总体使用的全局损失或协调器。
+
+这个模式出现在负载均衡、资源调度和多智能体系统中。
+
+池级辅助损失是这个原则的简洁实现。
+
+**用最小干预探测假设**：随机路由实验是假设测试的大师课。
+
+他们没有构建复杂替代方案，而是做了最小可能改变（用随机替换学习路由）并测量差距。
+
+如果差距小，假设就弱。
+
+这个技术——最小干预探测——在 ML 研究中使用不足。
+
+应用到其他惯例：我们需要每层都有层归一化吗？
+
+我们需要编码器和解码器的独立嵌入吗？
+
+:::
