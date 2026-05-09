@@ -50,7 +50,15 @@ Based on the ljg-skill-paper approach, we've upgraded the arxiv blog post genera
 - Added to `sanitize_mdx()`: automatically inserts line breaks after Chinese periods (。) in `:::zh` sections
 - Prevents horizontal scrolling in rendered Chinese paragraphs
 
-### 10. **Tone Shift**
+### 10. **MDX Curly Brace Escaping**
+- **Problem**: Mathematical set notation like `{-1,1}^n` or `{1,...,n}` causes MDX build failures because MDX tries to parse curly braces as JSX expressions
+- **Solution**: 
+  - Added explicit instruction in the prompt to escape curly braces in mathematical notation (use `\{` and `\}`)
+  - Added automatic escaping in `sanitize_mdx()` as a safety net
+  - Prevents `[@mdx-js/rollup] Could not parse expression with acorn` errors
+- **Example**: `{-1,1}^n` → `\{-1,1\}^n`, `{1,...,n}` → `\{1,...,n\}`
+
+### 11. **Tone Shift**
 - **Before**: Academic, comprehensive coverage
 - **After**: Conversational, like explaining to a colleague over coffee
 - Focus on **what the paper means** and **why it matters**, not just what it says

@@ -426,6 +426,7 @@ CRITICAL CONSTRAINTS:
 - Expert assessment: Be honest and calibrated, not uniformly positive
 - Tone: Like explaining to a colleague over coffee, not writing a review
 - Chinese content: Parallel composition, NOT translation
+- MDX safety: Escape curly braces in mathematical notation (use \\{ and \\} instead of { and }) to prevent JSX parsing errors. Examples: \\{-1,1\\}^n, \\{1,...,n\\}, f: X \\to \\{0,1\\}
 - Output ONLY the complete MDX file, nothing else
 - DO NOT include <thinking> tags or any other XML tags in your output
 - Start your response directly with the --- frontmatter delimiter"""
@@ -488,6 +489,7 @@ def sanitize_mdx(content):
     - Repair mismatched bold markers (**text* → **text**)
     - Replace ASCII colons with full-width Chinese colons in :::zh sections
     - Wrap LaTeX-style subscripts x_{y} in inline code to prevent JSX parsing
+    - Escape curly braces in mathematical set notation to prevent JSX parsing
     """
     # Fix frontmatter quoting before anything else
     fm_match = re.match(r'^---\n(.*?\n)---', content, re.DOTALL)
@@ -573,6 +575,15 @@ def sanitize_mdx(content):
                 lambda m: f"{m.group(1)}{m.group(2)}`_{{{m.group(3)}}}`{m.group(4)}",
                 line
             )
+
+            # Escape standalone curly braces in mathematical notation (e.g., {-1,1}^n, {1,...,n})
+            # to prevent MDX from parsing them as JSX expressions
+            # Only escape if not already escaped and not inside backticks
+            if not in_code_block and '{' in line and '`' not in line:
+                # Escape opening braces not already escaped
+                line = re.sub(r'(?<!\\)(?<!`)(\{)', r'\\{', line)
+                # Escape closing braces not already escaped
+                line = re.sub(r'(?<!\\)(\})(?!`)', r'\\}', line)
 
         result.append(line)
 
