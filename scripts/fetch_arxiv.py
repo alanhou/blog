@@ -264,13 +264,14 @@ def generate_blog_post(client, model, provider, paper):
     authors_str = ", ".join(paper["authors"][:10])
     cats_str = ", ".join(paper["categories"][:5])
 
-    prompt = f"""You are reading an academic paper and explaining it to a smart colleague over coffee. Your goal: help them understand what gap this paper fills, what's actually new, and whether it's worth their attention.
+    tags_list = ', '.join('"{}"'.format(c.lower()) for c in paper['categories'][:5])
+    prompt = """You are reading an academic paper and explaining it to a smart colleague over coffee. Your goal: help them understand what gap this paper fills, what's actually new, and whether it's worth their attention.
 
-Paper ID: {paper['id']}
-Title: {paper['title']}
+Paper ID: {paper_id}
+Title: {paper_title}
 Authors: {authors_str}
 Categories: {cats_str}
-Abstract: {paper['summary']}
+Abstract: {paper_summary}
 
 Output a bilingual MDX blog post following this EXACT structure:
 
@@ -282,12 +283,12 @@ description:
   en: "[1-2 sentence English description]"
   zh: "[1-2 sentence Chinese description]"
 date: {today}
-tags: ["arxiv", "ai", {', '.join(f'"{c.lower()}"' for c in paper['categories'][:5])}]
+tags: ["arxiv", "ai", {tags_list}]
 image: "{ARXIV_IMAGE}"
 ---
 
 :::en
-**Paper**: [{paper['id']}](https://arxiv.org/abs/{paper['id']})
+**Paper**: [{paper_id}](https://arxiv.org/abs/{paper_id})
 **Authors**: {authors_str}
 **Categories**: {cats_str}
 
@@ -353,7 +354,7 @@ Before (mainstream approach):        After (this paper):
 :::
 
 :::zh
-**论文**: [{paper['id']}](https://arxiv.org/abs/{paper['id']})
+**论文**: [{paper_id}](https://arxiv.org/abs/{paper_id})
 **作者**: {authors_str}
 **分类**: {cats_str}
 
@@ -426,10 +427,19 @@ CRITICAL CONSTRAINTS:
 - Expert assessment: Be honest and calibrated, not uniformly positive
 - Tone: Like explaining to a colleague over coffee, not writing a review
 - Chinese content: Parallel composition, NOT translation
-- MDX safety: Escape curly braces in mathematical notation (use \\{ and \\} instead of { and }) to prevent JSX parsing errors. Examples: \\{-1,1\\}^n, \\{1,...,n\\}, f: X \\to \\{0,1\\}
+- MDX safety: Escape curly braces in mathematical notation (use \\{{ and \\}} instead of {{ and }}) to prevent JSX parsing errors. Examples: \\{{-1,1\\}}^n, \\{{1,...,n\\}}, f: X \\to \\{{0,1\\}}
 - Output ONLY the complete MDX file, nothing else
 - DO NOT include <thinking> tags or any other XML tags in your output
-- Start your response directly with the --- frontmatter delimiter"""
+- Start your response directly with the --- frontmatter delimiter""".format(
+        paper_id=paper['id'],
+        paper_title=paper['title'],
+        authors_str=authors_str,
+        cats_str=cats_str,
+        paper_summary=paper['summary'],
+        today=today,
+        ARXIV_IMAGE=ARXIV_IMAGE,
+        tags_list=tags_list
+    )
 
     content = call_llm(
         client, model, provider,
