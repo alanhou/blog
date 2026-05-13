@@ -1,0 +1,356 @@
+---
+title:
+  en: "KV-Fold: Treating KV Cache as a Fold Accumulator for Long-Context Inference"
+  zh: "KV-Fold: 将 KV 缓存视为折叠累加器的长文本推理"
+description:
+  en: "A training-free method that processes long contexts by treating the KV cache as a functional fold accumulator, achieving 100% retrieval accuracy up to 128K tokens without architectural changes."
+  zh: "一种无需训练的方法，通过将 KV 缓存视为函数式折叠累加器来处理长文本，在 128K token 范围内实现 100% 检索准确率，无需架构改动。"
+date: 2026-05-13
+tags: ["arxiv", "ai", "cs.lg", "cs.ai", "cs.cl"]
+image: "/arxiv-visuals/arxiv-kv-fold-one-step-kv-cache.png"
+---
+
+![Concept animation](/arxiv-visuals/kv-fold-one-step-kv-cache/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2605.12471](https://arxiv.org/abs/2605.12471)
+**Authors**: Alireza Nadali, Patrick Cooper, Ashutosh Trivedi, Alvaro Velasquez
+**Categories**: cs.LG, cs.AI, cs.CL
+
+## The Gap
+
+Pretrained transformers have fixed context windows (typically 4K-8K tokens). When you need to process longer sequences, you hit a wall: either you fine-tune the model on longer contexts (expensive, requires retraining), or you use streaming methods that discard old information to stay within memory limits (loses long-range dependencies). The field has been stuck between two bad options: retrain everything or accept information loss.
+
+Prior work like StreamingLLM keeps only recent tokens plus a few "attention sinks," sacrificing exact retrieval for bounded memory. Other approaches require architectural modifications or additional training. The gap: can a frozen pretrained transformer handle arbitrarily long contexts without losing information and without retraining?
+
+```
+Problem: Fixed context window (4K-8K tokens)
+   |
+   v
+Existing solutions:
+   |
+   +---> Fine-tune on long contexts ---> Expensive, requires retraining
+   |
+   +---> Streaming (discard old tokens) ---> Loses long-range info
+   |
+   v
+Gap: Can frozen models handle long contexts without loss?
+   |
+   v
+Assumption: KV cache can act as recurrent state
+   |
+   v
+Method: KV-Fold (chunk + accumulate + repeat)
+   |
+   v
+Evidence: 100% retrieval @ 128K tokens, stable across 511 steps
+   |
+   v
+Conclusion: Frozen transformers already support stable KV recurrence
+```
+
+## The Increment
+
+**One sentence**: Before this paper, long-context inference required either retraining models or accepting information loss; after, you can process arbitrarily long sequences with frozen models by treating the KV cache as a fold accumulator.
+
+### Core Mechanism
+
+KV-Fold splits the input sequence into chunks and processes them sequentially. At each step, the model receives two inputs: the current chunk and the accumulated KV cache from all previous chunks. The model attends to both, generates new keys and values for the current chunk, concatenates them to the accumulated cache, and passes the enlarged cache to the next step. This is repeated for all chunks.
+
+The key insight is repurposing KV cache concatenation—originally designed for multi-agent communication—as a recurrence mechanism. When processing chunk t, the model sees the KV cache as a prefix context. The cache acts as compressed memory of everything seen so far. No weights change, no special tokens are added, no architectural modifications are made.
+
+```
+Input sequence: [chunk_1][chunk_2][chunk_3]...[chunk_n]
+
+Step 1:
+  Input: chunk_1
+  KV_cache: empty
+  Output: KV_1
+  
+Step 2:
+  Input: chunk_2 + KV_1 (as prefix)
+  Model attends to: [KV_1 | chunk_2]
+  Output: KV_2 = concat(KV_1, new_keys_values_2)
+  
+Step 3:
+  Input: chunk_3 + KV_2 (as prefix)
+  Model attends to: [KV_2 | chunk_3]
+  Output: KV_3 = concat(KV_2, new_keys_values_3)
+  
+...repeat until all chunks processed
+```
+
+Think of it like a snowball rolling down a hill. The snowball is the KV cache. As it rolls through each section of the hill (a chunk), it picks up new snow (new keys and values) and grows larger. The snowball carries everything it has collected so far. When it reaches the next section, it's already carrying the compressed memory of all previous sections. The hill doesn't change, the snowball doesn't change its fundamental structure—it just accumulates. At any point, you can examine the snowball and see the accumulated effect of every section it has rolled through. The model is the hill's physics: it determines how new snow sticks to the snowball, but the physics themselves don't change from section to section.
+
+### Key Concepts
+
+- **KV Cache as Recurrent State**: In standard transformer inference, the KV cache is just an optimization to avoid recomputing attention for past tokens. KV-Fold elevates it to a first-class recurrent state. Instead of discarding the cache after processing a sequence, you carry it forward as compressed memory. When the model processes the next chunk, it attends to this cache as if those past tokens were still present. The cache becomes the hidden state in a recurrent architecture, but without modifying the transformer itself. Concrete example: processing a 64K token document in 4K chunks means the model at chunk 16 is attending to a KV cache representing the previous 60K tokens, even though it only sees 4K tokens directly.
+
+- **Left Fold Over Chunks**: In functional programming, `foldl` takes a list, an accumulator, and a function, then applies the function to each element and the accumulator sequentially. KV-Fold does exactly this: the list is the sequence of chunks, the accumulator is the KV cache, and the function is the transformer's forward pass. At each step, you take the current cache (accumulator), process the next chunk (list element), and produce an updated cache (new accumulator). The same operation repeats for every chunk. This is why it's called KV-Fold—it's literally a fold operation where the transformer is the combining function.
+
+- **Numerical Stability Plateau**: The authors found that per-step drift (how much the cache changes at each step) rises briefly at the start, then flattens into a stable plateau that persists across hundreds of steps. This plateau is insensitive to precision changes (float32 vs float16 vs bfloat16), robust across chunk sizes, and consistent across model families. This is surprising because recurrent systems often suffer from vanishing or exploding gradients. Here, the drift saturates naturally, suggesting the pretrained transformer's attention mechanism already has built-in stabilization. It's like a self-regulating system that finds an equilibrium without external intervention.
+
+## Framework Shift
+
+```
+Before (streaming methods):          After (KV-Fold):
+
+Input: [====long sequence====]       Input: [====long sequence====]
+         |                                    |
+         v                                    v
+    Sliding window                       Split into chunks
+         |                                    |
+    [--window--]                        [c1][c2][c3]...[cn]
+         |                                    |
+    Discard old tokens                       v
+         |                              Accumulate KV cache
+         v                                    |
+    Bounded memory,                     KV_0 -> KV_1 -> KV_2 -> ...
+    lost information                         |
+                                             v
+                                        Full memory,
+                                        no information loss
+```
+
+From sliding windows that discard history to accumulating caches that preserve it, the core shift is treating memory as something to grow rather than bound.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. Long-context inference is a bottleneck for deploying LLMs in production, and existing solutions (fine-tuning, streaming) have clear downsides. The problem sits at the intersection of efficiency and capability—a sweet spot for practical impact. The framing as a functional programming primitive (fold) is clever and positions the work as discovering latent structure rather than inventing new mechanisms.
+
+**Method maturity**: This is more insight than invention. The authors didn't design a new architecture—they discovered that concatenating KV caches, a primitive already used for multi-agent communication, can be repurposed for long-context recurrence. The simplicity is a strength: no training, no architectural changes, just a different way of using existing machinery. However, the method is essentially sequential processing with growing memory, which limits parallelism. The stability findings are the real contribution—showing that this naive approach doesn't collapse is non-obvious and valuable.
+
+**Experimental integrity**: The needle-in-a-haystack benchmark is clean and the 100% retrieval result is strong. However, this is a synthetic task designed to test exact information retention. Real-world long-context tasks (summarization, reasoning over documents) are not evaluated. The stability analysis is thorough (10,000x precision change, multiple models, varying chunk sizes), which builds confidence. The comparison to streaming methods is fair but limited—no comparison to other long-context methods like RoPE scaling or attention sinks with larger windows. The memory analysis is honest: they acknowledge the cache grows linearly with sequence length, which is a fundamental limitation.
+
+**Writing quality**: The paper is well-structured and the functional programming framing is effective. The stability analysis is the strongest section—clear metrics, thorough ablations, and honest discussion of limitations. The related work section could be deeper: the connection to state-space models and other recurrent architectures is mentioned but not explored. The results section focuses heavily on needle-in-a-haystack, which is a narrow evaluation. A section on failure modes or tasks where KV-Fold struggles would strengthen the paper.
+
+**Verdict**: weak accept — The method is simple and practical, the stability findings are surprising and well-documented, but the evaluation is narrow and the fundamental memory scaling limitation is not addressed.
+
+## Takeaways
+
+The functional programming lens (fold as a design pattern) is transferable. When you have a sequential process with accumulating state, framing it as a fold makes the structure explicit and suggests optimizations (parallelizing independent folds, checkpointing accumulators). The stability plateau finding suggests that pretrained transformers have more robust recurrent properties than expected—this could inform future architecture design. For practitioners: if you need exact long-context retrieval and can tolerate growing memory, KV-Fold is a zero-cost baseline that requires no retraining. The chunk size vs memory tradeoff is explicit and tunable. The method won't replace fine-tuned long-context models for complex reasoning tasks, but it's a strong fallback when retraining isn't an option.
+:::
+
+:::zh
+**论文**: [2605.12471](https://arxiv.org/abs/2605.12471)
+**作者**: Alireza Nadali, Patrick Cooper, Ashutosh Trivedi, Alvaro Velasquez
+**分类**: cs.LG, cs.AI, cs.CL
+
+## 缺口
+
+预训练的 transformer 有固定的上下文窗口（通常是 4K-8K token）。
+
+当你需要处理更长的序列时，就会撞墙：要么在更长的上下文上微调模型（昂贵，需要重新训练），要么使用流式方法丢弃旧信息以保持在内存限制内（丢失长程依赖）。
+
+该领域一直困在两个糟糕的选项之间：重新训练一切或接受信息损失。
+
+像 StreamingLLM 这样的先前工作只保留最近的 token 加上几个"注意力锚点"，为了有界内存而牺牲精确检索。
+
+其他方法需要架构修改或额外训练。
+
+缺口：冻结的预训练 transformer 能否在不丢失信息且不重新训练的情况下处理任意长的上下文？
+
+```
+问题：固定上下文窗口（4K-8K token）
+   |
+   v
+现有解决方案：
+   |
+   +---> 在长上下文上微调 ---> 昂贵，需要重新训练
+   |
+   +---> 流式（丢弃旧 token）---> 丢失长程信息
+   |
+   v
+缺口：冻结模型能否无损处理长上下文？
+   |
+   v
+假设：KV 缓存可以充当循环状态
+   |
+   v
+方法：KV-Fold（分块 + 累积 + 重复）
+   |
+   v
+证据：128K token 下 100% 检索，511 步稳定
+   |
+   v
+结论：冻结 transformer 已支持稳定的 KV 循环
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，长文本推理要么需要重新训练模型，要么接受信息损失；之后，你可以通过将 KV 缓存视为折叠累加器，用冻结模型处理任意长的序列。
+
+### 核心机制
+
+KV-Fold 将输入序列分割成块并顺序处理它们。
+
+在每一步，模型接收两个输入：当前块和从所有先前块累积的 KV 缓存。
+
+模型同时关注两者，为当前块生成新的键和值，将它们连接到累积的缓存中，并将扩大的缓存传递给下一步。
+
+这对所有块重复进行。
+
+关键洞察是重新利用 KV 缓存连接——最初为多智能体通信设计——作为循环机制。
+
+处理块 t 时，模型将 KV 缓存视为前缀上下文。
+
+缓存充当迄今为止看到的一切的压缩记忆。
+
+没有权重改变，没有添加特殊 token，没有架构修改。
+
+```
+输入序列：[块_1][块_2][块_3]...[块_n]
+
+步骤 1：
+  输入：块_1
+  KV_缓存：空
+  输出：KV_1
+  
+步骤 2：
+  输入：块_2 + KV_1（作为前缀）
+  模型关注：[KV_1 | 块_2]
+  输出：KV_2 = concat(KV_1, 新键值_2)
+  
+步骤 3：
+  输入：块_3 + KV_2（作为前缀）
+  模型关注：[KV_2 | 块_3]
+  输出：KV_3 = concat(KV_2, 新键值_3)
+  
+...重复直到所有块处理完毕
+```
+
+把它想象成一个雪球滚下山坡。
+
+雪球是 KV 缓存。
+
+当它滚过山坡的每一段（一个块）时，它会粘上新雪（新的键和值）并变得更大。
+
+雪球携带着它迄今为止收集的一切。
+
+当它到达下一段时，它已经携带着所有先前段的压缩记忆。
+
+山坡不变，雪球不改变其基本结构——它只是累积。
+
+在任何时刻，你都可以检查雪球，看到它滚过的每一段的累积效应。
+
+模型是山坡的物理规律：它决定新雪如何粘在雪球上，但物理规律本身不会从一段到另一段改变。
+
+### 关键概念
+
+- **KV 缓存作为循环状态**: 在标准 transformer 推理中，KV 缓存只是一个优化，用于避免重新计算过去 token 的注意力。
+
+KV-Fold 将其提升为一等循环状态。
+
+你不是在处理完序列后丢弃缓存，而是将其作为压缩记忆向前传递。
+
+当模型处理下一个块时，它关注这个缓存，就好像那些过去的 token 仍然存在一样。
+
+缓存成为循环架构中的隐藏状态，但不修改 transformer 本身。
+
+具体例子：以 4K 块处理 64K token 文档意味着第 16 块的模型正在关注代表前 60K token 的 KV 缓存，即使它只直接看到 4K token。
+
+- **对块的左折叠**: 在函数式编程中，`foldl` 接受一个列表、一个累加器和一个函数，然后顺序地将函数应用于每个元素和累加器。
+
+KV-Fold 正是这样做的：列表是块的序列，累加器是 KV 缓存，函数是 transformer 的前向传递。
+
+在每一步，你取当前缓存（累加器），处理下一个块（列表元素），并产生更新的缓存（新累加器）。
+
+相同的操作对每个块重复。
+
+这就是为什么它被称为 KV-Fold——它字面上是一个折叠操作，其中 transformer 是组合函数。
+
+- **数值稳定性平台**: 作者发现每步漂移（缓存在每步改变多少）在开始时短暂上升，然后平坦化为一个稳定的平台，在数百步中持续存在。
+
+这个平台对精度变化不敏感（float32 vs float16 vs bfloat16），对块大小稳健，并且在模型家族中一致。
+
+这令人惊讶，因为循环系统通常会遭受梯度消失或爆炸。
+
+在这里，漂移自然饱和，表明预训练 transformer 的注意力机制已经具有内置稳定性。
+
+这就像一个自我调节系统，无需外部干预就能找到平衡。
+
+## 框架转变
+
+```
+之前（流式方法）：                之后（KV-Fold）：
+
+输入：[====长序列====]           输入：[====长序列====]
+         |                              |
+         v                              v
+    滑动窗口                        分割成块
+         |                              |
+    [--窗口--]                     [c1][c2][c3]...[cn]
+         |                              |
+    丢弃旧 token                        v
+         |                         累积 KV 缓存
+         v                              |
+    有界内存，                     KV_0 -> KV_1 -> KV_2 -> ...
+    信息丢失                            |
+                                        v
+                                   完整内存，
+                                   无信息损失
+```
+
+从丢弃历史的滑动窗口到保留历史的累积缓存，核心转变是将内存视为要增长而不是限制的东西。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实的缺口。
+
+长文本推理是在生产中部署 LLM 的瓶颈，现有解决方案（微调、流式）有明显的缺点。
+
+问题位于效率和能力的交叉点——实际影响的最佳位置。
+
+将其框定为函数式编程原语（折叠）很巧妙，将工作定位为发现潜在结构而不是发明新机制。
+
+**方法成熟度**: 这更多是洞察而不是发明。
+
+作者没有设计新架构——他们发现连接 KV 缓存（一个已经用于多智能体通信的原语）可以重新用于长文本循环。
+
+简单性是一个优势：无需训练，无需架构更改，只是使用现有机制的不同方式。
+
+然而，该方法本质上是具有增长内存的顺序处理，这限制了并行性。
+
+稳定性发现是真正的贡献——表明这种朴素方法不会崩溃是非显而易见且有价值的。
+
+**实验诚意**: 大海捞针基准测试很干净，100% 检索结果很强。
+
+然而，这是一个旨在测试精确信息保留的合成任务。
+
+没有评估真实世界的长文本任务（摘要、文档推理）。
+
+稳定性分析很彻底（10,000 倍精度变化、多个模型、不同块大小），这建立了信心。
+
+与流式方法的比较是公平的但有限——没有与其他长文本方法（如 RoPE 缩放或具有更大窗口的注意力锚点）进行比较。
+
+内存分析是诚实的：他们承认缓存随序列长度线性增长，这是一个根本限制。
+
+**写作功力**: 论文结构良好，函数式编程框架有效。
+
+稳定性分析是最强的部分——清晰的指标、彻底的消融和对局限性的诚实讨论。
+
+相关工作部分可以更深入：提到了与状态空间模型和其他循环架构的联系，但没有探索。
+
+结果部分过度关注大海捞针，这是一个狭窄的评估。
+
+关于失败模式或 KV-Fold 挣扎的任务的部分会加强论文。
+
+**判决**: 弱接收 — 方法简单实用，稳定性发现令人惊讶且有充分记录，但评估狭窄，基本的内存缩放限制没有得到解决。
+
+## 要点总结
+
+函数式编程视角（折叠作为设计模式）是可迁移的。
+
+当你有一个具有累积状态的顺序过程时，将其框定为折叠使结构明确，并建议优化（并行化独立折叠、检查点累加器）。
+
+稳定性平台发现表明预训练 transformer 具有比预期更强大的循环特性——这可以为未来的架构设计提供信息。
+
+对于实践者：如果你需要精确的长文本检索并且可以容忍增长的内存，KV-Fold 是一个零成本基线，不需要重新训练。
+
+块大小与内存的权衡是明确且可调的。
+
+该方法不会取代用于复杂推理任务的微调长文本模型，但当重新训练不是选项时，它是一个强大的后备方案。
+
+:::

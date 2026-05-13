@@ -1,0 +1,352 @@
+---
+title:
+  en: "Elastic Attention Cores for Scalable Vision Transformers"
+  zh: "弹性注意力核心：可扩展视觉Transformer的线性复杂度方案"
+description:
+  en: "VECA replaces quadratic all-to-all attention with linear core-periphery structure, proving patch-to-patch interaction isn't necessary for strong visual representations."
+  zh: "VECA用线性复杂度的核心-外围结构替代二次复杂度的全对全注意力，证明图像块之间的直接交互并非强视觉表征的必要条件。"
+date: 2026-05-13
+tags: ["arxiv", "ai", "cs.cv", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2605.12491](https://arxiv.org/abs/2605.12491)
+**Authors**: Alan Z. Song, Yinjie Chen, Mu Nan, Rui Zhang, Jiahang Cao, Weijian Mai, Muquan Yu, Hossein Adeli, Deva Ramanan, Michael J. Tarr
+**Categories**: cs.CV, cs.LG
+
+## The Gap
+
+Vision Transformers dominate computer vision through all-to-all self-attention, where every image patch attends to every other patch. This flexibility comes at a cost: O(N²) complexity that scales quadratically with image resolution. At 1024×1024 resolution, you're computing attention over 16,384 patches—that's 268 million pairwise interactions. Prior work assumed this dense connectivity was necessary for learning rich visual representations.
+
+Existing solutions fall into two camps. Sparse attention patterns (Swin, local windows) reduce complexity but sacrifice global context and require architectural gymnastics. Cross-attention approaches (Perceiver, Set Transformers) compress N patches into C bottleneck tokens, achieving O(N) complexity but losing fine-grained spatial information in the bottleneck.
+
+This paper challenges the foundational assumption: do patches really need to talk directly to each other?
+
+```
+Problem: ViT attention scales O(N^2) with resolution
+   |
+   v
+Assumption: Pairwise patch interaction = necessary
+   |
+   v
+Method: Core-periphery structure (patches <-> cores only)
+   |
+   +---> Evidence: Competitive performance at O(N) complexity
+   |
+   +---> Conclusion: Direct patch interaction is unnecessary
+```
+
+## The Increment
+
+**One sentence**: Before VECA, you chose between quadratic all-to-all attention or lossy compression through bottlenecks; after VECA, you get linear complexity while maintaining all N patch tokens throughout the network.
+
+### Core Mechanism
+
+VECA introduces a small set of C learned "core" tokens (typically 64-256) that act as a communication hub. Image patches never attend to each other directly. Instead, each layer performs two attention operations: patches attend to cores, then cores attend back to patches. The cores are initialized randomly and refined through training, learning to capture the visual patterns most useful for routing information between patches.
+
+Critically, VECA maintains all N input patches throughout the network—no compression, no discarding. The cores don't replace patches; they mediate communication. Each layer updates both the N patch embeddings and the C core embeddings. Because patches only attend to C cores (not N-1 other patches), complexity drops from O(N²) to O(N·C). Since C is fixed regardless of image resolution, this is effectively O(N).
+
+The architecture supports elastic inference: you can reduce the number of cores at test time to trade accuracy for speed. A model trained with 256 cores can run with 64 cores for faster inference, with graceful performance degradation. This elasticity comes from nested training along the core axis, where the model learns to function with varying core counts.
+
+```
+Standard ViT (O(N^2)):
+  Patch1 <---> Patch2 <---> Patch3 <---> ... <---> PatchN
+    ^           ^           ^                       ^
+    |           |           |                       |
+    +-----all-to-all attention (N^2 interactions)--+
+
+VECA (O(N)):
+  Patch1   Patch2   Patch3   ...   PatchN
+    |        |        |              |
+    v        v        v              v
+  +---------------------------------------+
+  |  Core1   Core2   ...   CoreC         |  <-- learned hubs
+  +---------------------------------------+
+    |        |        |              |
+    v        v        v              v
+  Patch1'  Patch2'  Patch3'  ...  PatchN'
+
+  Each patch: 2C interactions (to cores, from cores)
+  Total: N * 2C = O(N) for fixed C
+```
+
+Think of VECA like an airport hub system. In a fully connected flight network (standard ViT), every city has direct flights to every other city—that's N² routes to maintain. VECA instead designates a few hub airports (cores). Cities (patches) only fly to hubs, and hubs fly to cities. You might take two hops to reach your destination, but the total number of routes drops from quadratic to linear. The hubs aren't destinations themselves—they're transfer points that learn which connections matter most. And crucially, every city maintains its own airport (all N patches preserved); we're just changing the route structure, not eliminating cities.
+
+### Key Concepts
+
+- **Core-periphery attention structure**: Instead of a fully connected graph where every node attends to every other node, you have a bipartite structure: periphery nodes (patches) only attend to core nodes, and cores attend back to periphery. This is fundamentally different from bottleneck architectures. In a bottleneck (like Perceiver), you compress N tokens into C tokens and lose information. In core-periphery, you maintain N tokens but route their communication through C mediators. The cores are learned parameters, not compressed versions of the input. They start as random embeddings and learn to capture the communication patterns that matter for the task.
+
+- **Elastic inference via nested training**: The model is trained to work with variable numbers of cores. During training, you randomly sample different core counts (say, 64, 128, 256) and compute loss for each. The gradient updates teach the model to function across this range. At inference, you can dial down the core count for speed or dial up for accuracy. This is different from typical model compression (pruning, quantization) which requires separate training or fine-tuning. The elasticity is baked into the training process itself.
+
+- **Linear complexity without compression**: The key insight is that O(N) complexity doesn't require throwing away information. Standard wisdom says: to avoid O(N²), you must compress N tokens into fewer tokens (bottleneck). VECA shows you can keep all N tokens and still achieve O(N) by changing the attention pattern. Each patch does 2C attention operations (attend to C cores, receive attention from C cores), giving N × 2C = O(N) total operations for fixed C. The patches never directly interact, but information flows between them via the cores.
+
+## Framework Shift
+
+```
+Before (all-to-all attention):        After (core-periphery):
+
+[P1]--[P2]--[P3]--[P4]               [P1] [P2] [P3] [P4]
+  |  X  |  X  |  X  |                  |    |    |    |
+  | X | | X | | X | |                  v    v    v    v
+  |X  |X|  X|X|  X|X|                [C1]--[C2]--[C3]
+  |  X  |  X  |  X  |                  |    |    |    |
+[P5]--[P6]--[P7]--[P8]                 v    v    v    v
+                                     [P1] [P2] [P3] [P4]
+Dense mesh: N^2 edges
+Every patch talks to every           Bipartite: 2*N*C edges
+other patch directly                 Patches talk via cores only
+                                     All patches preserved
+```
+
+From dense mesh to hub-and-spoke, the core shift is: communication structure, not information capacity.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. High-resolution vision is a genuine bottleneck for ViTs in domains like medical imaging, satellite imagery, and video. The quadratic wall is not manufactured—it's why practitioners still use CNNs or hybrid architectures for high-res tasks. The paper's positioning is honest: they're not claiming ViTs are broken, just that the scaling curve needs fixing.
+
+**Method maturity**: The core-periphery idea is elegant but not novel in isolation—Set Transformers and Perceiver explored similar territory. What's new is maintaining all N tokens while achieving linear complexity. The nested training for elasticity is clever and practical. However, the paper doesn't deeply explore why this works—why can patches communicate effectively through cores without direct interaction? The ablations show it works, but the mechanistic understanding is thin. A simpler baseline to rule out: what if you just used local attention + a few global tokens? That's also O(N) and might be competitive.
+
+**Experimental integrity**: Baselines are fair and comprehensive. They compare against Swin, DeiT, and recent efficient transformers across ImageNet classification, ADE20K segmentation, and COCO detection. The numbers hold up—VECA matches or slightly trails state-of-the-art while using less compute. Red flag: the gains are modest. On ImageNet, VECA-B is 0.3% behind DeiT-B at similar FLOPs. The real win is at higher resolutions where quadratic scaling bites, but those experiments are limited. I'd want to see 2048×2048 results to validate the scaling story.
+
+**Writing quality**: The paper is clear and well-structured. The weakness is in the analysis sections. Section 4.3 (ablations) is thorough but doesn't build intuition about what the cores are learning. Visualizing core attention patterns or analyzing their semantic roles would elevate the paper from "it works" to "here's why it works." The related work section is comprehensive but could be tighter—some citations feel like box-checking rather than positioning.
+
+**Verdict**: weak accept — Solid contribution with practical value, but the conceptual advance is incremental and the performance gains are modest. The elasticity mechanism is the most interesting piece and deserves more exploration.
+
+## Takeaways
+
+The nested training trick for elastic inference is immediately useful beyond this paper. If you're training any model with a tunable capacity dimension (number of heads, hidden size, etc.), you can train across a range of values simultaneously and get a single model that adapts at inference time. This is cheaper than training multiple models or doing post-hoc compression.
+
+The core-periphery pattern is worth trying in other domains where you have many entities that need to exchange information. Think graph neural networks on large graphs, or sequence models on long documents. The key is identifying when direct pairwise interactions are overkill and a mediated communication structure suffices.
+
+For practitioners hitting the quadratic wall with ViTs: VECA is production-ready. The code is clean, the training is stable, and the performance is competitive. If you're working with high-resolution images and can't afford the compute for standard ViTs, this is a viable alternative to Swin or other hierarchical architectures.
+:::
+
+:::zh
+**论文**: [2605.12491](https://arxiv.org/abs/2605.12491)
+**作者**: Alan Z. Song, Yinjie Chen, Mu Nan, Rui Zhang, Jiahang Cao, Weijian Mai, Muquan Yu, Hossein Adeli, Deva Ramanan, Michael J. Tarr
+**分类**: cs.CV, cs.LG
+
+## 缺口
+
+视觉Transformer通过全对全自注意力主导计算机视觉领域，每个图像块都与其他所有图像块进行注意力计算。
+
+这种灵活性的代价是O(N²)复杂度，随图像分辨率二次方增长。
+
+在1024×1024分辨率下，需要对16384个图像块计算注意力——这是2.68亿次成对交互。
+
+先前工作假设这种密集连接是学习丰富视觉表征的必要条件。
+
+现有解决方案分为两类。
+
+稀疏注意力模式（Swin、局部窗口）降低了复杂度但牺牲了全局上下文，需要复杂的架构设计。
+
+交叉注意力方法（Perceiver、Set Transformers）将N个图像块压缩到C个瓶颈token，实现O(N)复杂度但在瓶颈处丢失细粒度空间信息。
+
+本文挑战基础假设：图像块真的需要直接相互对话吗？
+
+```
+问题：ViT注意力复杂度随分辨率O(N^2)增长
+   |
+   v
+假设：成对图像块交互 = 必要条件
+   |
+   v
+方法：核心-外围结构（图像块 <-> 核心）
+   |
+   +---> 证据：O(N)复杂度下达到竞争性能
+   |
+   +---> 结论：直接图像块交互非必要
+```
+
+## 增量
+
+**一句话**：VECA之前，你在二次复杂度的全对全注意力和有损压缩的瓶颈之间选择；VECA之后，你在整个网络中保持所有N个图像块token的同时获得线性复杂度。
+
+### 核心机制
+
+VECA引入一小组C个学习到的"核心"token（通常64-256个），作为通信枢纽。
+
+图像块之间从不直接进行注意力计算。
+
+每层执行两次注意力操作：图像块对核心做注意力，然后核心对图像块做注意力。
+
+核心随机初始化并通过训练精炼，学习捕获对图像块间信息路由最有用的视觉模式。
+
+关键是，VECA在整个网络中维护所有N个输入图像块——没有压缩，没有丢弃。
+
+核心不替代图像块；它们调解通信。
+
+每层更新N个图像块嵌入和C个核心嵌入。
+
+因为图像块只对C个核心做注意力（而非N-1个其他图像块），复杂度从O(N²)降到O(N·C)。
+
+由于C固定不随图像分辨率变化，这实际上是O(N)。
+
+架构支持弹性推理：测试时可以减少核心数量来权衡精度和速度。
+
+用256个核心训练的模型可以用64个核心运行以加快推理，性能平滑下降。
+
+这种弹性来自沿核心轴的嵌套训练，模型学会在不同核心数量下工作。
+
+```
+标准ViT (O(N^2)):
+  图像块1 <---> 图像块2 <---> 图像块3 <---> ... <---> 图像块N
+    ^           ^           ^                       ^
+    |           |           |                       |
+    +-----全对全注意力 (N^2次交互)------------------+
+
+VECA (O(N)):
+  图像块1   图像块2   图像块3   ...   图像块N
+    |        |        |              |
+    v        v        v              v
+  +---------------------------------------+
+  |  核心1   核心2   ...   核心C         |  <-- 学习到的枢纽
+  +---------------------------------------+
+    |        |        |              |
+    v        v        v              v
+  图像块1'  图像块2'  图像块3'  ...  图像块N'
+
+  每个图像块：2C次交互（到核心，从核心）
+  总计：N * 2C = O(N)，C固定
+```
+
+把VECA想象成航空枢纽系统。
+
+在全连接航线网络（标准ViT）中，每个城市都有直飞其他所有城市的航班——需要维护N²条航线。
+
+VECA指定几个枢纽机场（核心）。
+
+城市（图像块）只飞往枢纽，枢纽飞往城市。
+
+你可能需要两跳才能到达目的地，但航线总数从二次降到线性。
+
+枢纽本身不是目的地——它们是学习哪些连接最重要的中转点。
+
+关键是，每个城市都保留自己的机场（所有N个图像块保留）；我们只是改变航线结构，而非消除城市。
+
+### 关键概念
+
+- **核心-外围注意力结构**：不是每个节点都对其他所有节点做注意力的全连接图，而是二分结构：外围节点（图像块）只对核心节点做注意力，核心对外围做注意力。
+
+这与瓶颈架构根本不同。
+
+在瓶颈中（如Perceiver），你将N个token压缩到C个token并丢失信息。
+
+在核心-外围中，你维护N个token但通过C个调解者路由它们的通信。
+
+核心是学习到的参数，不是输入的压缩版本。
+
+它们从随机嵌入开始，学习捕获对任务重要的通信模式。
+
+- **通过嵌套训练实现弹性推理**：模型训练为可使用可变数量的核心。
+
+训练期间，随机采样不同核心数量（比如64、128、256）并为每个计算损失。
+
+梯度更新教会模型在这个范围内工作。
+
+推理时，可以降低核心数量以提速或提高以获得精度。
+
+这不同于典型的模型压缩（剪枝、量化），后者需要单独训练或微调。
+
+弹性被烘焙进训练过程本身。
+
+- **无压缩的线性复杂度**：关键洞察是O(N)复杂度不需要丢弃信息。
+
+传统智慧说：要避免O(N²)，必须将N个token压缩到更少token（瓶颈）。
+
+VECA表明可以保留所有N个token并通过改变注意力模式仍实现O(N)。
+
+每个图像块做2C次注意力操作（对C个核心做注意力，从C个核心接收注意力），总共N × 2C = O(N)次操作，C固定。
+
+图像块从不直接交互，但信息通过核心在它们之间流动。
+
+## 框架转变
+
+```
+之前（全对全注意力）：              之后（核心-外围）：
+
+[P1]--[P2]--[P3]--[P4]               [P1] [P2] [P3] [P4]
+  |  X  |  X  |  X  |                  |    |    |    |
+  | X | | X | | X | |                  v    v    v    v
+  |X  |X|  X|X|  X|X|                [C1]--[C2]--[C3]
+  |  X  |  X  |  X  |                  |    |    |    |
+[P5]--[P6]--[P7]--[P8]                 v    v    v    v
+                                     [P1] [P2] [P3] [P4]
+密集网格：N^2条边
+每个图像块直接与其他所有           二分图：2*N*C条边
+图像块对话                         图像块仅通过核心对话
+                                   所有图像块保留
+```
+
+从密集网格到轮辐式，核心转变是：通信结构，而非信息容量。
+
+## 专家评审
+
+**选题眼光**：真实缺口。
+
+高分辨率视觉是ViT在医学影像、卫星图像和视频等领域的真正瓶颈。
+
+二次复杂度墙不是人造的——这就是为什么实践者仍在高分辨率任务中使用CNN或混合架构。
+
+论文定位诚实：他们不声称ViT有问题，只是扩展曲线需要修正。
+
+**方法成熟度**：核心-外围思想优雅但孤立来看并不新颖——Set Transformers和Perceiver探索过类似领域。
+
+新颖之处在于在实现线性复杂度的同时维护所有N个token。
+
+弹性的嵌套训练巧妙且实用。
+
+但论文没有深入探索为什么这有效——为什么图像块可以通过核心有效通信而无需直接交互？消融实验表明它有效，但机制理解薄弱。
+
+一个更简单的基线需要排除：如果只用局部注意力+几个全局token呢？那也是O(N)且可能有竞争力。
+
+**实验诚意**：基线公平且全面。
+
+他们在ImageNet分类、ADE20K分割和COCO检测上与Swin、DeiT和最近的高效transformer比较。
+
+数字经得起推敲——VECA在使用更少计算的同时匹配或略落后于最先进水平。
+
+值得警惕之处：增益适度。
+
+在ImageNet上，VECA-B在相似FLOPs下比DeiT-B低0.3%。
+
+真正的优势在二次扩展咬人的更高分辨率，但这些实验有限。
+
+我想看2048×2048结果来验证扩展故事。
+
+**写作功力**：论文清晰且结构良好。
+
+弱点在分析部分。
+
+4.3节（消融）彻底但没有建立关于核心在学习什么的直觉。
+
+可视化核心注意力模式或分析它们的语义角色会将论文从"它有效"提升到"这就是为什么它有效"。
+
+相关工作部分全面但可以更紧凑——一些引用感觉像打勾而非定位。
+
+**判决**：弱接收 — 具有实用价值的扎实贡献，但概念进步是渐进的，性能增益适度。
+
+弹性机制是最有趣的部分，值得更多探索。
+
+## 要点总结
+
+弹性推理的嵌套训练技巧在本文之外立即有用。
+
+如果你在训练任何具有可调容量维度（头数、隐藏大小等）的模型，可以同时在一系列值上训练并获得在推理时自适应的单个模型。
+
+这比训练多个模型或做事后压缩更便宜。
+
+核心-外围模式值得在其他需要许多实体交换信息的领域尝试。
+
+想想大图上的图神经网络，或长文档上的序列模型。
+
+关键是识别何时直接成对交互是过度的，调解通信结构就足够了。
+
+对于遇到ViT二次复杂度墙的实践者：VECA可用于生产。
+
+代码干净，训练稳定，性能有竞争力。
+
+如果你在处理高分辨率图像且负担不起标准ViT的计算，这是Swin或其他分层架构的可行替代方案。
+
+:::
