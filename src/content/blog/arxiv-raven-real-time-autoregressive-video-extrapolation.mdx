@@ -1,0 +1,296 @@
+---
+title:
+  en: "RAVEN: Bridging Training-Inference Distribution Gap in Autoregressive Video Generation"
+  zh: "RAVEN：弥合自回归视频生成中的训练-推理分布鸿沟"
+description:
+  en: "A training framework that aligns autoregressive video models with their inference-time behavior by interleaving clean history with noisy predictions, plus a consistency-model RL method that optimizes directly on Gaussian transitions."
+  zh: "一个训练框架，通过交错干净历史和噪声预测来对齐自回归视频模型的推理行为，外加一个直接在高斯转移上优化的一致性模型强化学习方法。"
+date: 2026-05-15
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/raven-real-time-autoregressive-video-extrapolation/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/raven-real-time-autoregressive-video-extrapolation/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2605.15190](https://arxiv.org/abs/2605.15190)
+**Authors**: Yanzuo Lu, Ronglai Zuo, Jiankang Deng
+**Categories**: cs.CV
+
+## The Gap
+
+Autoregressive video diffusion models generate video in chunks, using previously generated frames as context for the next chunk. The standard approach distills a high-quality bidirectional teacher into a fast causal student. The problem: during training, the model sees clean ground-truth history, but at inference it must extrapolate from its own noisy predictions. This distribution mismatch compounds over long sequences—errors accumulate because the model never learned to handle its own mistakes.
+
+Prior work (PAB, AVDC) trains on clean history and hopes the model generalizes. This paper argues that hope is not a strategy.
+
+```
+Problem: Training sees clean history, inference sees noisy self-generated history
+    |
+    v
+Assumption: Models must train on the distribution they'll encounter at test time
+    |
+    v
+Method: RAVEN interleaves clean endpoints + noisy rollout states during training
+        CM-GRPO applies RL directly to consistency model's Gaussian kernel
+    |
+    v
+Evidence: Outperforms PAB/AVDC on UCF-101, MSR-VTT across quality/semantic/motion
+    |
+    v
+Conclusion: Explicit distribution alignment > implicit generalization hope
+```
+
+## The Increment
+
+**One sentence**: Before RAVEN, autoregressive video models trained on clean history and hoped to generalize to noisy self-predictions; after RAVEN, they train directly on interleaved clean-noisy sequences that mirror inference rollouts.
+
+### Core Mechanism
+
+RAVEN's training loop works like this: generate a video autoregressively (self-rollout), then repack that rollout into a training sequence where clean ground-truth chunks alternate with noisy intermediate denoising states. Each chunk's loss now supervises not just the current prediction, but also the history representation that future chunks will depend on. The model learns to denoise while simultaneously learning to use partially-denoised history as context.
+
+The data flow: start with a video, split into chunks. For each chunk position, run the model's denoising process (multiple steps from noise to clean). Collect both the final clean output and intermediate noisy states. Repack these into a sequence: [clean chunk 1, noisy state from chunk 2 denoising, clean chunk 2, noisy state from chunk 3 denoising, ...]. Train the model to predict each next chunk given this mixed-fidelity history.
+
+CM-GRPO adds reinforcement learning on top. Standard flow-model RL (like in prior work) requires simulating an Euler-Maruyama discretization of the flow ODE, which is expensive. RAVEN observes that a consistency model's sampling step is already a conditional Gaussian transition—you can write down the mean and variance analytically. So CM-GRPO treats this Gaussian kernel as the policy, computes advantages using a value network, and applies policy gradient directly. No auxiliary ODE simulation needed.
+
+**Structural metaphor**: Think of training an autoregressive video model like teaching someone to navigate by giving turn-by-turn directions. The old way (PAB/AVDC) is like practicing navigation with a perfect GPS signal during training, then expecting the navigator to handle a glitchy GPS at test time. RAVEN is like training with a GPS that occasionally drops to low accuracy mid-route—the navigator learns to course-correct when the signal degrades. The interleaved clean-noisy sequence is the simulated signal dropout. CM-GRPO is like having a coach who watches the navigator's decisions in real-time and adjusts their strategy based on whether they're heading toward or away from the destination, without needing to simulate every possible wrong turn in advance.
+
+### Key Concepts
+
+- **Distribution mismatch in autoregressive generation**: When a model generates sequences step-by-step, each step's output becomes the next step's input. If the model only trains on ground-truth inputs (clean data), it never sees the kinds of errors it will make at test time. Imagine learning to play piano by only practicing with a metronome, then performing without one—you've never practiced recovering from timing mistakes. In video generation, this means the model trains on perfect history frames but must generate from its own imperfect predictions, and small errors compound into large drift over long sequences.
+
+- **Consistency models**: A consistency model learns to map any noisy version of data directly to the clean version in one step, rather than iteratively denoising like standard diffusion. Think of it as learning a "shortcut function" that jumps from any point on the noisy-to-clean path straight to the destination. The key property: if you apply the model to a slightly-less-noisy version of the data, you should get the same clean output (consistency). This makes sampling fast (one step instead of many), but the training objective is different from standard diffusion—you're enforcing that all points along the denoising trajectory map to the same endpoint.
+
+- **Policy gradient on Gaussian kernels**: In RL, a policy is a probability distribution over actions. For continuous actions, this is often a Gaussian (normal distribution). The policy gradient theorem says you can improve the policy by moving probability mass toward actions that got higher rewards. When RAVEN treats the consistency model's sampling step as a Gaussian policy, it means: the model outputs a mean and variance, you sample from that Gaussian to get the next video chunk, then you adjust the mean/variance to make high-reward samples more likely. The math works out cleanly because Gaussians have simple derivatives, so you can compute gradients without simulating the full sampling process.
+
+## Framework Shift
+
+```
+Before (PAB/AVDC):                    After (RAVEN):
+                                      
+Training:                             Training:
+[GT] -> [GT] -> [GT] -> [GT]          [GT] -> [noisy] -> [GT] -> [noisy]
+ |       |       |       |              |        |         |        |
+ v       v       v       v              v        v         v        v
+Model sees only clean history         Model sees mixed clean/noisy
+                                      
+Inference:                            Inference:
+[GT] -> [pred] -> [pred] -> [pred]    [GT] -> [pred] -> [pred] -> [pred]
+ |        |         |         |         |        |         |         |
+ v        v         v         v         v        v         v         v
+Distribution shift!                   Aligned distribution
+Errors compound                       Trained to handle errors
+```
+
+[One sentence: From training on idealized clean sequences to training on realistic noisy rollouts, the core shift is explicit distribution alignment.]
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The training-inference mismatch in autoregressive generation is well-documented (exposure bias in NLP, compounding errors in RL). Video generation inherits this problem but prior work mostly ignored it, hoping distillation quality would compensate. RAVEN directly addresses the elephant in the room.
+
+**Method maturity**: The interleaved clean-noisy training is conceptually simple—almost obvious in hindsight—but the execution details matter (how to sample noisy states, how to weight losses across the sequence). CM-GRPO is clever: recognizing that consistency models already define a Gaussian policy avoids the Euler-Maruyama overhead of prior flow-model RL. However, the paper doesn't deeply explore failure modes—what happens when the value network is miscalibrated, or when the RL objective conflicts with the distillation objective?
+
+**Experimental integrity**: Baselines are recent and relevant (PAB, AVDC). Metrics span quality (FVD), semantics (CLIP), and motion (dynamic degree). The ablations isolate RAVEN's contribution from CM-GRPO's. One concern: all experiments are on relatively short videos (UCF-101 is 16 frames, MSR-VTT clips are short). The compounding error problem should be most visible on longer horizons—would be stronger to show 64+ frame results. Also, no user study, which matters for video quality perception.
+
+**Writing quality**: The abstract and intro are clear. The method section gets dense—Figure 2's diagram helps but the interleaved sequence construction could use a step-by-step algorithm box. The CM-GRPO derivation in Section 3.2 assumes familiarity with policy gradients; a reader without RL background will struggle. The related work section is thorough but could better position RAVEN relative to scheduled sampling and other exposure bias solutions from NLP.
+
+**Verdict**: weak accept — Addresses a real problem with a principled solution, shows consistent gains, but experiments could be more comprehensive (longer videos, user studies) and the writing could be more accessible.
+
+## Takeaways
+
+- **Interleaved training for autoregressive models**: If your model generates sequences and uses its own outputs as future inputs, train it on sequences that mix ground-truth and model-generated content. This applies beyond video—text generation, audio synthesis, any autoregressive domain. The key is sampling the noisy intermediate states in a way that reflects inference-time behavior.
+
+- **Exploit structure in your sampling process**: RAVEN's CM-GRPO works because consistency models have a closed-form Gaussian transition. If your generative model's sampling step has exploitable structure (analytic gradients, known distributions), you can often apply RL more efficiently than treating it as a black-box policy. Look for shortcuts in your model's math.
+
+- **Value networks for generation quality**: Using a learned value function to estimate long-term quality (rather than just immediate reward) is underexplored in generative models. RAVEN's value network predicts cumulative reward over the remaining sequence. This could transfer to other multi-step generation tasks where you want to optimize for end-to-end quality, not just per-step losses.
+:::
+
+:::zh
+**论文**: [2605.15190](https://arxiv.org/abs/2605.15190)
+**作者**: Yanzuo Lu, Ronglai Zuo, Jiankang Deng
+**分类**: cs.CV
+
+## 缺口
+
+自回归视频扩散模型分块生成视频，用之前生成的帧作为下一块的上下文。
+
+标准做法是把高质量的双向教师模型蒸馏成快速的因果学生模型。
+
+问题在于：训练时模型看到的是干净的真实历史，但推理时必须从自己的噪声预测中外推。
+
+这种分布不匹配在长序列上会复合——错误累积，因为模型从未学过如何处理自己的错误。
+
+先前工作（PAB、AVDC）在干净历史上训练，寄希望于模型能泛化。
+
+本文认为希望不是策略。
+
+```
+问题：训练看到干净历史，推理看到噪声自生成历史
+    |
+    v
+假设：模型必须在测试时会遇到的分布上训练
+    |
+    v
+方法：RAVEN 在训练时交错干净端点 + 噪声展开状态
+      CM-GRPO 直接在一致性模型的高斯核上应用强化学习
+    |
+    v
+证据：在 UCF-101、MSR-VTT 上的质量/语义/运动指标超越 PAB/AVDC
+    |
+    v
+结论：显式分布对齐 > 隐式泛化希望
+```
+
+## 增量
+
+**一句话**: RAVEN 之前，自回归视频模型在干净历史上训练并希望泛化到噪声自预测；RAVEN 之后，它们直接在镜像推理展开的交错干净-噪声序列上训练。
+
+### 核心机制
+
+RAVEN 的训练循环这样工作：自回归生成一段视频（自展开），然后把这个展开重新打包成训练序列，其中干净的真实块与噪声中间去噪状态交替出现。
+
+每个块的损失现在不仅监督当前预测，还监督未来块将依赖的历史表示。
+
+模型学习去噪的同时，也学习使用部分去噪的历史作为上下文。
+
+数据流：从一段视频开始，分成块。
+
+对每个块位置，运行模型的去噪过程（从噪声到干净的多步）。
+
+收集最终的干净输出和中间噪声状态。
+
+重新打包成序列：[干净块1，块2去噪的噪声状态，干净块2，块3去噪的噪声状态，...]。
+
+训练模型在给定这种混合保真度历史的情况下预测下一块。
+
+CM-GRPO 在此基础上添加强化学习。
+
+标准的流模型强化学习（如先前工作）需要模拟流常微分方程的 Euler-Maruyama 离散化，成本高昂。
+
+RAVEN 观察到一致性模型的采样步骤本身就是条件高斯转移——可以解析地写出均值和方差。
+
+所以 CM-GRPO 把这个高斯核当作策略，用价值网络计算优势，直接应用策略梯度。
+
+不需要辅助的常微分方程模拟。
+
+**核喻**：训练自回归视频模型就像教人导航，给出逐步指令。
+
+旧方法（PAB/AVDC）像是训练时用完美的 GPS 信号练习导航，然后期望导航者在测试时能处理故障的 GPS。
+
+RAVEN 像是用偶尔会降到低精度的 GPS 训练——导航者学会在信号退化时纠正路线。
+
+交错的干净-噪声序列就是模拟的信号丢失。
+
+CM-GRPO 像是有个教练实时观察导航者的决策，根据他们是朝向还是远离目的地来调整策略，而不需要提前模拟每一个可能的错误转弯。
+
+### 关键概念
+
+- **自回归生成中的分布不匹配**：当模型逐步生成序列时，每一步的输出成为下一步的输入。
+
+如果模型只在真实输入（干净数据）上训练，它永远看不到测试时会犯的那种错误。
+
+想象学钢琴时只用节拍器练习，然后不用节拍器表演——你从未练习过从节奏错误中恢复。
+
+在视频生成中，这意味着模型在完美历史帧上训练，但必须从自己不完美的预测中生成，小错误在长序列上复合成大漂移。
+
+- **一致性模型**：一致性模型学习把数据的任何噪声版本一步直接映射到干净版本，而不是像标准扩散那样迭代去噪。
+
+把它想象成学习一个"捷径函数"，从噪声到干净路径上的任何点直接跳到目的地。
+
+关键性质：如果你把模型应用到数据的稍微不那么噪声的版本上，应该得到相同的干净输出（一致性）。
+
+这使采样变快（一步而不是多步），但训练目标与标准扩散不同——你在强制去噪轨迹上的所有点都映射到同一端点。
+
+- **高斯核上的策略梯度**：在强化学习中，策略是动作上的概率分布。
+
+对于连续动作，这通常是高斯（正态分布）。
+
+策略梯度定理说你可以通过把概率质量移向获得更高奖励的动作来改进策略。
+
+当 RAVEN 把一致性模型的采样步骤当作高斯策略时，意思是：模型输出均值和方差，你从那个高斯采样得到下一个视频块，然后调整均值/方差使高奖励样本更可能。
+
+数学算得很干净，因为高斯有简单的导数，所以你可以计算梯度而不用模拟完整的采样过程。
+
+## 框架转变
+
+```
+之前（PAB/AVDC）：                  之后（RAVEN）：
+                                      
+训练：                                训练：
+[真实] -> [真实] -> [真实] -> [真实]  [真实] -> [噪声] -> [真实] -> [噪声]
+  |        |         |         |        |         |         |         |
+  v        v         v         v        v         v         v         v
+模型只看到干净历史                    模型看到混合干净/噪声
+                                      
+推理：                                推理：
+[真实] -> [预测] -> [预测] -> [预测]  [真实] -> [预测] -> [预测] -> [预测]
+  |        |         |         |        |         |         |         |
+  v        v         v         v        v         v         v         v
+分布偏移！                            对齐的分布
+错误复合                              训练处理错误
+```
+
+[一句话：从在理想化干净序列上训练到在现实噪声展开上训练，核心转变是显式分布对齐。
+
+]
+
+## 专家评审
+
+**选题眼光**：真实缺口。
+
+自回归生成中的训练-推理不匹配有充分记录（自然语言处理中的暴露偏差，强化学习中的复合错误）。
+
+视频生成继承了这个问题，但先前工作大多忽略它，寄希望于蒸馏质量能补偿。
+
+RAVEN 直接解决房间里的大象。
+
+**方法成熟度**：交错干净-噪声训练在概念上很简单——事后看几乎显而易见——但执行细节很重要（如何采样噪声状态，如何在序列上加权损失）。
+
+CM-GRPO 很巧妙：认识到一致性模型已经定义了高斯策略，避免了先前流模型强化学习的 Euler-Maruyama 开销。
+
+然而，论文没有深入探索失败模式——当价值网络校准错误时会发生什么，或者当强化学习目标与蒸馏目标冲突时？
+
+**实验诚意**：基线是最近的相关工作（PAB、AVDC）。
+
+指标涵盖质量（FVD）、语义（CLIP）和运动（动态度）。
+
+消融实验隔离了 RAVEN 和 CM-GRPO 的贡献。
+
+一个担忧：所有实验都在相对短的视频上（UCF-101 是16帧，MSR-VTT 片段很短）。
+
+复合错误问题应该在更长的时间范围上最明显——展示64+帧结果会更有力。
+
+另外，没有用户研究，这对视频质量感知很重要。
+
+**写作功力**：摘要和引言清晰。
+
+方法部分变得密集——图2的示意图有帮助，但交错序列构造可以用逐步算法框来说明。
+
+第3.2节的 CM-GRPO 推导假设读者熟悉策略梯度；没有强化学习背景的读者会挣扎。
+
+相关工作部分很全面，但可以更好地将 RAVEN 相对于自然语言处理中的计划采样和其他暴露偏差解决方案定位。
+
+**判决**：弱接收 — 用原则性解决方案解决真实问题，显示一致的增益，但实验可以更全面（更长视频、用户研究），写作可以更易懂。
+
+## 要点总结
+
+- **自回归模型的交错训练**：如果你的模型生成序列并使用自己的输出作为未来输入，在混合真实和模型生成内容的序列上训练它。
+
+这适用于视频之外——文本生成、音频合成、任何自回归领域。
+
+关键是以反映推理时行为的方式采样噪声中间状态。
+
+- **利用采样过程中的结构**：RAVEN 的 CM-GRPO 有效是因为一致性模型有闭式高斯转移。
+
+如果你的生成模型的采样步骤有可利用的结构（解析梯度、已知分布），你通常可以比把它当作黑盒策略更高效地应用强化学习。
+
+在模型的数学中寻找捷径。
+
+- **用于生成质量的价值网络**：使用学习的价值函数来估计长期质量（而不仅仅是即时奖励）在生成模型中探索不足。
+
+RAVEN 的价值网络预测剩余序列上的累积奖励。
+
+这可以迁移到其他多步生成任务，在那里你想优化端到端质量，而不仅仅是每步损失。
+
+:::
