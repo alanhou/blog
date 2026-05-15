@@ -1,0 +1,358 @@
+---
+title:
+  en: "SANA-WM: Minute-Scale World Modeling with 36× Faster Inference"
+  zh: "SANA-WM：分钟级世界模型，推理速度提升36倍"
+description:
+  en: "A 2.6B-parameter world model that generates 60-second, 720p videos with precise camera control, matching industrial quality while training in 15 days on 64 GPUs and running on a single consumer GPU."
+  zh: "一个26亿参数的世界模型，生成60秒720p视频并精确控制相机，达到工业级质量，仅需64块GPU训练15天，单张消费级GPU即可运行。"
+date: 2026-05-15
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/sana-wm-efficient-minute-scale-world/HeroScene.png"
+---
+
+![Concept animation](/arxiv-visuals/sana-wm-efficient-minute-scale-world/ConceptScene.gif)
+
+
+
+![Hero diagram](/arxiv-visuals/sana-wm-efficient-minute-scale-world/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2605.15178](https://arxiv.org/abs/2605.15178)
+**Authors**: Haoyi Zhu, Haozhe Liu, Yuyang Zhao, Tian Ye, Junsong Chen, Jincheng Yu, Tong He, Song Han, Enze Xie
+**Categories**: cs.CV
+
+## The Gap
+
+World models that generate long, controllable videos face a brutal tradeoff: scale up to industrial quality (LingBot-World, HY-WorldPlay) and you need massive compute, proprietary datasets, and inference clusters. Scale down to open-source models and you get 10-second clips with drifting cameras and blurry frames. The core bottleneck is quadratic attention cost over long sequences—softmax attention can't handle minute-scale videos without exploding memory, but linear attention alternatives sacrifice quality. Meanwhile, camera control remains fragile: existing methods either ignore pose entirely or treat it as weak conditioning that degrades over time.
+
+```
+Problem: Long video generation hits memory wall
+   |
+   v
+Assumption: Can hybrid attention (linear + softmax) 
+            balance efficiency and quality?
+   |
+   v
+Method: Frame-wise linear attention (GDN) + 
+        cross-frame softmax + dual-branch camera control
+   |
+   v
+Evidence: 60s videos at 720p, 36x faster inference,
+          comparable quality to industrial models
+   |
+   v
+Conclusion: Efficient long-context modeling is viable
+            with architectural surgery, not just scale
+```
+
+## The Increment
+
+**One sentence**: Before SANA-WM, generating minute-long, camera-controlled videos required industrial-scale infrastructure; after, a single consumer GPU can do it in 34 seconds.
+
+### Core Mechanism
+
+SANA-WM is a 2.6B-parameter diffusion transformer with three interlocking subsystems. First, the **Hybrid Linear Attention** backbone splits temporal modeling into two streams: within each frame, Gated DeltaNet (GDN) processes spatial tokens with linear complexity; across frames, standard softmax attention handles long-range dependencies but only operates on downsampled representations. This keeps memory usage tractable while preserving quality.
+
+Second, the **Dual-Branch Camera Control** module injects 6-DoF pose information through two parallel paths. One branch encodes camera trajectories as learnable embeddings and adds them to the diffusion timestep embedding. The other branch uses cross-attention to condition each spatial-temporal block on the pose sequence. This redundancy ensures the model can't ignore camera commands—if one path weakens, the other compensates.
+
+Third, a **Two-Stage Generation Pipeline** first generates a draft video, then applies a long-video refiner that operates on overlapping windows to smooth out temporal inconsistencies. The refiner uses the same architecture but is trained specifically to fix artifacts in stage-1 outputs.
+
+```
+Input: Noise + Text + Camera Trajectory
+   |
+   v
+[Stage 1: Base Generation]
+   |
+   +---> Frame-wise GDN (linear attention within frames)
+   |        |
+   |        v
+   +---> Cross-frame Softmax (attention across frames, downsampled)
+   |        |
+   |        v
+   +---> Dual Camera Injection:
+   |        |- Timestep embedding branch
+   |        |- Cross-attention branch
+   |
+   v
+Draft Video (60s, 720p)
+   |
+   v
+[Stage 2: Refinement]
+   |
+   +---> Sliding window refiner (fixes temporal artifacts)
+   |
+   v
+Final Video
+```
+
+Think of SANA-WM as a **film production pipeline**. The GDN is the cinematographer who frames each shot (spatial coherence within frames), while the cross-frame softmax is the editor who ensures scene transitions make sense (temporal coherence across frames). The dual-branch camera control is like having both a shot list (timestep embedding) and a director on set (cross-attention) shouting instructions—if the crew ignores the shot list, the director intervenes. The two-stage pipeline mirrors rough cut → final cut: stage 1 gets the story down, stage 2 polishes continuity errors.
+
+### Key Concepts
+
+- **Gated DeltaNet (GDN)**: Standard attention computes a score for every pair of tokens, which costs O(n²) memory for n tokens. Linear attention methods approximate this by factoring the attention matrix, reducing cost to O(n). GDN is a specific linear attention variant that uses a "delta" mechanism—it computes attention incrementally by tracking how much each token's influence changes from one position to the next, rather than recomputing everything from scratch. The "gated" part means it learns to selectively forget irrelevant history, preventing error accumulation over long sequences. Concrete example: when generating frame 100, GDN doesn't need to store attention scores for all 99 previous frames—it just updates a running summary of what matters.
+
+- **6-DoF Camera Pose**: Six Degrees of Freedom means the camera's position and orientation in 3D space: three translation coordinates (x, y, z) and three rotation angles (pitch, yaw, roll). In video generation, this is the difference between "move the camera left" (vague) and "translate -2 meters on the x-axis while rotating 15° clockwise" (precise). SANA-WM extracts these from real videos using structure-from-motion algorithms, then uses them as conditioning signals during training. At inference time, you specify a trajectory (e.g., "orbit around the subject") and the model generates video that follows it.
+
+- **Dual-Branch Conditioning**: Most conditional generation models inject control signals at one point in the architecture (e.g., concatenate to the input or add to embeddings). Dual-branch means injecting the same signal through two independent pathways. Why? Redundancy prevents mode collapse—if the model learns to ignore one branch (common in diffusion models), the other branch still enforces the constraint. It's like giving someone directions both verbally and with a map: if they mishear you, they still have the map.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (SANA-WM):
+
+Full Softmax Attention               Hybrid Attention
++-------------------+                +-------------------+
+| Frame 1 <-> All   |                | Frame 1 (GDN)     |
+| Frame 2 <-> All   |                |   +               |
+| Frame 3 <-> All   |                | Cross-frame       |
+|  ...              |                | Softmax (sparse)  |
+| Frame N <-> All   |                +-------------------+
++-------------------+                Memory: O(n) not O(n^2)
+Memory: O(n^2)                       
+
+Single Camera Branch                 Dual Camera Branch
++-------------------+                +-------------------+
+| Pose -> Embedding |                | Pose -> Timestep  |
+|         |         |                |    +              |
+|         v         |                | Pose -> CrossAttn |
+|    Diffusion      |                +-------------------+
++-------------------+                Redundant enforcement
+Weak conditioning                    
+```
+
+From monolithic attention to stratified attention, the core shift is **separating intra-frame and inter-frame dependencies** to break the quadratic bottleneck.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Minute-scale video generation is the frontier for world models—10-second clips are a solved problem, but scaling to 60+ seconds exposes fundamental architectural limits. The paper correctly identifies that industrial models achieve this through brute force (more data, more compute), leaving open-source efforts stuck at toy scale. This is a high-value target.
+
+**Method maturity**: Hybrid attention is clever but not novel—it's a known trick in long-context modeling (see Mamba, RWKV). The real contribution is the engineering: figuring out exactly where to apply linear vs. softmax attention, how to inject camera control redundantly, and building a robust annotation pipeline for metric-scale poses. The two-stage refinement is pragmatic but feels like a patch—ideally, stage 1 would be good enough. The distillation to RTX 5090 is impressive and shows the authors care about deployment, not just benchmarks.
+
+**Experimental integrity**: Baselines are fair—they compare against both open-source (CogVideoX, Vidu) and industrial models (LingBot-World, HY-WorldPlay). The 36× throughput claim is well-documented. However, the paper leans heavily on a custom benchmark ("one-minute world-model benchmark") without releasing it, which makes independent validation hard. The ablation studies are thorough, but I'd like to see failure cases—what happens when the camera trajectory is physically impossible? Does the model hallucinate or gracefully degrade?
+
+**Writing quality**: The abstract oversells ("remarkable efficiency") and the related work section is a laundry list. Section 3.2 (Hybrid Linear Attention) is dense—splitting it into "Why Linear Attention?" and "Why Hybrid?" would help. The annotation pipeline (Section 3.4) is buried but is arguably the most important contribution—without metric-scale poses, none of this works. Elevating that section and showing annotation examples would strengthen the paper.
+
+**Verdict**: **weak accept** — Solid engineering work that pushes open-source world models to a new scale, but the core ideas are incremental rather than foundational. The deployment story (single GPU inference) is compelling for practitioners.
+
+## Takeaways
+
+**Hybrid attention recipe**: When building long-context models, don't treat all dependencies equally. Use linear attention (GDN, Mamba) for high-frequency, local patterns (within-frame spatial coherence) and reserve softmax attention for low-frequency, global patterns (cross-frame temporal coherence). Downsample before applying softmax to keep memory tractable. This pattern transfers to any domain with hierarchical structure—audio (phonemes vs. prosody), code (tokens vs. control flow), genomics (bases vs. regulatory regions).
+
+**Dual-branch conditioning for fragile signals**: If your model keeps ignoring a conditioning signal (camera pose, style vector, constraint), inject it through two independent pathways. One branch should be early (timestep embedding, input concatenation), the other late (cross-attention in the middle layers). This forces the model to use the signal—if one branch weakens during training, the other compensates.
+
+**Annotation as a first-class problem**: The paper's success hinges on extracting accurate 6-DoF poses from public videos. They built a custom pipeline (structure-from-motion + filtering) to get metric-scale trajectories, not just relative motion. If you're working on controllable generation, invest in annotation infrastructure early—garbage conditioning signals produce garbage control.
+:::
+
+:::zh
+**论文**: [2605.15178](https://arxiv.org/abs/2605.15178)
+**作者**: Haoyi Zhu, Haozhe Liu, Yuyang Zhao, Tian Ye, Junsong Chen, Jincheng Yu, Tong He, Song Han, Enze Xie
+**分类**: cs.CV
+
+## 缺口
+
+生成长时可控视频的世界模型面临残酷的权衡：扩大到工业级质量（LingBot-World、HY-WorldPlay）需要海量算力、专有数据集和推理集群。
+
+缩小到开源模型则只能生成10秒片段，相机漂移、画面模糊。
+
+核心瓶颈是长序列上的二次方注意力成本——softmax注意力无法处理分钟级视频而不爆显存，但线性注意力替代方案又牺牲质量。
+
+同时，相机控制仍然脆弱：现有方法要么完全忽略姿态，要么将其视为弱条件，随时间衰减。
+
+```
+问题：长视频生成撞上显存墙
+   |
+   v
+假设：混合注意力（线性+softmax）能否
+      平衡效率与质量？
+   |
+   v
+方法：帧内线性注意力（GDN）+ 
+      跨帧softmax + 双分支相机控制
+   |
+   v
+证据：60秒720p视频，推理快36倍，
+      质量媲美工业模型
+   |
+   v
+结论：高效长上下文建模可行，
+      靠架构手术而非单纯扩大规模
+```
+
+## 增量
+
+**一句话**：SANA-WM之前，生成分钟级相机可控视频需要工业级基础设施；之后，单张消费级GPU能在34秒内完成。
+
+### 核心机制
+
+SANA-WM是一个26亿参数的扩散Transformer，包含三个互锁子系统。
+
+首先，**混合线性注意力**主干将时序建模分为两条流：在每帧内部，门控DeltaNet（GDN）以线性复杂度处理空间token；跨帧之间，标准softmax注意力处理长程依赖，但仅作用于下采样表示。
+
+这样既保持显存可控，又不损失质量。
+
+其次，**双分支相机控制**模块通过两条并行路径注入6自由度姿态信息。
+
+一条分支将相机轨迹编码为可学习嵌入，加到扩散时间步嵌入上。
+
+另一条分支用交叉注意力让每个时空块以姿态序列为条件。
+
+这种冗余确保模型无法忽略相机指令——如果一条路径减弱，另一条会补偿。
+
+第三，**两阶段生成流水线**先生成草稿视频，再应用长视频精炼器，在重叠窗口上操作以平滑时序不一致。
+
+精炼器使用相同架构，但专门训练来修复第一阶段输出的瑕疵。
+
+```
+输入：噪声 + 文本 + 相机轨迹
+   |
+   v
+[阶段1：基础生成]
+   |
+   +---> 帧内GDN（帧内线性注意力）
+   |        |
+   |        v
+   +---> 跨帧Softmax（跨帧注意力，下采样）
+   |        |
+   |        v
+   +---> 双路相机注入：
+   |        |- 时间步嵌入分支
+   |        |- 交叉注意力分支
+   |
+   v
+草稿视频（60秒，720p）
+   |
+   v
+[阶段2：精炼]
+   |
+   +---> 滑动窗口精炼器（修复时序瑕疵）
+   |
+   v
+最终视频
+```
+
+把SANA-WM想象成**电影制作流水线**。
+
+GDN是摄影师，负责构图每个镜头（帧内空间连贯性），跨帧softmax是剪辑师，确保场景转换合理（跨帧时序连贯性）。
+
+双分支相机控制就像同时有分镜表（时间步嵌入）和现场导演（交叉注意力）喊指令——如果剧组忽略分镜表，导演会介入。
+
+两阶段流水线对应粗剪→精剪：第一阶段把故事讲下来，第二阶段打磨连续性错误。
+
+### 关键概念
+
+- **门控DeltaNet（GDN）**：标准注意力为每对token计算分数，对n个token需要O(n²)显存。
+
+线性注意力方法通过分解注意力矩阵来近似，将成本降至O(n)。
+
+GDN是一种特定的线性注意力变体，使用"delta"机制——它通过跟踪每个token的影响从一个位置到下一个位置变化了多少来增量计算注意力，而非从头重算一切。
+
+"门控"部分意味着它学会选择性遗忘无关历史，防止长序列上的误差累积。
+
+具体例子：生成第100帧时，GDN不需要存储前99帧的所有注意力分数——它只更新一个关于什么重要的运行摘要。
+
+- **6自由度相机姿态**：六个自由度指相机在3D空间中的位置和方向：三个平移坐标（x、y、z）和三个旋转角度（俯仰、偏航、翻滚）。
+
+在视频生成中，这是"把相机往左移"（模糊）和"在x轴上平移-2米同时顺时针旋转15°"（精确）的区别。
+
+SANA-WM用运动恢复结构算法从真实视频中提取这些参数，然后在训练时用作条件信号。
+
+推理时，你指定一条轨迹（如"绕主体环绕"），模型生成遵循它的视频。
+
+- **双分支条件化**：大多数条件生成模型在架构的一个点注入控制信号（如拼接到输入或加到嵌入）。
+
+双分支意味着通过两条独立路径注入同一信号。
+
+为什么？冗余防止模式坍缩——如果模型学会忽略一条分支（扩散模型中常见），另一条分支仍能强制约束。
+
+就像给人指路时既口头说又给地图：如果他们听错了，还有地图。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（SANA-WM）：
+
+全Softmax注意力                   混合注意力
++-------------------+             +-------------------+
+| 帧1 <-> 所有帧    |             | 帧1（GDN）        |
+| 帧2 <-> 所有帧    |             |   +               |
+| 帧3 <-> 所有帧    |             | 跨帧Softmax       |
+|  ...              |             | （稀疏）          |
+| 帧N <-> 所有帧    |             +-------------------+
++-------------------+             显存：O(n)非O(n^2)
+显存：O(n^2)                      
+
+单相机分支                        双相机分支
++-------------------+             +-------------------+
+| 姿态 -> 嵌入      |             | 姿态 -> 时间步    |
+|         |         |             |    +              |
+|         v         |             | 姿态 -> 交叉注意力|
+|    扩散过程       |             +-------------------+
++-------------------+             冗余强制
+弱条件化                          
+```
+
+从整体注意力到分层注意力，核心转变是**分离帧内和帧间依赖**以打破二次方瓶颈。
+
+## 专家评审
+
+**选题眼光**：真实缺口。
+
+分钟级视频生成是世界模型的前沿——10秒片段已是解决问题，但扩展到60+秒暴露了根本性架构限制。
+
+论文正确识别出工业模型通过蛮力（更多数据、更多算力）实现这一点，让开源努力困在玩具规模。
+
+这是高价值目标。
+
+**方法成熟度**：混合注意力巧妙但非新颖——这是长上下文建模中的已知技巧（见Mamba、RWKV）。
+
+真正贡献是工程：弄清楚在哪里精确应用线性vs softmax注意力，如何冗余注入相机控制，以及为度量尺度姿态构建鲁棒标注流水线。
+
+两阶段精炼务实但感觉像补丁——理想情况下第一阶段应该足够好。
+
+蒸馏到RTX 5090令人印象深刻，显示作者关心部署而非仅仅基准测试。
+
+**实验诚意**：基线公平——他们对比了开源（CogVideoX、Vidu）和工业模型（LingBot-World、HY-WorldPlay）。
+
+36倍吞吐量声明有充分文档。
+
+然而，论文严重依赖自定义基准（"分钟级世界模型基准"）而未发布，这使独立验证困难。
+
+消融研究彻底，但我想看失败案例——当相机轨迹物理上不可能时会发生什么？模型会幻觉还是优雅降级？
+
+**写作功力**：摘要过度推销（"卓越效率"），相关工作部分是清单式罗列。
+
+3.2节（混合线性注意力）密集——拆分成"为何线性注意力？"和"为何混合？"会有帮助。
+
+标注流水线（3.4节）被埋没，但可以说是最重要的贡献——没有度量尺度姿态，这一切都不工作。
+
+提升该节并展示标注示例会增强论文。
+
+**判决**：**弱接收** — 扎实的工程工作，将开源世界模型推向新规模，但核心思想是渐进而非基础性的。
+
+部署故事（单GPU推理）对实践者有吸引力。
+
+## 要点总结
+
+**混合注意力配方**：构建长上下文模型时，不要平等对待所有依赖。
+
+对高频局部模式（帧内空间连贯性）使用线性注意力（GDN、Mamba），为低频全局模式（跨帧时序连贯性）保留softmax注意力。
+
+应用softmax前下采样以保持显存可控。
+
+这种模式迁移到任何有层次结构的领域——音频（音素vs韵律）、代码（token vs控制流）、基因组学（碱基vs调控区域）。
+
+**脆弱信号的双分支条件化**：如果你的模型持续忽略条件信号（相机姿态、风格向量、约束），通过两条独立路径注入它。
+
+一条分支应该早（时间步嵌入、输入拼接），另一条晚（中间层的交叉注意力）。
+
+这迫使模型使用信号——如果一条分支在训练中减弱，另一条会补偿。
+
+**标注作为一等问题**：论文的成功取决于从公开视频中提取准确的6自由度姿态。
+
+他们构建了自定义流水线（运动恢复结构+过滤）来获得度量尺度轨迹，而非仅相对运动。
+
+如果你在做可控生成，早期投资标注基础设施——垃圾条件信号产生垃圾控制。
+
+:::
