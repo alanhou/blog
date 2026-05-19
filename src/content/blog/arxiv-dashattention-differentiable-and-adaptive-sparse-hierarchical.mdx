@@ -1,0 +1,405 @@
+---
+title:
+  en: "DashAttention: Making Sparse Attention Fully Differentiable with Adaptive Block Selection"
+  zh: "DashAttention：通过自适应块选择实现全可微稀疏注意力"
+description:
+  en: "A hierarchical attention mechanism that uses adaptive sparsity to select variable numbers of relevant tokens per query, maintaining full differentiability while achieving 75% sparsity with comparable accuracy to full attention."
+  zh: "一种分层注意力机制，使用自适应稀疏性为每个查询选择可变数量的相关token，在保持全可微性的同时实现75%稀疏度且准确率与全注意力相当。"
+date: 2026-05-19
+tags: ["arxiv", "ai", "cs.cl", "cs.ai", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2605.18753](https://arxiv.org/abs/2605.18753)
+**Authors**: Yuxiang Huang, Nuno M. T. Gonçalves, Federico Alvetreti, Lei Li, Xu Han, Edoardo M. Ponti, André F. T. Martins, Marcos V. Treviso
+**Categories**: cs.CL, cs.AI, cs.Lg
+
+## The Gap
+
+Hierarchical attention methods like NSA and InfLLMv2 try to make long-context processing cheaper by first selecting top-k relevant blocks, then applying full attention only within those blocks. The problem: top-k assumes every query needs exactly k blocks, which is obviously wrong—some queries need more context, some need less. Worse, top-k is non-differentiable, so the coarse selection stage can't learn from the fine-grained attention stage. You're training two stages in isolation when they should inform each other.
+
+The paper also identifies a subtle mathematical issue: existing methods are "dispersive"—their attention distributions spread out as context grows, degrading long-range modeling. This happens because they normalize attention scores within selected blocks without accounting for what was discarded.
+
+```
+Problem: Fixed top-k block selection
+    |
+    v
+Assumption: Queries need variable context amounts
+    |
+    v
+Method: Replace top-k with adaptive α-entmax
+    |
+    +---> Enables gradient flow between stages
+    |
+    +---> Provides prior for second-stage softmax
+    |
+    v
+Evidence: 75% sparsity, comparable accuracy
+    |      Non-dispersive property proven
+    |      Better Pareto frontier than baselines
+    |
+    v
+Conclusion: Differentiable hierarchy + adaptivity
+            = better long-context modeling
+```
+
+## The Increment
+
+**One sentence**: Before, hierarchical attention used fixed top-k selection with gradient cutoff; after, it uses adaptive sparsity that learns how much context each query actually needs while keeping the entire pipeline differentiable.
+
+### Core Mechanism
+
+DashAttention has two stages. Stage 1 divides keys/values into blocks and computes a coarse attention score for each block using α-entmax, a differentiable sparse transformation. Unlike top-k which always picks exactly k blocks, α-entmax can assign zero weight to irrelevant blocks—the number of selected blocks adapts to each query. The α parameter controls sparsity: higher α means sparser selection.
+
+Stage 2 takes the selected blocks and applies standard softmax attention, but with a twist: the coarse scores from Stage 1 become a prior. Specifically, the fine-grained attention logits are added to log(coarse scores) before softmax. This means tokens in blocks that Stage 1 deemed important get a boost, while tokens in barely-selected blocks are downweighted. The entire pipeline is differentiable—gradients from Stage 2 flow back through the log operation into Stage 1's α-entmax.
+
+```
+Input Query Q, Keys K, Values V
+    |
+    v
+[Stage 1: Block-level Selection]
+    |
+    +---> Divide K,V into blocks
+    |
+    +---> Compute coarse scores: Q * block_summary
+    |
+    +---> Apply α-entmax (adaptive sparse softmax)
+    |         |
+    |         +---> Output: p_coarse (sparse block weights)
+    |
+    v
+[Stage 2: Token-level Attention]
+    |
+    +---> For each selected block:
+    |         Compute fine logits: Q * K_block
+    |         Add prior: logits + log(p_coarse)
+    |         Apply softmax
+    |
+    +---> Weighted sum with V
+    |
+    v
+Output: Attention result
+    ^
+    |
+[Gradients flow back through both stages]
+```
+
+Think of it like a two-stage hiring process. Stage 1 is resume screening: you quickly scan each resume (block) and decide how interested you are. But instead of rigidly picking "top 5 resumes," you use a flexible threshold—some candidates are clear nos (zero weight), some are maybes (small weight), some are strong yeses (high weight). The number of resumes you advance depends on their quality, not a quota.
+
+Stage 2 is the interview: you carefully evaluate each candidate who passed screening. But you don't forget Stage 1's assessment—if someone barely made it through screening, you're skeptical during the interview (their answers need to be really good to overcome the low prior). If someone had a stellar resume, you're predisposed to rate them highly (their prior boosts their interview score). Crucially, after interviews conclude, you can reflect back: "I should have screened resumes differently"—the gradient flows backward, improving your screening criteria for next time.
+
+### Key Concepts
+
+- **α-entmax**: Imagine softmax, but with a dial that controls sparsity. Regular softmax spreads probability mass across all options—even terrible ones get a tiny sliver. α-entmax with α > 1 can assign exactly zero to bad options. Higher α means more aggressive pruning. At α=1, you recover standard softmax (no sparsity). At α=2, you get sparsemax (a known sparse transformation). The key property: it's differentiable everywhere, unlike top-k which has a discontinuous gradient. Concretely, if you have scores [5, 3, 1, 0.1], softmax gives [0.71, 0.19, 0.07, 0.03], but α-entmax with α=1.5 might give [0.82, 0.18, 0, 0]—the bottom two get exactly zero.
+
+- **Non-dispersive attention**: As context length grows, where does attention probability go? In a dispersive method, it spreads out—if you double the context, each token's attention weight roughly halves, even if the new tokens are irrelevant. This is bad for long-range dependencies. Non-dispersive means attention stays concentrated on relevant tokens regardless of context length. DashAttention achieves this by using the coarse prior: irrelevant blocks get zero weight in Stage 1, so their tokens can't dilute Stage 2's attention distribution. The paper proves this formally: DashAttention's attention weights don't depend on the number of irrelevant tokens added to the context.
+
+- **Hierarchical prior**: Stage 1's coarse scores aren't just a filter—they're a Bayesian prior for Stage 2. In probability terms, Stage 2 computes p(token | query, block is relevant) and Stage 1 provides p(block is relevant | query). The final attention is their product (in log space, a sum). This is why gradients flow: Stage 2's loss can adjust Stage 1's beliefs about block relevance. Without this coupling, Stage 1 is blind to whether its selections actually helped Stage 2.
+
+## Framework Shift
+
+```
+Before (NSA, InfLLMv2):              After (DashAttention):
+
+Stage 1: Coarse Selection            Stage 1: Adaptive Selection
+    |                                     |
+    v                                     v
+[ top-k operation ]                   [ α-entmax ]
+    |                                     |
+    +---> Always k blocks                 +---> Variable # blocks
+    |                                     |
+    +---> No gradient                     +---> Differentiable
+    |                                     |
+    v                                     v
+Stage 2: Fine Attention               Stage 2: Prior-informed Attention
+    |                                     |
+    v                                     v
+[ softmax on selected ]               [ softmax + log(coarse) ]
+    |                                     |
+    +---> Independent of Stage 1          +---> Coupled with Stage 1
+    |                                     |
+    v                                     v
+Result: Dispersive                    Result: Non-dispersive
+        Fixed sparsity                        Adaptive sparsity
+        Gradient cutoff                       End-to-end learning
+```
+
+From rigid two-stage pipeline to adaptive coupled hierarchy, the core shift is replacing discrete selection with continuous sparsity that learns.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Long-context attention is a bottleneck for LLMs, and hierarchical methods are a natural solution. The observation that top-k is both inflexible and non-differentiable is sharp—it's one of those "obvious in hindsight" insights. The dispersive property is a nice theoretical contribution, though its practical impact is less clear from the experiments.
+
+**Method maturity**: Elegant. Using α-entmax is clever but not novel (it's from prior work by Martins et al., one of the co-authors). The real contribution is the hierarchical prior design—adding log(coarse scores) to fine logits is simple but effective. The theoretical analysis (non-dispersiveness proof) is solid. One concern: the method introduces hyperparameters (α, block size) that need tuning. The paper doesn't deeply explore sensitivity to these choices.
+
+**Experimental integrity**: Baselines are fair. The comparison with NSA and InfLLMv2 is direct. The Pareto frontier analysis (accuracy vs. sparsity tradeoff) is the right way to evaluate. However, the experiments are mostly on perplexity and a few downstream tasks—would have liked to see more diverse long-context benchmarks (e.g., retrieval, reasoning over long documents). The speedup claims (2.5× over FlashAttention-3) are impressive but only shown at inference; training speedup is unclear. Also, the Triton implementation is mentioned but not open-sourced in the paper, making reproducibility harder.
+
+**Writing quality**: Clear overall, but the related work section is dense and could be trimmed. The mathematical exposition (especially the non-dispersiveness proof) is rigorous but might lose practitioners. The paper would benefit from more intuitive explanations upfront—the hiring metaphor I used above doesn't appear in the paper, but something like it should. Figure quality is good, though Figure 3 (Pareto frontier) is doing a lot of heavy lifting and could be broken into separate plots for clarity.
+
+**Verdict**: Weak accept — solid contribution with good experimental validation, but incremental rather than transformative. The method is practical and the theory is sound, but it's fundamentally a refinement of existing hierarchical attention rather than a new paradigm.
+
+## Takeaways
+
+**Adaptive sparsity beats fixed sparsity**: If you're building any kind of sparse selection mechanism (not just attention), consider whether your "top-k" is actually justified. Can you replace it with a differentiable sparse transformation that adapts to input difficulty? α-entmax is a drop-in replacement for softmax in many contexts.
+
+**Couple your pipeline stages**: If you have a coarse-to-fine architecture where Stage 1 filters and Stage 2 processes, don't treat them as independent. Make Stage 1's decisions a prior for Stage 2 (in log space if using softmax). This enables end-to-end learning and often improves both stages.
+
+**Non-dispersiveness as a design principle**: When designing attention mechanisms for long contexts, check whether your method is dispersive. A simple test: if you append irrelevant tokens to the context, do attention weights on relevant tokens decrease? If yes, you have a problem. The fix often involves explicit normalization or priors that account for what was filtered out.
+
+**Hierarchical attention is still underexplored**: Despite the hype around linear attention and state-space models, hierarchical attention (coarse-to-fine) remains a practical and effective approach for long contexts. This paper shows there's still room for improvement in how we design the hierarchy.
+:::
+
+:::zh
+**论文**: [2605.18753](https://arxiv.org/abs/2605.18753)
+**作者**: Yuxiang Huang, Nuno M. T. Gonçalves, Federico Alvetreti, Lei Li, Xu Han, Edoardo M. Ponti, André F. T. Martins, Marcos V. Treviso
+**分类**: cs.CL, cs.AI, cs.LG
+
+## 缺口
+
+NSA和InfLLMv2这类分层注意力方法试图通过先选择top-k相关块、再在这些块内应用全注意力来降低长文本处理成本。
+
+问题在于：top-k假设每个查询都需要恰好k个块，这显然不对——有些查询需要更多上下文，有些需要更少。
+
+更糟的是，top-k不可微，粗粒度选择阶段无法从细粒度注意力阶段学习。
+
+你在孤立地训练两个本该相互影响的阶段。
+
+论文还指出了一个微妙的数学问题：现有方法是"发散的"——随着上下文增长，注意力分布会扩散，削弱长程建模能力。
+
+这是因为它们在选定块内归一化注意力分数，却没有考虑被丢弃的内容。
+
+```
+问题：固定的top-k块选择
+    |
+    v
+假设：查询需要可变数量的上下文
+    |
+    v
+方法：用自适应α-entmax替换top-k
+    |
+    +---> 实现阶段间梯度流动
+    |
+    +---> 为第二阶段softmax提供先验
+    |
+    v
+证据：75%稀疏度，准确率相当
+    |      证明了非发散性质
+    |      比基线更好的帕累托前沿
+    |
+    v
+结论：可微分层 + 自适应性
+      = 更好的长文本建模
+```
+
+## 增量
+
+**一句话**：之前，分层注意力用固定top-k选择且梯度截断；
+之后，它用自适应稀疏性学习每个查询实际需要多少上下文，同时保持整个流程可微。
+
+### 核心机制
+
+DashAttention分两个阶段。
+
+第一阶段将键值对分成块，用α-entmax（一种可微稀疏变换）为每个块计算粗粒度注意力分数。
+
+与总是选k个块的top-k不同，α-entmax可以给不相关的块分配零权重——选中的块数量根据每个查询自适应调整。
+
+α参数控制稀疏度：α越高，选择越稀疏。
+
+第二阶段接收选中的块并应用标准softmax注意力，但有个巧妙之处：第一阶段的粗粒度分数成为先验。
+
+具体来说，细粒度注意力logits在softmax前会加上log(粗粒度分数)。
+
+这意味着第一阶段认为重要的块中的token会得到提升，而勉强选中的块中的token会被降权。
+
+整个流程可微——第二阶段的梯度通过log操作回流到第一阶段的α-entmax。
+
+```
+输入查询Q、键K、值V
+    |
+    v
+[第一阶段：块级选择]
+    |
+    +---> 将K,V分成块
+    |
+    +---> 计算粗粒度分数：Q * 块摘要
+    |
+    +---> 应用α-entmax（自适应稀疏softmax）
+    |         |
+    |         +---> 输出：p_coarse（稀疏块权重）
+    |
+    v
+[第二阶段：token级注意力]
+    |
+    +---> 对每个选中的块：
+    |         计算细粒度logits：Q * K_block
+    |         加入先验：logits + log(p_coarse)
+    |         应用softmax
+    |
+    +---> 与V加权求和
+    |
+    v
+输出：注意力结果
+    ^
+    |
+[梯度回流经过两个阶段]
+```
+
+把它想象成两阶段招聘流程。
+
+第一阶段是简历筛选：你快速浏览每份简历（块），决定你有多感兴趣。
+
+但不是死板地选"前5份简历"，而是用灵活的阈值——有些候选人明显不行（零权重），有些是待定（小权重），有些是强烈推荐（高权重）。
+
+你推进多少份简历取决于它们的质量，而非配额。
+
+第二阶段是面试：你仔细评估每个通过筛选的候选人。
+
+但你不会忘记第一阶段的评估——如果某人勉强通过筛选，你在面试时会持怀疑态度（他们的回答需要非常好才能克服低先验）。
+
+如果某人简历出色，你倾向于给高分（他们的先验提升了面试分数）。
+
+关键是，面试结束后，你可以反思："我应该换个方式筛选简历"——梯度向后流动，改进你下次的筛选标准。
+
+### 关键概念
+
+- **α-entmax**：想象softmax，但有个控制稀疏度的旋钮。
+
+常规softmax把概率质量分散到所有选项——即使糟糕的选项也能分到一小块。
+
+α>1的α-entmax可以给差选项分配恰好零。
+
+α越高，剪枝越激进。
+
+α=1时，你得到标准softmax（无稀疏）。
+
+α=2时，你得到sparsemax（一种已知的稀疏变换）。
+
+关键性质：它处处可微，不像top-k有不连续梯度。
+
+具体来说，如果你有分数[5, 3, 1, 0.1]，softmax给出[0.71, 0.19, 0.07, 0.03]，但α=1.5的α-entmax可能给出[0.82, 0.18, 0, 0]——最后两个得到恰好零。
+
+- **非发散注意力**：随着上下文长度增长，注意力概率去哪了？
+在发散方法中，它会扩散——如果你把上下文翻倍，每个token的注意力权重大约减半，即使新token不相关。
+
+这对长程依赖不利。
+
+非发散意味着注意力保持集中在相关token上，无论上下文长度如何。
+
+DashAttention通过粗粒度先验实现这一点：不相关的块在第一阶段得到零权重，所以它们的token无法稀释第二阶段的注意力分布。
+
+论文正式证明了这一点：DashAttention的注意力权重不依赖于添加到上下文中的不相关token数量。
+
+- **分层先验**：第一阶段的粗粒度分数不只是过滤器——它们是第二阶段的贝叶斯先验。
+
+用概率术语说，第二阶段计算p(token | query, 块相关)，第一阶段提供p(块相关 | query)。
+
+最终注意力是它们的乘积（在对数空间中是加法）。
+
+这就是梯度能流动的原因：第二阶段的损失可以调整第一阶段对块相关性的信念。
+
+没有这种耦合，第一阶段对其选择是否真正帮助了第二阶段一无所知。
+
+## 框架转变
+
+```
+之前（NSA, InfLLMv2）：           之后（DashAttention）：
+
+第一阶段：粗粒度选择              第一阶段：自适应选择
+    |                                 |
+    v                                 v
+[ top-k操作 ]                     [ α-entmax ]
+    |                                 |
+    +---> 总是k个块                   +---> 可变数量的块
+    |                                 |
+    +---> 无梯度                      +---> 可微分
+    |                                 |
+    v                                 v
+第二阶段：细粒度注意力            第二阶段：先验引导的注意力
+    |                                 |
+    v                                 v
+[ 在选中块上softmax ]             [ softmax + log(粗粒度) ]
+    |                                 |
+    +---> 独立于第一阶段              +---> 与第一阶段耦合
+    |                                 |
+    v                                 v
+结果：发散的                      结果：非发散的
+      固定稀疏度                        自适应稀疏度
+      梯度截断                          端到端学习
+```
+
+从刚性两阶段流程到自适应耦合层次，核心转变是用能学习的连续稀疏性替换离散选择。
+
+## 专家评审
+
+**选题眼光**：真实缺口。
+
+长文本注意力是LLM的瓶颈，分层方法是自然的解决方案。
+
+观察到top-k既不灵活又不可微是敏锐的——这是那种"事后看来显而易见"的洞见。
+
+发散性质是不错的理论贡献，但从实验看其实际影响不太清楚。
+
+**方法成熟度**：优雅。
+
+使用α-entmax很聪明但不新颖（来自合著者Martins等人的先前工作）。
+
+真正的贡献是分层先验设计——在细粒度logits上加log(粗粒度分数)简单但有效。
+
+理论分析（非发散性证明）扎实。
+
+一个担忧：方法引入了需要调优的超参数（α、块大小）。
+
+论文没有深入探讨对这些选择的敏感性。
+
+**实验诚意**：基线公平。
+
+与NSA和InfLLMv2的比较直接。
+
+帕累托前沿分析（准确率vs稀疏度权衡）是正确的评估方式。
+
+但实验主要在困惑度和少数下游任务上——希望看到更多样化的长文本基准（如检索、长文档推理）。
+
+加速声明（比FlashAttention-3快2.5倍）令人印象深刻，但只在推理时展示；
+训练加速不清楚。
+
+另外，Triton实现被提及但论文中未开源，使可复现性更难。
+
+**写作功力**：整体清晰，但相关工作部分密集，可以精简。
+
+数学阐述（尤其是非发散性证明）严谨但可能让实践者迷失。
+
+论文会受益于更多前置的直观解释——我上面用的招聘比喻没有出现在论文中，但应该有类似的东西。
+
+图表质量好，但图3（帕累托前沿）承担了太多重任，可以拆成单独的图以提高清晰度。
+
+**判决**：弱接收——扎实的贡献和良好的实验验证，但是渐进式而非变革性的。
+
+方法实用，理论可靠，但本质上是对现有分层注意力的改进，而非新范式。
+
+## 要点总结
+
+**自适应稀疏胜过固定稀疏**：如果你在构建任何稀疏选择机制（不只是注意力），考虑你的"top-k"是否真的合理。
+
+能否用根据输入难度自适应的可微稀疏变换替换它？
+α-entmax在许多场景下是softmax的即插即用替代品。
+
+**耦合你的流程阶段**：如果你有粗到细的架构，第一阶段过滤、第二阶段处理，不要把它们当作独立的。
+
+让第一阶段的决策成为第二阶段的先验（如果用softmax就在对数空间）。
+
+这实现了端到端学习，通常改进两个阶段。
+
+**非发散性作为设计原则**：设计长文本注意力机制时，检查你的方法是否发散。
+
+简单测试：如果你在上下文中追加不相关token，相关token上的注意力权重是否下降？
+如果是，你有问题。
+
+修复通常涉及显式归一化或考虑被过滤内容的先验。
+
+**分层注意力仍未充分探索**：尽管线性注意力和状态空间模型炒得火热，分层注意力（粗到细）仍是长文本的实用有效方法。
+
+本文表明在如何设计层次结构上仍有改进空间。
+
+:::
