@@ -1,0 +1,304 @@
+---
+title:
+  en: "The Stochastic-Deterministic Boundary: A Design Framework for Production LLM Agents"
+  zh: "随机-确定性边界：生产级 LLM 智能体的设计框架"
+description:
+  en: "A methodology for architecting reliable LLM agents by treating the boundary between stochastic model outputs and deterministic systems as a first-class design primitive."
+  zh: "通过将随机模型输出与确定性系统之间的边界视为一等设计原语，构建可靠 LLM 智能体的方法论。"
+date: 2026-05-20
+tags: ["arxiv", "ai", "cs.ai", "cs.se"]
+image: "/arxiv-visuals/a-methodology-for-selecting-and-composing/HeroScene.png"
+---
+
+![Concept animation](/arxiv-visuals/a-methodology-for-selecting-and-composing/ConceptScene.gif)
+
+
+
+![Hero diagram](/arxiv-visuals/a-methodology-for-selecting-and-composing/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2605.20173](https://arxiv.org/abs/2605.20173)
+**Authors**: Vasundra Srinivasan
+**Categories**: cs.AI, cs.SE
+
+## The Gap
+
+Existing LLM agent frameworks treat the interface between stochastic model outputs and deterministic system actions as an implementation detail. Frameworks like LangChain, AutoGPT, and ReAct focus on prompt engineering and tool calling, but lack principled guidance for when an LLM suggestion becomes a committed action. This creates a reliability gap: production systems need predictable failure modes, rollback semantics, and audit trails, yet the boundary where randomness meets determinism has no architectural vocabulary.
+
+Prior work addresses either model reliability (RLHF, constrained decoding) or system reliability (distributed transactions, state machines), but not their composition. The result: each team reinvents runtime patterns ad-hoc, leading to brittle agents that fail unpredictably under model updates or prompt drift.
+
+```
+Problem: LLM output → ??? → System action
+         (stochastic)      (deterministic)
+                |
+                v
+Gap: No architectural primitive for this boundary
+                |
+                v
+Method: Name it "SDB" (4-part contract) + catalog 6 runtime patterns
+                |
+                v
+Evidence: 5 workloads + failure mode analysis + 90-day agent implementation
+                |
+                v
+Conclusion: SDB strength > model variance as models improve
+```
+
+## The Increment
+
+**One sentence**: Before this paper, LLM agent reliability was a model problem; after, it's an architecture problem with composable patterns.
+
+### Core Mechanism
+
+The paper introduces the **stochastic-deterministic boundary (SDB)** as a four-part contract: (1) a **proposer** (LLM) generates candidate actions, (2) a **verifier** checks preconditions and constraints, (3) a **commit step** makes the action durable, and (4) a **reject signal** triggers rollback or retry. This contract sits between every LLM output and system state change.
+
+Around the SDB, the paper organizes agent design into three concerns: **Coordination** (how multiple SDBs interact), **State** (where decisions are recorded), and **Control** (who decides what happens next). Six runtime patterns compose these concerns differently: hierarchical delegation (manager LLM dispatches to worker LLMs), scatter-gather plus saga (parallel proposals with compensating rollback), event-driven sequencing (SDBs chained by event log), shared state machine (multiple LLMs read/write a central FSM), supervisor plus gate (human approval before commit), and human-in-the-loop (human as verifier or proposer).
+
+```
+SDB Contract (per LLM call):
+  
+  Proposer (LLM) --[candidate action]--> Verifier
+                                            |
+                                    [pass] / \ [fail]
+                                          /   \
+                                         v     v
+                                    Commit   Reject
+                                      |        |
+                                      v        v
+                                  [durable] [retry/rollback]
+
+Runtime Pattern (multiple SDBs):
+
+  Hierarchical:        Scatter-Gather:       Event-Driven:
+  
+  Manager SDB          SDB-1 \              SDB-1 --[event]-->
+      |                SDB-2 --> Merge           |
+      v                SDB-3 /              SDB-2 --[event]-->
+  Worker SDB-A                                   |
+  Worker SDB-B                               SDB-3
+```
+
+Think of the SDB as a **transaction boundary in a database**, but where the query planner is stochastic. In a traditional database, you write a query (deterministic), the planner optimizes it (deterministic), and the transaction commits or aborts (deterministic). Here, the "query" is an LLM prompt, the "plan" is the model's output, and the SDB is the transaction logic that decides whether to commit. The verifier is like a constraint check, the commit step is like a write-ahead log, and the reject signal is like a rollback trigger. Just as databases compose transactions into isolation levels (read committed, serializable), this paper composes SDBs into runtime patterns (hierarchical, saga, event-driven). The key insight: when the planner is stochastic, you need stronger boundaries and explicit rollback semantics, because you can't replay the same "query" and get the same "plan."
+
+### Key Concepts
+
+- **Stochastic-Deterministic Boundary (SDB)**: The interface where an LLM's probabilistic output becomes a committed system action. Imagine a self-driving car: the neural network proposes "turn left," but before the steering wheel moves, a verifier checks if there's an obstacle, a commit step logs the decision to the black box, and a reject signal can abort if sensors detect danger. The SDB is that entire decision pipeline. Without it, you're directly wiring a random number generator to your steering wheel.
+
+- **Replay Divergence**: A failure mode where replaying the same event log through an LLM produces different downstream actions due to model version changes or prompt drift. Concrete example: an agent processes 100 customer emails, commits actions to a log, then you upgrade the model. Replaying the log to audit decisions now produces different outputs for emails 50-100, breaking audit trails. This is unique to stochastic systems—deterministic replays are idempotent by definition.
+
+- **Architectural Momentum**: The property that a well-designed runtime pattern can maintain reliability even as per-call model variance increases. Think of it like a car's suspension: a good suspension (strong SDB + robust pattern) keeps the ride smooth even on bumpy roads (noisy model outputs). As roads improve (models get better), suspension design matters more because you're no longer bottlenecked by road quality.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+  Prompt --> LLM --> Tool Call         Prompt --> LLM --> [SDB] --> Action
+      ^                |                   ^              |   |
+      |                |                   |          Verify Commit
+      +-- Retry loop --+                   |              |
+                                           +-- Rollback --+
+  
+  Focus: Prompt engineering            Focus: Boundary contracts
+  Failure: Retry until success         Failure: Explicit reject + compensate
+  Audit: Hope LLM is deterministic     Audit: Log at commit step
+```
+
+[One sentence: From treating LLM calls as opaque async functions to treating them as proposers in a transactional boundary, the core shift is making the stochastic-deterministic interface architecturally explicit.]
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Production teams are indeed reinventing these patterns (I've seen three different "LLM + approval queue" implementations in the wild), and the lack of shared vocabulary is costly. The problem sits at the intersection of distributed systems and ML deployment, which is timely given the push toward agentic systems.
+
+**Method maturity**: The SDB abstraction is elegant—it's essentially a monad for stochastic effects, though the paper doesn't use that language. The six patterns feel empirically grounded rather than exhaustive, which is appropriate for a first taxonomy. However, the paper could be more explicit about when **not* to use an SDB (e.g., low-stakes conversational agents where eventual consistency is fine).
+
+**Experimental integrity**: The five workloads are realistic (contract renewal, data pipeline, customer support), but the evaluation is mostly qualitative. The 90-day agent implementation is a strong signal of practicality, but I'd want to see failure rate metrics under controlled model variance. The "replay divergence" failure mode is well-motivated, though the paper doesn't quantify how often it occurs in practice.
+
+**Writing quality**: Section 3 (pattern catalog) is dense—each pattern deserves a runnable code snippet, not just a description. The reliability decomposition in Section 5 is the paper's strongest contribution but is buried. If rewritten as the opening motivation, it would frame the entire paper more compellingly.
+
+**Verdict**: **weak accept** — Solid contribution to an underserved problem, but needs stronger empirical grounding and clearer guidance on pattern selection trade-offs.
+
+## Takeaways
+
+**For practitioners**: The SDB four-part contract (proposer, verifier, commit, reject) is immediately applicable. Even if you don't adopt the full patterns, explicitly separating "LLM suggests" from "system commits" will surface hidden assumptions in your codebase. The "replay divergence" failure mode is a concrete reason to version-lock models in production and log at the commit step, not the proposal step.
+
+**For researchers**: The framing of agent reliability as an architecture problem (not just a model problem) opens a design space. The claim that "SDB strength matters more as model variance decreases" is testable and could guide future work on runtime verification for stochastic systems.
+
+**Transferable idea**: The concept of architectural momentum—that system design can absorb component-level variance—applies beyond LLMs. Any system with stochastic components (A/B tests, recommendation engines, auction bidders) benefits from explicit boundaries and rollback semantics.
+:::
+
+:::zh
+**论文**: [2605.20173](https://arxiv.org/abs/2605.20173)
+**作者**: Vasundra Srinivasan
+**分类**: cs.AI, cs.SE
+
+## 缺口
+
+现有的 LLM 智能体框架将随机模型输出与确定性系统动作之间的接口视为实现细节。
+
+LangChain、AutoGPT、ReAct 等框架专注于提示工程和工具调用，但缺乏关于"LLM 建议何时成为已提交动作"的原则性指导。
+
+这造成了可靠性缺口：生产系统需要可预测的失败模式、回滚语义和审计轨迹，但随机性与确定性相遇的边界却没有架构词汇。
+
+先前工作要么解决模型可靠性（RLHF、受约束解码），要么解决系统可靠性（分布式事务、状态机），但不涉及二者的组合。
+
+结果是：每个团队都在临时重新发明运行时模式，导致智能体在模型更新或提示漂移下不可预测地失败。
+
+```
+问题：LLM 输出 → ??? → 系统动作
+     （随机）          （确定）
+              |
+              v
+缺口：这个边界没有架构原语
+              |
+              v
+方法：命名为"SDB"（四部分契约）+ 编目 6 种运行时模式
+              |
+              v
+证据：5 个工作负载 + 失败模式分析 + 90 天智能体实现
+              |
+              v
+结论：随着模型改进，SDB 强度 > 模型方差
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，LLM 智能体可靠性是模型问题；之后，它是有可组合模式的架构问题。
+
+### 核心机制
+
+论文引入了**随机-确定性边界（SDB）**作为四部分契约：(1) **提议者**（LLM）生成候选动作，(2) **验证器**检查前置条件和约束，(3) **提交步骤**使动作持久化，(4) **拒绝信号**触发回滚或重试。
+
+这个契约位于每个 LLM 输出和系统状态变更之间。
+
+围绕 SDB，论文将智能体设计组织为三个关注点：**协调**（多个 SDB 如何交互）、**状态**（决策记录在哪里）、**控制**（谁决定接下来发生什么）。
+
+六种运行时模式以不同方式组合这些关注点：分层委托（管理者 LLM 分派给工作者 LLM）、分散-聚合加 saga（并行提议加补偿回滚）、事件驱动排序（SDB 通过事件日志链接）、共享状态机（多个 LLM 读写中央 FSM）、监督者加门控（提交前人工批准）、人在回路中（人作为验证器或提议者）。
+
+```
+SDB 契约（每次 LLM 调用）：
+  
+  提议者（LLM）--[候选动作]--> 验证器
+                                 |
+                         [通过] / \ [失败]
+                               /   \
+                              v     v
+                          提交     拒绝
+                            |        |
+                            v        v
+                        [持久化] [重试/回滚]
+
+运行时模式（多个 SDB）：
+
+  分层：              分散-聚合：         事件驱动：
+  
+  管理者 SDB          SDB-1 \            SDB-1 --[事件]-->
+      |               SDB-2 --> 合并          |
+      v               SDB-3 /            SDB-2 --[事件]-->
+  工作者 SDB-A                                |
+  工作者 SDB-B                            SDB-3
+```
+
+把 SDB 想象成**数据库中的事务边界**，但查询规划器是随机的。
+
+在传统数据库中，你写一个查询（确定性），规划器优化它（确定性），事务提交或中止（确定性）。
+
+这里，"查询"是 LLM 提示，"计划"是模型输出，SDB 是决定是否提交的事务逻辑。
+
+验证器类似约束检查，提交步骤类似预写日志，拒绝信号类似回滚触发器。
+
+正如数据库将事务组合成隔离级别（读已提交、可串行化），本文将 SDB 组合成运行时模式（分层、saga、事件驱动）。
+
+关键洞察：当规划器是随机的，你需要更强的边界和显式回滚语义，因为你无法重放相同的"查询"并得到相同的"计划"。
+
+### 关键概念
+
+- **随机-确定性边界（SDB）**：LLM 的概率输出成为已提交系统动作的接口。
+
+想象一辆自动驾驶汽车：神经网络提议"左转"，但在方向盘移动之前，验证器检查是否有障碍物，提交步骤将决策记录到黑匣子，如果传感器检测到危险，拒绝信号可以中止。
+
+SDB 就是整个决策管道。
+
+没有它，你就是直接把随机数生成器连到方向盘上。
+
+- **重放分歧**：由于模型版本变化或提示漂移，通过 LLM 重放相同事件日志会产生不同下游动作的失败模式。
+
+具体例子：智能体处理 100 封客户邮件，将动作提交到日志，然后你升级模型。
+
+重放日志以审计决策现在为邮件 50-100 产生不同输出，破坏审计轨迹。
+
+这是随机系统独有的——确定性重放根据定义是幂等的。
+
+- **架构动量**：即使每次调用的模型方差增加，设计良好的运行时模式也能保持可靠性的属性。
+
+把它想象成汽车的悬挂系统：好的悬挂（强 SDB + 稳健模式）即使在颠簸的路上（嘈杂的模型输出）也能保持平稳行驶。
+
+随着道路改善（模型变好），悬挂设计变得更重要，因为你不再受道路质量的瓶颈限制。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+
+  提示 --> LLM --> 工具调用         提示 --> LLM --> [SDB] --> 动作
+      ^              |                 ^              |   |
+      |              |                 |          验证 提交
+      +-- 重试循环 --+                 |              |
+                                       +-- 回滚 ------+
+  
+  焦点：提示工程                    焦点：边界契约
+  失败：重试直到成功                失败：显式拒绝 + 补偿
+  审计：希望 LLM 是确定性的         审计：在提交步骤记录
+```
+
+[一句话：从将 LLM 调用视为不透明异步函数到将其视为事务边界中的提议者，核心转变是使随机-确定性接口在架构上显式化。
+
+]
+
+## 专家评审
+
+**选题眼光**：真实缺口。
+
+生产团队确实在重新发明这些模式（我见过三种不同的"LLM + 审批队列"实现），缺乏共享词汇的代价很高。
+
+问题位于分布式系统和 ML 部署的交叉点，鉴于向智能体系统的推进，这很及时。
+
+**方法成熟度**：SDB 抽象很优雅——它本质上是随机效应的单子，尽管论文没有使用那种语言。
+
+六种模式感觉是经验性的而非穷尽的，这对于第一个分类法是合适的。
+
+然而，论文可以更明确地说明何时*不*使用 SDB（例如，最终一致性可以接受的低风险对话智能体）。
+
+**实验诚意**：五个工作负载是现实的（合同续签、数据管道、客户支持），但评估主要是定性的。
+
+90 天智能体实现是实用性的强信号，但我想看到受控模型方差下的失败率指标。
+
+"重放分歧"失败模式动机充分，但论文没有量化它在实践中发生的频率。
+
+**写作功力**：第 3 节（模式目录）很密集——每个模式都应该有可运行的代码片段，而不仅仅是描述。
+
+第 5 节的可靠性分解是论文最强的贡献，但被埋没了。
+
+如果重写为开篇动机，它会更有说服力地框定整篇论文。
+
+**判决**：**弱接收** — 对服务不足的问题有扎实贡献，但需要更强的经验基础和更清晰的模式选择权衡指导。
+
+## 要点总结
+
+**对实践者**：SDB 四部分契约（提议者、验证器、提交、拒绝）可立即应用。
+
+即使你不采用完整模式，显式分离"LLM 建议"和"系统提交"也会暴露代码库中的隐藏假设。
+
+"重放分歧"失败模式是在生产中版本锁定模型并在提交步骤（而非提议步骤）记录日志的具体理由。
+
+**对研究者**：将智能体可靠性框定为架构问题（而非仅仅是模型问题）打开了设计空间。
+
+"随着模型方差减少，SDB 强度更重要"的主张是可测试的，可以指导随机系统运行时验证的未来工作。
+
+**可迁移想法**：架构动量的概念——系统设计可以吸收组件级方差——适用于 LLM 之外。
+
+任何具有随机组件的系统（A/B 测试、推荐引擎、拍卖竞标者）都受益于显式边界和回滚语义。
+
+:::

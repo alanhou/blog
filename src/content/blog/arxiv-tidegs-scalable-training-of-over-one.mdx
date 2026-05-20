@@ -1,0 +1,344 @@
+---
+title:
+  en: "TideGS: Training Billion-Scale 3D Gaussian Splatting via Out-of-Core Optimization"
+  zh: "TideGS：通过外存优化训练十亿级3D高斯溅射"
+description:
+  en: "A memory hierarchy framework that enables training over 1 billion 3D Gaussian primitives on a single 24GB GPU by treating GPU memory as a working-set cache and streaming parameters from SSD."
+  zh: "一个内存层次框架，通过将GPU内存视为工作集缓存并从SSD流式传输参数，在单个24GB GPU上训练超过10亿个3D高斯基元。"
+date: 2026-05-20
+tags: ["arxiv", "ai", "cs.cv", "cs.pf"]
+image: "/arxiv-visuals/tidegs-scalable-training-of-over-one/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/tidegs-scalable-training-of-over-one/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2605.20150](https://arxiv.org/abs/2605.20150)
+**Authors**: Chonghao Zhong, Linfeng Shi, Hua Chen, Tiecheng Sun, Hao Zhao, Binhang Yuan, Chaojian Li
+**Categories**: cs.CV, cs.PF
+
+## The Gap
+
+3D Gaussian Splatting (3DGS) represents scenes as millions of 3D Gaussian primitives, each carrying position, color, opacity, and covariance parameters. Prior systems hit a hard wall: commodity GPUs with 24GB memory can only hold ~11 million Gaussians in-memory, while large-scale scenes (city blocks, building interiors) demand hundreds of millions or billions of primitives for photorealistic quality. Existing out-of-core approaches (GigaGS) barely reach 100M Gaussians and suffer from naive parameter swapping that ignores 3DGS training's spatial and temporal structure.
+
+The core insight: 3DGS training is **sparse and trajectory-conditioned**. Each camera viewpoint activates only a small fraction of Gaussians (those visible in the frustum). GPU memory doesn't need to hold all parameters—it can serve as a working-set cache.
+
+```
+Problem: Billion-scale 3DGS training
+   |
+   v
+Observation: Training is sparse (per-view activation) + trajectory-structured
+   |
+   v
+Assumption: GPU memory = working-set cache, not parameter store
+   |
+   v
+Method: SSD-CPU-GPU hierarchy + spatial blocking + trajectory-adaptive streaming
+   |
+   v
+Evidence: 1B+ Gaussians on 24GB GPU, best quality among single-GPU baselines
+   |
+   v
+Conclusion: Out-of-core 3DGS training is viable at billion-primitive scale
+```
+
+## The Increment
+
+**One sentence**: Before TideGS, single-GPU 3DGS training was limited to ~11M Gaussians in-memory or ~100M with naive out-of-core swapping; after TideGS, practitioners can train 1B+ Gaussians on commodity hardware by exploiting training sparsity and camera trajectory structure.
+
+### Core Mechanism
+
+TideGS organizes the parameter table as a three-level hierarchy: SSD (persistent storage) → CPU DRAM (staging buffer) → GPU VRAM (working set). The key is **block-virtualized geometry**: the scene is partitioned into spatial blocks aligned with SSD page boundaries (e.g., 4KB). Each block contains Gaussians within a 3D bounding box. During training, only blocks intersecting the current camera frustum are loaded into GPU memory.
+
+The system runs a **hierarchical asynchronous pipeline** with three stages operating concurrently: (1) SSD-to-CPU prefetching loads predicted blocks into CPU memory, (2) CPU-to-GPU transfer moves active blocks to GPU, (3) GPU computes gradients and updates parameters. Stages overlap via double-buffering: while the GPU trains on iteration **t*, the CPU prepares data for iteration *t+1*, and the SSD prefetches for *t+2*.
+
+The breakthrough is **trajectory-adaptive differential streaming**. Instead of transferring entire blocks every iteration, TideGS tracks which blocks were active in the previous iteration and computes the delta: new blocks entering the frustum are loaded, old blocks exiting are evicted. For camera trajectories with high temporal coherence (common in real captures), the working-set delta is small—often 10-20% of the full working set—dramatically reducing I/O bandwidth.
+
+```
+Iteration t-1:  [Blocks A B C D] in GPU
+                      |
+                      v
+Iteration t:    Camera moves slightly
+                      |
+                      v
+                Frustum now covers [B C D E]
+                      |
+                      v
+                Delta: Evict A, Load E
+                      |
+                      v
+                Transfer only E (not B C D E)
+```
+
+**Structural metaphor**: Think of TideGS as a **library with a reading room**. The SSD is the archive (millions of books), CPU DRAM is the librarian's cart (staging area), and GPU VRAM is the reading room (limited desks). A researcher (camera) requests books (Gaussians) based on their current topic (viewpoint). The librarian predicts the next topic from the research trajectory and pre-fetches relevant books. Crucially, when the researcher shifts topics slightly, the librarian doesn't clear the entire reading room—they only swap out books no longer needed and bring in new ones. The reading room stays mostly full, and the researcher never waits.
+
+### Key Concepts
+
+- **Block-virtualized geometry**: Instead of storing Gaussians as a flat array, TideGS groups them into spatial blocks (e.g., 8×8×8 meter cubes). Each block is a contiguous chunk in storage, aligned with SSD page size. This transforms random Gaussian access into sequential block I/O, exploiting SSD's high sequential bandwidth (~3GB/s) while avoiding random-access penalties (~100MB/s). When a camera frustum intersects a block's bounding box, the entire block is loaded. This trades some memory overhead (loading invisible Gaussians within active blocks) for massive I/O speedup.
+
+- **Trajectory-adaptive differential streaming**: Camera trajectories in 3DGS training exhibit temporal coherence—consecutive frames often overlap 70-90% in visible Gaussians. TideGS maintains a working-set tracker that records which blocks were active in iteration **t-1*. At iteration *t*, it computes the frustum-block intersection and diffs against the previous working set. Only the delta (new blocks minus evicted blocks) is transferred. For a smooth trajectory, this reduces per-iteration I/O from ~500MB (full working set) to ~50MB (10% delta), keeping the pipeline saturated without stalling the GPU.
+
+- **Hierarchical asynchronous pipeline**: Training, data transfer, and prefetching happen in parallel across three hardware tiers. The GPU trains on iteration **t* while the CPU prepares iteration *t+1* and the SSD prefetches iteration *t+2*. This requires careful synchronization: the CPU must finish staging before the GPU needs the data, and the SSD must prefetch before the CPU requests it. TideGS uses a trajectory predictor (simple linear extrapolation of camera motion) to guess future frustums and issue prefetch commands early. If the prediction is wrong, the system falls back to on-demand loading, but correct predictions (>80% hit rate in experiments) hide I/O latency entirely.
+
+## Framework Shift
+
+```
+Before (in-memory 3DGS):              After (TideGS):
+
+  All Gaussians in GPU VRAM            SSD: Full parameter table
+         |                                  |
+         v                                  v (prefetch)
+  Train on visible subset              CPU: Staging buffer
+         |                                  |
+         v                                  v (delta transfer)
+  Update all parameters                GPU: Working set only
+                                            |
+                                            v
+                                       Train on visible subset
+                                            |
+                                            v
+                                       Update working set
+                                            |
+                                            v (writeback delta)
+                                       Sync to SSD/CPU
+```
+
+**One sentence**: From "fit all parameters in GPU memory" to "stream working sets through a memory hierarchy," the core shift is treating GPU VRAM as a cache rather than a parameter store.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. 3DGS has proven itself for high-quality novel view synthesis, but scaling to large scenes (city-scale, building interiors) is blocked by memory. The problem sits at the intersection of graphics and systems—prior work focused on algorithmic improvements (better Gaussian initialization, adaptive densification) but ignored the memory bottleneck. TideGS addresses the right constraint at the right time.
+
+**Method maturity**: The core insight (training sparsity + trajectory structure) is elegant, not brute force. However, the execution leans heavily on engineering: block alignment, prefetch heuristics, double-buffering. The trajectory predictor is simplistic (linear extrapolation)—more sophisticated predictors (LSTM, attention over past frames) could improve hit rates. The paper doesn't explore failure modes: what happens with erratic camera motion or scenes with poor spatial locality? The method is mature enough for smooth trajectories but brittle for adversarial cases.
+
+**Experimental integrity**: Baselines are fair. The paper compares against standard 3DGS (in-memory), GigaGS (prior out-of-core), and ablations of TideGS components. The scenes (Mip-NeRF 360, Tanks and Temples) are standard benchmarks. Numbers are credible: 1.2B Gaussians on 24GB GPU, 28.5 PSNR on a large scene. One red flag: the paper doesn't report training time. Out-of-core systems are slower than in-memory—by how much? The omission suggests the overhead is non-trivial (likely 2-3× slower based on I/O bandwidth). Also, the comparison with GigaGS is slightly unfair—GigaGS wasn't designed for billion-scale, so beating it by 10× isn't shocking.
+
+**Writing quality**: The paper is well-structured but verbose. Section 3 (method) could be condensed by 30%—too much space on obvious details (e.g., explaining what a frustum is). The ablation study (Section 4.3) is strong, but the main results (Section 4.2) bury the lead: the quality-vs-scale tradeoff should be a single figure, not scattered across tables. The related work section is thorough but reads like a literature dump. Rewriting Section 4.2 to lead with a single "scaling curve" figure (Gaussians vs PSNR vs memory) would elevate the paper significantly.
+
+**Verdict**: **Weak accept** — Solid systems contribution with clear impact, but the method is more engineering than insight, and the evaluation omits key metrics (training time, failure modes). The work will be cited for enabling billion-scale 3DGS, but it's not a paradigm shift.
+
+## Takeaways
+
+**For practitioners building large-scale ML systems**: The trajectory-adaptive differential streaming idea transfers directly to any training loop with temporal coherence. If your model processes sequences (video, time-series, RL trajectories) and the working set changes slowly between steps, track the delta and transfer only incremental changes. This applies to distributed training (reduce all-reduce bandwidth), model serving (cache embeddings), and data pipelines (prefetch next batch based on trajectory).
+
+**For 3DGS researchers**: Block-virtualized geometry is a clean abstraction. Even if you're not doing out-of-core training, organizing Gaussians into spatial blocks improves cache locality during rendering and simplifies frustum culling. The paper's spatial partitioning scheme (octree-based blocking) is reusable.
+
+**For systems researchers**: The hierarchical asynchronous pipeline is textbook design—nothing novel, but the execution is clean. The key lesson: when building out-of-core systems, exploit domain structure (sparsity, locality, predictability) rather than treating the problem as generic parameter swapping. TideGS succeeds because it's tailored to 3DGS training, not because it's a general-purpose out-of-core framework.
+:::
+
+:::zh
+**论文**: [2605.20150](https://arxiv.org/abs/2605.20150)
+**作者**: Chonghao Zhong, Linfeng Shi, Hua Chen, Tiecheng Sun, Hao Zhao, Binhang Yuan, Chaojian Li
+**分类**: cs.CV, cs.PF
+
+## 缺口
+
+3D高斯溅射（3DGS）用数百万个3D高斯基元表示场景，每个基元携带位置、颜色、不透明度和协方差参数。
+
+此前的系统撞上了硬墙：24GB显存的商用GPU只能容纳约1100万个高斯基元，而大规模场景（城市街区、建筑内部）需要数亿甚至数十亿基元才能达到照片级质量。
+
+现有的外存方法（GigaGS）勉强达到1亿基元，且采用朴素的参数交换策略，忽略了3DGS训练的空间和时间结构。
+
+核心洞察：3DGS训练是**稀疏且轨迹条件化的**。
+
+每个相机视点只激活一小部分高斯基元（视锥体内可见的那些）。
+
+GPU显存不需要容纳所有参数——它可以充当工作集缓存。
+
+```
+问题：十亿级3DGS训练
+   |
+   v
+观察：训练是稀疏的（按视图激活）+ 轨迹结构化的
+   |
+   v
+假设：GPU显存 = 工作集缓存，而非参数存储
+   |
+   v
+方法：SSD-CPU-GPU层次 + 空间分块 + 轨迹自适应流式传输
+   |
+   v
+证据：24GB GPU上训练10亿+基元，单GPU基线中质量最佳
+   |
+   v
+结论：外存3DGS训练在十亿基元规模上可行
+```
+
+## 增量
+
+**一句话**: TideGS之前，单GPU的3DGS训练局限于内存中约1100万基元或朴素外存交换的约1亿基元；TideGS之后，实践者可以通过利用训练稀疏性和相机轨迹结构，在商用硬件上训练10亿+基元。
+
+### 核心机制
+
+TideGS将参数表组织为三级层次：SSD（持久存储）→ CPU内存（暂存缓冲）→ GPU显存（工作集）。
+
+关键是**块虚拟化几何**：场景被划分为与SSD页边界对齐的空间块（例如4KB）。
+
+每个块包含一个3D包围盒内的高斯基元。
+
+训练期间，只有与当前相机视锥体相交的块被加载到GPU显存。
+
+系统运行一个**层次异步流水线**，三个阶段并发操作：(1) SSD到CPU预取将预测的块加载到CPU内存，(2) CPU到GPU传输将活跃块移动到GPU，(3) GPU计算梯度并更新参数。
+
+各阶段通过双缓冲重叠：当GPU训练第*t*次迭代时，CPU准备第*t+1*次迭代的数据，SSD预取第*t+2*次迭代的数据。
+
+突破点是**轨迹自适应差分流式传输**。
+
+TideGS不是每次迭代传输整个块，而是跟踪上一次迭代中哪些块是活跃的，并计算增量：进入视锥体的新块被加载，退出的旧块被驱逐。
+
+对于具有高时间相干性的相机轨迹（真实采集中常见），工作集增量很小——通常是完整工作集的10-20%——大幅减少I/O带宽。
+
+```
+迭代 t-1:  GPU中有 [块 A B C D]
+                |
+                v
+迭代 t:    相机轻微移动
+                |
+                v
+           视锥体现在覆盖 [B C D E]
+                |
+                v
+           增量：驱逐 A，加载 E
+                |
+                v
+           只传输 E（而非 B C D E）
+```
+
+**核喻**：把TideGS想象成一个**带阅览室的图书馆**。
+
+SSD是档案库（数百万本书），CPU内存是图书管理员的推车（暂存区），GPU显存是阅览室（有限的书桌）。
+
+研究者（相机）根据当前主题（视点）请求书籍（高斯基元）。
+
+图书管理员从研究轨迹预测下一个主题并预取相关书籍。
+
+关键是，当研究者稍微转换主题时，图书管理员不会清空整个阅览室——他们只换出不再需要的书，带入新书。
+
+阅览室保持大部分满载，研究者从不等待。
+
+### 关键概念
+
+- **块虚拟化几何**：TideGS不是将高斯基元存储为平面数组，而是将它们分组到空间块中（例如8×8×8米的立方体）。
+
+每个块是存储中的连续块，与SSD页大小对齐。
+
+这将随机高斯访问转换为顺序块I/O，利用SSD的高顺序带宽（约3GB/s），同时避免随机访问惩罚（约100MB/s）。
+
+当相机视锥体与块的包围盒相交时，整个块被加载。
+
+这用一些内存开销（加载活跃块内不可见的高斯基元）换取巨大的I/O加速。
+
+- **轨迹自适应差分流式传输**：3DGS训练中的相机轨迹表现出时间相干性——连续帧在可见高斯基元上通常重叠70-90%。
+
+TideGS维护一个工作集跟踪器，记录迭代*t-1*中哪些块是活跃的。
+
+在迭代*t*时，它计算视锥体-块相交并与前一个工作集进行差分。
+
+只有增量（新块减去驱逐的块）被传输。
+
+对于平滑轨迹，这将每次迭代的I/O从约500MB（完整工作集）减少到约50MB（10%增量），保持流水线饱和而不阻塞GPU。
+
+- **层次异步流水线**：训练、数据传输和预取在三个硬件层上并行发生。
+
+GPU训练迭代*t*，同时CPU准备迭代*t+1*，SSD预取迭代*t+2*。
+
+这需要仔细的同步：CPU必须在GPU需要数据之前完成暂存，SSD必须在CPU请求之前预取。
+
+TideGS使用轨迹预测器（相机运动的简单线性外推）来猜测未来的视锥体并提前发出预取命令。
+
+如果预测错误，系统回退到按需加载，但正确的预测（实验中>80%命中率）完全隐藏了I/O延迟。
+
+## 框架转变
+
+```
+之前（内存中3DGS）：              之后（TideGS）：
+
+  所有高斯基元在GPU显存           SSD：完整参数表
+         |                            |
+         v                            v（预取）
+  在可见子集上训练                 CPU：暂存缓冲
+         |                            |
+         v                            v（增量传输）
+  更新所有参数                     GPU：仅工作集
+                                      |
+                                      v
+                                 在可见子集上训练
+                                      |
+                                      v
+                                 更新工作集
+                                      |
+                                      v（回写增量）
+                                 同步到SSD/CPU
+```
+
+**一句话**：从"将所有参数装入GPU显存"到"通过内存层次流式传输工作集"，核心转变是将GPU显存视为缓存而非参数存储。
+
+## 专家评审
+
+**选题眼光**：这是真缺口。
+
+3DGS已证明自己在高质量新视图合成方面的能力，但扩展到大场景（城市规模、建筑内部）被内存瓶颈阻挡。
+
+问题位于图形学和系统的交叉点——此前的工作专注于算法改进（更好的高斯初始化、自适应致密化），但忽略了内存瓶颈。
+
+TideGS在正确的时间解决了正确的约束。
+
+**方法成熟度**：核心洞察（训练稀疏性+轨迹结构）是优雅的，不是蛮力。
+
+然而，执行严重依赖工程：块对齐、预取启发式、双缓冲。
+
+轨迹预测器很简单（线性外推）——更复杂的预测器（LSTM、对过去帧的注意力）可以提高命中率。
+
+论文没有探索失败模式：相机运动不规则或场景空间局部性差时会发生什么？该方法对平滑轨迹足够成熟，但对对抗性情况很脆弱。
+
+**实验诚意**：基线公平。
+
+论文与标准3DGS（内存中）、GigaGS（先前的外存）以及TideGS组件的消融进行了比较。
+
+场景（Mip-NeRF 360、Tanks and Temples）是标准基准。
+
+数字可信：24GB GPU上12亿高斯基元，大场景上28.5 PSNR。
+
+一个值得警惕之处：论文没有报告训练时间。
+
+外存系统比内存中慢——慢多少？这个遗漏表明开销不小（根据I/O带宽可能慢2-3倍）。
+
+此外，与GigaGS的比较略有不公——GigaGS不是为十亿级设计的，所以超越它10倍并不令人震惊。
+
+**写作功力**：论文结构良好但冗长。
+
+第3节（方法）可以压缩30%——在明显细节上花费太多空间（例如解释什么是视锥体）。
+
+消融研究（第4.3节）很强，但主要结果（第4.2节）埋没了重点：质量与规模的权衡应该是单个图表，而不是分散在表格中。
+
+相关工作部分很全面，但读起来像文献堆砌。
+
+重写第4.2节，以单个"缩放曲线"图（高斯基元数 vs PSNR vs 内存）开头，将显著提升论文。
+
+**判决**：**弱接收** — 扎实的系统贡献，影响明确，但方法更多是工程而非洞察，评估遗漏了关键指标（训练时间、失败模式）。
+
+这项工作将因实现十亿级3DGS而被引用，但不是范式转变。
+
+## 要点总结
+
+**对于构建大规模ML系统的实践者**：轨迹自适应差分流式传输的想法直接迁移到任何具有时间相干性的训练循环。
+
+如果你的模型处理序列（视频、时间序列、RL轨迹）且工作集在步骤之间变化缓慢，跟踪增量并只传输增量变化。
+
+这适用于分布式训练（减少all-reduce带宽）、模型服务（缓存嵌入）和数据管道（根据轨迹预取下一批）。
+
+**对于3DGS研究者**：块虚拟化几何是一个干净的抽象。
+
+即使你不做外存训练，将高斯基元组织成空间块也能改善渲染期间的缓存局部性并简化视锥体剔除。
+
+论文的空间划分方案（基于八叉树的分块）是可重用的。
+
+**对于系统研究者**：层次异步流水线是教科书式的设计——没有新意，但执行干净。
+
+关键教训：构建外存系统时，利用领域结构（稀疏性、局部性、可预测性），而不是将问题视为通用参数交换。
+
+TideGS成功是因为它针对3DGS训练量身定制，而不是因为它是通用的外存框架。
+
+:::
