@@ -1,0 +1,348 @@
+---
+title:
+  en: "DelTA: Teaching Language Models Which Tokens Actually Matter for Reasoning"
+  zh: "DelTA：教会语言模型哪些词元真正影响推理"
+description:
+  en: "A method that fixes RLVR's tendency to reward formatting tokens over reasoning tokens by building discriminative token-level credit assignment into the policy gradient update."
+  zh: "一种修正 RLVR 倾向于奖励格式词元而非推理词元的方法，通过在策略梯度更新中构建判别性词元级信用分配实现。"
+date: 2026-05-21
+tags: ["arxiv", "ai", "cs.lg", "cs.cl"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2605.21467](https://arxiv.org/abs/2605.21467)
+**Authors**: Kaiyi Zhang, Wei Wu, Yankai Lin
+**Categories**: cs.LG, cs.CL
+
+## The Gap
+
+Reinforcement learning from verifiable rewards (RLVR) has become the standard way to improve LLM reasoning: generate multiple responses, check which ones are correct, and use policy gradients to increase probability of good responses while decreasing bad ones.
+
+The problem: RLVR operates at the sequence level but updates token probabilities. When you tell the model "this entire response is good," which tokens should get credit? Standard RLVR implicitly treats all tokens equally within advantage-weighted averaging. This creates a mismatch: high-frequency formatting tokens (like newlines, brackets, "Step 1:") appear in both correct and incorrect responses, so they dominate the gradient signal. Meanwhile, the sparse tokens that actually distinguish correct reasoning from incorrect reasoning get drowned out.
+
+Prior work either accepts this limitation or tries heuristic token-level reward shaping, which requires domain knowledge and doesn't generalize. The gap: we need a principled way to identify which tokens are discriminative for correctness and amplify their influence in the policy gradient update.
+
+```
+Problem: RLVR rewards sequences, but updates tokens
+   |
+   v
+Observation: Standard update = advantage-weighted centroid averaging
+   |
+   v
+Issue: High-freq shared tokens dominate, sparse discriminative tokens diluted
+   |
+   v
+Method: Learn token coefficients that amplify discriminative directions
+   |
+   v
+Evidence: +3.26 points on math benchmarks (Qwen3-8B)
+   |
+   v
+Conclusion: Discriminative token credit assignment improves RLVR efficiency
+```
+
+## The Increment
+
+**One sentence**: Before DelTA, RLVR treated all tokens in a response equally when assigning credit; after DelTA, the method automatically identifies and amplifies the sparse tokens that actually distinguish correct from incorrect reasoning.
+
+### Core Mechanism
+
+DelTA reframes the RLVR policy gradient update as a linear discriminator operating over token-gradient vectors. In standard RLVR, you compute gradients for each token in each response, then average them weighted by advantages (positive for correct responses, negative for incorrect). This creates two centroids: one from correct-response tokens, one from incorrect-response tokens. The policy update direction is the difference between these centroids.
+
+The problem is how these centroids are constructed. Advantage-weighted averaging gives equal structural weight to all tokens within a response. If "Step 1:" appears in 90% of both correct and incorrect responses, it contributes heavily to both centroids, making them less separated. DelTA introduces token-level coefficients that reweight the contribution of each token to its centroid. Tokens that appear similarly in both correct and incorrect responses get downweighted; tokens that are side-specific (appear mostly in correct or mostly in incorrect) get amplified.
+
+These coefficients are learned by treating the problem as discriminative: estimate which tokens best separate the two sides. DelTA uses a simple logistic regression over token-gradient vectors, where the label is whether the response was correct. The learned coefficients then reweight a self-normalized RLVR surrogate objective. This makes the effective centroids more contrastive—they're now built from the tokens that actually matter for distinguishing correctness, not just the tokens that appear most frequently.
+
+```
+Standard RLVR:
+  Correct responses  -->  [avg all token grads]  -->  Centroid+
+  Incorrect responses --> [avg all token grads]  -->  Centroid-
+  Update direction = Centroid+ - Centroid-
+  
+  Problem: "Step 1:" dominates both centroids
+  
+DelTA:
+  Correct responses  -->  [weighted avg: amplify discriminative tokens]  -->  Centroid+*
+  Incorrect responses --> [weighted avg: downweight shared tokens]      -->  Centroid-*
+  Update direction = Centroid+* - Centroid-*
+  
+  Result: Centroids separated by reasoning tokens, not formatting
+```
+
+Think of it like this: You're a teacher grading math homework. Standard RLVR is like saying "this entire solution is correct, so reinforce everything equally"—including the student's habit of writing "Problem 1:" at the top, which appears on every paper regardless of correctness. DelTA is like a teacher who's seen thousands of papers and knows which parts of the solution actually indicate understanding. When you see "therefore x = 5" in a correct solution, you know that specific reasoning step matters. When you see "Step 1:" you know it's just formatting. DelTA learns this discrimination automatically by comparing what appears in correct vs incorrect solutions, then adjusts how much credit each part gets. The student still learns to write complete solutions, but now the learning signal is concentrated on the reasoning steps that actually distinguish correct from incorrect work, not the boilerplate.
+
+### Key Concepts
+
+- **Token-gradient vector**: For each token in a response, the policy gradient computes how much to adjust that token's probability. This adjustment is a vector in parameter space—it points in the direction that would increase that token's likelihood. In RLVR, you compute these vectors for every token in every sampled response. The key insight: these vectors encode not just "increase this token" but "increase this token in this context with this surrounding structure." When you average token-gradient vectors from correct responses, you're implicitly asking "what's the common direction across all tokens in good responses?" DelTA's observation is that this average is dominated by high-frequency tokens, so it reweights the average to emphasize discriminative tokens.
+
+- **Discriminative vs shared tokens**: A discriminative token is one that appears much more frequently in correct responses than incorrect ones (or vice versa). For example, in math problems, "= 0" might appear often in correct solutions but rarely in incorrect ones, making it discriminative. A shared token appears with similar frequency in both correct and incorrect responses—like "Step 1:" or newlines. Standard RLVR can't distinguish these: both contribute to the gradient based on their frequency and advantage weight. DelTA explicitly estimates which tokens are discriminative by training a logistic classifier on token-gradient vectors, then uses the classifier's coefficients to reweight the RLVR objective. This amplifies discriminative tokens and suppresses shared ones.
+
+- **Self-normalized surrogate objective**: RLVR typically uses a clipped surrogate objective from PPO to prevent destructively large updates. DelTA modifies this by multiplying each token's contribution by its learned coefficient, then renormalizing so the total "mass" of the objective stays constant. This is crucial: without renormalization, you'd just be scaling the entire gradient up or down. With renormalization, you're redistributing credit—taking it away from shared tokens and giving it to discriminative ones. The self-normalization ensures that the overall update magnitude stays controlled (important for training stability) while the update direction becomes more contrastive.
+
+## Framework Shift
+
+```
+Before (standard RLVR):              After (DelTA):
+
+Response-level rewards               Response-level rewards
+        |                                    |
+        v                                    v
+  All tokens in response             Discriminative token
+  weighted by advantage              coefficient estimation
+        |                                    |
+        v                                    v
+  Centroid+ and Centroid-            Reweighted centroids
+  (dominated by high-freq)           (amplify discriminative)
+        |                                    |
+        v                                    v
+  Policy gradient update             Policy gradient update
+  (diluted signal)                   (concentrated signal)
+```
+
+**One sentence**: From treating all tokens in a response as equally responsible for its correctness, to automatically identifying and amplifying the sparse tokens that actually distinguish correct from incorrect reasoning.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The mismatch between sequence-level rewards and token-level updates has been known since the early days of RLHF, but most work either ignores it or applies domain-specific heuristics. The observation that high-frequency tokens dominate gradient centroids is not obvious from the math but becomes clear when you visualize token contributions. The problem sits at a productive intersection: it's fundamental enough to matter across domains but specific enough to admit a clean solution.
+
+**Method maturity**: The core idea—reweight token contributions to make centroids more discriminative—is elegant. The execution via logistic regression is almost too simple, which is actually a strength: it's interpretable and doesn't add much computational overhead. However, the paper could explore whether more sophisticated discriminators (e.g., attention-based) would help, or whether the linear assumption is a feature (prevents overfitting to spurious correlations). The self-normalization trick is clever and necessary, but the paper doesn't deeply analyze what happens when discriminative tokens are very sparse—does the method degrade gracefully?
+
+**Experimental integrity**: Baselines are fair and include recent strong methods (GRPO, ReST-EM). The gains are consistent across model scales and multiple math benchmarks, which is reassuring. The ablation studies are thorough—showing that both the discriminative coefficients and the self-normalization matter. One concern: the out-of-domain evaluation (GSM8K → MATH) shows smaller gains, suggesting the method might be somewhat task-specific despite claims of generality. The code generation results are weaker, which the authors acknowledge but don't fully explain. More analysis of when and why DelTA helps would strengthen the claims.
+
+**Writing quality**: The discriminator framing in Section 3 is the paper's strongest contribution conceptually, but it's buried in math. A clearer upfront explanation of "why do centroids get dominated by shared tokens" with a toy example would help. The related work section is thorough but could better position DelTA relative to token-level reward shaping methods. The experimental section is dense—some results could move to appendix to make room for deeper analysis of failure cases or limitations.
+
+**Verdict**: **weak accept** — Solid idea with consistent empirical gains, but the method's scope and failure modes need more exploration. The simplicity is a feature, not a bug, but the paper oversells generality given the mixed results on code generation.
+
+## Takeaways
+
+**Reweight, don't rescale**: When you have a noisy signal dominated by high-frequency components, don't just filter or threshold—learn coefficients that redistribute mass from noisy to informative components while preserving total magnitude. This pattern transfers beyond RLVR: any time you're averaging over heterogeneous contributions (e.g., attention weights, ensemble predictions, gradient aggregation), consider whether some components are "shared noise" that should be downweighted.
+
+**Discriminative framing for credit assignment**: The insight that policy gradient updates implicitly construct a linear discriminator is useful beyond this paper. If you're doing any form of contrastive learning or preference optimization, explicitly modeling what makes positive examples different from negative examples (rather than just "positive is good, negative is bad") can sharpen the learning signal. The logistic regression approach is a minimal viable implementation—you could swap in other discriminators depending on your domain.
+
+**Self-normalization for stable reweighting**: When you reweight components of a loss or gradient, renormalize to keep the total magnitude constant. This prevents the reweighting from accidentally amplifying or dampening the entire update, which would confound the effect you're trying to measure. It's a small trick but critical for making reweighting schemes work in practice without extensive hyperparameter tuning.
+:::
+
+:::zh
+**论文**: [2605.21467](https://arxiv.org/abs/2605.21467)
+**作者**: Kaiyi Zhang, Wei Wu, Yankai Lin
+**分类**: cs.LG, cs.CL
+
+## 缺口
+
+可验证奖励强化学习（RLVR）已成为提升大语言模型推理能力的标准方法：生成多个回复，检查哪些正确，然后用策略梯度增加好回复的概率、降低坏回复的概率。
+
+问题在于：RLVR 在序列层面操作，但更新的是词元概率。
+
+当你告诉模型"这整个回复是好的"时，哪些词元应该获得信用？
+
+标准 RLVR 在优势加权平均中隐式地平等对待所有词元。
+
+这造成了错配：高频格式词元（如换行符、括号、"步骤1："）在正确和错误回复中都出现，所以它们主导了梯度信号。
+
+与此同时，真正区分正确推理和错误推理的稀疏词元被淹没了。
+
+先前工作要么接受这个局限，要么尝试启发式的词元级奖励塑形，这需要领域知识且不能泛化。
+
+缺口在于：我们需要一种原则性方法来识别哪些词元对正确性有判别力，并在策略梯度更新中放大它们的影响。
+
+```
+问题：RLVR 奖励序列，但更新词元
+   |
+   v
+观察：标准更新 = 优势加权质心平均
+   |
+   v
+问题：高频共享词元主导，稀疏判别词元被稀释
+   |
+   v
+方法：学习词元系数，放大判别方向
+   |
+   v
+证据：数学基准上 +3.26 分（Qwen3-8B）
+   |
+   v
+结论：判别性词元信用分配提升 RLVR 效率
+```
+
+## 增量
+
+**一句话**：DelTA 之前，RLVR 在分配信用时平等对待回复中的所有词元；DelTA 之后，方法自动识别并放大真正区分正确与错误推理的稀疏词元。
+
+### 核心机制
+
+DelTA 将 RLVR 策略梯度更新重新框定为在词元梯度向量上操作的线性判别器。
+
+在标准 RLVR 中，你为每个回复中的每个词元计算梯度，然后用优势加权平均它们（正确回复为正，错误回复为负）。
+
+这创建了两个质心：一个来自正确回复的词元，一个来自错误回复的词元。
+
+策略更新方向是这两个质心的差。
+
+问题在于这些质心是如何构建的。
+
+优势加权平均给回复内的所有词元相等的结构权重。
+
+如果"步骤1："在90%的正确和错误回复中都出现，它会对两个质心都有很大贡献，使它们不够分离。
+
+DelTA 引入词元级系数来重新加权每个词元对其质心的贡献。
+
+在正确和错误回复中出现频率相似的词元被降权；侧特异性词元（主要出现在正确或主要出现在错误中）被放大。
+
+这些系数通过将问题视为判别性问题来学习：估计哪些词元最能分离两侧。
+
+DelTA 在词元梯度向量上使用简单的逻辑回归，标签是回复是否正确。
+
+学到的系数然后重新加权一个自归一化的 RLVR 代理目标。
+
+这使得有效质心更具对比性——它们现在由真正重要的词元构建，而不仅仅是出现最频繁的词元。
+
+```
+标准 RLVR：
+  正确回复  -->  [平均所有词元梯度]  -->  质心+
+  错误回复  -->  [平均所有词元梯度]  -->  质心-
+  更新方向 = 质心+ - 质心-
+  
+  问题："步骤1："主导两个质心
+  
+DelTA：
+  正确回复  -->  [加权平均：放大判别词元]  -->  质心+*
+  错误回复  -->  [加权平均：降权共享词元]  -->  质心-*
+  更新方向 = 质心+* - 质心-*
+  
+  结果：质心由推理词元分离，而非格式词元
+```
+
+可以这样想：你是批改数学作业的老师。
+
+标准 RLVR 就像说"这整个解答是对的，所以平等地强化一切"——包括学生在顶部写"问题1："的习惯，这在每份作业上都出现，无论正确与否。
+
+DelTA 就像一个见过数千份作业的老师，知道解答的哪些部分真正表明理解。
+
+当你在正确解答中看到"因此 x = 5"时，你知道这个具体的推理步骤很重要。
+
+当你看到"步骤1："时，你知道这只是格式。
+
+DelTA 通过比较正确与错误解答中出现的内容自动学习这种判别，然后调整每部分获得多少信用。
+
+学生仍然学会写完整的解答，但现在学习信号集中在真正区分正确与错误工作的推理步骤上，而不是样板文字。
+
+### 关键概念
+
+- **词元梯度向量**：对于回复中的每个词元，策略梯度计算应该调整该词元概率多少。
+
+这个调整是参数空间中的一个向量——它指向会增加该词元似然的方向。
+
+在 RLVR 中，你为每个采样回复中的每个词元计算这些向量。
+
+关键洞察：这些向量不仅编码"增加这个词元"，还编码"在这个上下文中以这个周围结构增加这个词元"。
+
+当你平均来自正确回复的词元梯度向量时，你隐式地在问"好回复中所有词元的共同方向是什么？"
+
+DelTA 的观察是这个平均被高频词元主导，所以它重新加权平均以强调判别词元。
+
+- **判别性词元 vs 共享词元**：判别性词元是在正确回复中出现频率远高于错误回复（或反之）的词元。
+
+例如，在数学问题中，"= 0"可能经常出现在正确解答中但很少出现在错误解答中，使其具有判别性。
+
+共享词元在正确和错误回复中以相似频率出现——如"步骤1："或换行符。
+
+标准 RLVR 无法区分这些：两者都基于其频率和优势权重对梯度做出贡献。
+
+DelTA 通过在词元梯度向量上训练逻辑分类器来显式估计哪些词元具有判别性，然后使用分类器的系数重新加权 RLVR 目标。
+
+这放大了判别词元并抑制了共享词元。
+
+- **自归一化代理目标**：RLVR 通常使用来自 PPO 的裁剪代理目标来防止破坏性的大更新。
+
+DelTA 通过将每个词元的贡献乘以其学到的系数来修改这一点，然后重新归一化使目标的总"质量"保持恒定。
+
+这很关键：没有重新归一化，你只是在整体上放大或缩小梯度。
+
+有了重新归一化，你在重新分配信用——从共享词元那里拿走，给判别词元。
+
+自归一化确保整体更新幅度保持受控（对训练稳定性很重要），同时更新方向变得更具对比性。
+
+## 框架转变
+
+```
+之前（标准 RLVR）：              之后（DelTA）：
+
+序列级奖励                       序列级奖励
+     |                               |
+     v                               v
+回复中所有词元                   判别性词元
+按优势加权                       系数估计
+     |                               |
+     v                               v
+质心+ 和 质心-                   重新加权的质心
+（被高频词元主导）               （放大判别性）
+     |                               |
+     v                               v
+策略梯度更新                     策略梯度更新
+（稀释的信号）                   （集中的信号）
+```
+
+**一句话**：从将回复中的所有词元视为对其正确性负有同等责任，到自动识别并放大真正区分正确与错误推理的稀疏词元。
+
+## 专家评审
+
+**选题眼光**：这是一个真实的缺口。
+
+序列级奖励和词元级更新之间的错配自 RLHF 早期以来就为人所知，但大多数工作要么忽略它，要么应用特定领域的启发式方法。
+
+高频词元主导梯度质心的观察从数学上看不明显，但当你可视化词元贡献时就变得清晰了。
+
+这个问题处于一个富有成效的交叉点：它足够基础以至于跨领域都重要，但又足够具体以至于允许一个干净的解决方案。
+
+**方法成熟度**：核心思想——重新加权词元贡献以使质心更具判别性——很优雅。
+
+通过逻辑回归的执行几乎太简单了，这实际上是一个优点：它可解释且不增加太多计算开销。
+
+然而，论文可以探索更复杂的判别器（例如基于注意力的）是否有帮助，或者线性假设是否是一个特性（防止过拟合到虚假相关）。
+
+自归一化技巧很巧妙且必要，但论文没有深入分析当判别词元非常稀疏时会发生什么——方法是否优雅地退化？
+
+**实验诚意**：基线公平，包括最近的强方法（GRPO、ReST-EM）。
+
+增益在模型规模和多个数学基准上是一致的，这令人放心。
+
+消融研究很彻底——显示判别系数和自归一化都很重要。
+
+一个担忧：域外评估（GSM8K → MATH）显示较小的增益，表明尽管声称具有泛化性，该方法可能在某种程度上是任务特定的。
+
+代码生成结果较弱，作者承认但没有充分解释。
+
+对 DelTA 何时以及为何有帮助的更多分析将加强声明。
+
+**写作功力**：第3节中的判别器框定在概念上是论文最强的贡献，但它被埋在数学中。
+
+在前面更清楚地解释"为什么质心会被共享词元主导"并配以玩具示例会有帮助。
+
+相关工作部分很彻底，但可以更好地将 DelTA 相对于词元级奖励塑形方法定位。
+
+实验部分很密集——一些结果可以移到附录，为失败案例或局限性的更深入分析腾出空间。
+
+**判决**：**弱接收** — 扎实的想法，有一致的实证增益，但方法的范围和失败模式需要更多探索。
+
+简单性是一个特性，而非缺陷，但鉴于代码生成上的混合结果，论文过度宣传了泛化性。
+
+## 要点总结
+
+**重新加权，而非重新缩放**：当你有一个被高频成分主导的噪声信号时，不要只是过滤或阈值化——学习系数，将质量从噪声成分重新分配到信息成分，同时保持总幅度。
+
+这种模式超越了 RLVR：任何时候你在对异质贡献进行平均（例如注意力权重、集成预测、梯度聚合），考虑是否有些成分是应该被降权的"共享噪声"。
+
+**信用分配的判别性框定**：策略梯度更新隐式构建线性判别器的洞察在本文之外也很有用。
+
+如果你在做任何形式的对比学习或偏好优化，显式建模是什么使正例不同于负例（而不仅仅是"正例是好的，负例是坏的"）可以锐化学习信号。
+
+逻辑回归方法是一个最小可行实现——你可以根据你的领域换入其他判别器。
+
+**稳定重新加权的自归一化**：当你重新加权损失或梯度的成分时，重新归一化以保持总幅度恒定。
+
+这防止重新加权意外放大或抑制整个更新，这会混淆你试图测量的效果。
+
+这是一个小技巧，但对于使重新加权方案在实践中工作而无需大量超参数调整至关重要。
+
+:::
