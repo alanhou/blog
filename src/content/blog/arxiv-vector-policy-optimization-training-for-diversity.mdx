@@ -1,0 +1,370 @@
+---
+title:
+  en: "Vector Policy Optimization: Training LLMs for Diversity to Unlock Test-Time Search"
+  zh: "向量策略优化：训练多样性以解锁测试时搜索"
+description:
+  en: "VPO trains language models to produce diverse solutions by optimizing vector-valued rewards, dramatically improving performance when combined with test-time search methods like pass@k and evolutionary algorithms."
+  zh: "VPO 通过优化向量值奖励训练语言模型产生多样化解，与 pass@k 和进化算法等测试时搜索方法结合时性能显著提升。"
+date: 2026-05-22
+tags: ["arxiv", "ai", "cs.lg", "cs.ai", "cs.cl", "cs.ne"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2605.22817](https://arxiv.org/abs/2605.22817)
+**Authors**: Ryan Bahlous-Boldi, Isha Puri, Idan Shenfeld, Akarsh Kumar, Mehul Damani, Sebastian Risi, Omar Khattab, Zhang-Wei Hong, Pulkit Agrawal
+**Categories**: cs.LG, cs.AI, cs.CL, cs.NE
+
+## The Gap
+
+Current LLM post-training uses scalar reward optimization (PPO, DPO, GRPO), which collapses the model's output distribution into a narrow mode. This works fine if you only need one answer. But modern inference pipelines—pass@k sampling, best-of-n selection, evolutionary search like AlphaEvolve—need the model to generate diverse candidates that a downstream reward function can filter. The mismatch is stark: we train for convergence, then ask for exploration at test time.
+
+The problem compounds when deployment environments differ from training. A code model might face new test suites, new coding styles, or new performance constraints. A chatbot might encounter user personas not seen during RLHF. Scalar RL bakes in one reward function's preferences, leaving the model brittle when the reward changes.
+
+Prior work on diversity (like DPP sampling or temperature tuning) treats it as a post-hoc inference trick. This paper asks: what if we train for diversity from the start?
+
+```
+Problem: Scalar RL → Low-entropy policy → Poor test-time search
+            |
+            v
+Observation: Rewards are often vector-valued in practice
+            |
+            v
+Method: VPO optimizes for diverse solutions across reward dimensions
+            |
+            v
+Evidence: Beats GRPO on pass@k, best@k, evolutionary search
+            |
+            v
+Conclusion: Diversity should be the default post-training objective
+```
+
+## The Increment
+
+**One sentence**: Before VPO, we trained LLMs to maximize a single scalar reward; after VPO, we train them to produce a portfolio of solutions that cover different trade-offs in a vector reward space.
+
+### Core Mechanism
+
+VPO starts with the observation that most "scalar" rewards are actually aggregations of vector components. Code correctness is per-test-case pass/fail. Chatbot quality might be helpfulness + safety + conciseness. Instead of collapsing these into a weighted sum during training, VPO keeps them separate.
+
+The algorithm modifies GRPO's advantage estimation. Standard GRPO computes advantages using a scalar reward baseline. VPO instead projects each solution onto a Pareto front in the vector reward space, then assigns advantages based on how well each solution covers an underexplored region of that front. Solutions that specialize to different reward trade-offs get positive advantages; redundant solutions near the mode get penalized.
+
+Concretely: sample N solutions per prompt, compute their vector rewards, identify the Pareto front, cluster solutions by which reward dimension they excel at, then weight the policy gradient to encourage one solution per cluster. The model learns to hedge—output one solution optimized for reward dimension 1, another for dimension 2, and so on.
+
+```
+Input prompt
+     |
+     v
+Sample N solutions from policy
+     |
+     v
+Compute vector reward for each: [r1, r2, ..., rk]
+     |
+     v
+Identify Pareto front in reward space
+     |
+     v
+Cluster solutions by reward specialization
+     |
+     v
+Assign advantages: +1 for diverse specialists, -1 for redundant modes
+     |
+     v
+Policy gradient step pushes toward diversity
+```
+
+Think of VPO like training a restaurant kitchen. Scalar RL is like telling every chef to make the dish the head judge likes best—you end up with five identical plates. VPO is like having five judges with different tastes (spicy, sweet, umami, texture, presentation) and training each chef to specialize in winning over one judge. At test time, when a new judge shows up, you've got a better chance one of your chefs' dishes will appeal to them. The kitchen (model) learns to maintain a repertoire, not converge to a single recipe.
+
+### Key Concepts
+
+- **Vector Reward**: Instead of collapsing multiple evaluation criteria into a single number (e.g., 0.5 ** correctness + 0.3 * efficiency + 0.2 * readability), keep them as a vector [correctness, efficiency, readability]. This preserves information about trade-offs. A solution might score [0.9, 0.4, 0.7]—high correctness, low efficiency. Another might be [0.7, 0.9, 0.5]. Scalar aggregation would rank them, but vector representation lets you see they're solving different problems. VPO exploits this: train the model to produce both types of solutions, so at test time you can pick based on which dimension matters most.
+
+- **Pareto Front**: Imagine plotting all solutions in reward space. The Pareto front is the set of solutions where you can't improve one dimension without sacrificing another. If solution A scores [0.8, 0.6] and solution B scores [0.7, 0.7], B is on the Pareto front (balanced) but A might not be if there's a solution C at [0.8, 0.7] that dominates it. VPO uses the Pareto front to identify which solutions are genuinely offering different trade-offs versus which are just worse versions of the same strategy.
+
+- **Advantage Shaping for Diversity**: In standard RL, advantage = (this solution's reward) - (average reward). Positive advantage → reinforce, negative → suppress. VPO modifies this: advantage = (how much this solution covers an underexplored part of the Pareto front). If the model already outputs three solutions optimized for reward dimension 1, the fourth one gets a negative advantage even if its absolute reward is high. This pushes the model toward spreading its probability mass across the reward space rather than piling it onto one mode.
+
+## Framework Shift
+
+```
+Before (Scalar RL):                  After (VPO):
+
+Prompt                               Prompt
+  |                                    |
+  v                                    v
+Policy outputs                       Policy outputs
+distribution                         distribution
+  |                                    |
+  v                                    v
+Sample N solutions                   Sample N solutions
+  |                                    |
+  v                                    v
+Compute scalar reward                Compute vector reward
+r = w1*r1 + w2*r2                    [r1, r2, r3, ...]
+  |                                    |
+  v                                    v
+Advantage = r - baseline             Cluster by specialization
+  |                                    |
+  v                                    v
+Gradient pushes toward               Advantage = diversity score
+high-reward mode                       |
+  |                                    v
+  v                                  Gradient pushes toward
+Low-entropy policy                   covering Pareto front
+(one dominant solution)                |
+                                       v
+                                     High-entropy policy
+                                     (portfolio of specialists)
+```
+
+From optimizing a single peak to cultivating a ridge—the core shift is treating diversity as the objective, not a side effect.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The field has been scaling test-time compute (o1, AlphaCode, self-consistency decoding) while still training models with scalar RL that fights against the diversity those methods need. The timing is sharp—inference-time search is becoming standard, so this problem will only grow. Not manufactured.
+
+**Method maturity**: VPO is conceptually clean but the implementation has moving parts. The Pareto front computation and clustering add overhead. The paper doesn't deeply explore failure modes—what happens when reward dimensions are correlated, or when the vector structure is noisy? The core insight (train for diversity by preserving vector structure) is strong, but I'd want to see ablations on the clustering scheme and sensitivity to hyperparameters. It's not brute force, but it's also not a one-line change.
+
+**Experimental integrity**: Baselines are fair—GRPO, PPO, DPO are the right comparisons. The tasks (code generation, instruction following, math, creative writing) cover different reward structures. The numbers are convincing, especially the evolutionary search results where GRPO models fail completely. One concern: the paper doesn't report wall-clock training time or memory overhead. If VPO is 3x slower than GRPO, that's a tax practitioners need to know about. Also, the "vector reward" framing assumes you have access to per-dimension scores, which isn't always true (e.g., human preference data is often scalar).
+
+**Writing quality**: The intro and method sections are crisp. The related work section is thin—doesn't engage deeply with multi-objective RL or quality-diversity algorithms from evolutionary computation, which have been doing this for years. The results section front-loads the wins but buries the analysis of when VPO doesn't help (low search budgets, highly correlated reward dimensions). Rewriting Section 5 to lead with failure modes and then show where VPO shines would make the claims more credible.
+
+**Verdict**: **weak accept** — Addresses a real and growing problem with a principled method, strong empirical results, but needs more transparency on computational costs and failure modes.
+
+## Takeaways
+
+**For practitioners**: If you're building systems that use pass@k, best-of-n, or any form of test-time search, VPO's core idea transfers immediately—train your model to produce diverse candidates, not just high-reward ones. Even if you can't implement VPO exactly, you can approximate it: sample multiple solutions during training, penalize redundancy, reward coverage of different solution types.
+
+**For researchers**: The vector reward framing is the real contribution. Most RL setups already have vector structure (per-example rewards, multi-task objectives, ensemble of reward models) but we collapse it into a scalar for convenience. VPO shows that preserving that structure during training pays off at test time. This generalizes beyond LLMs—any domain where deployment rewards differ from training rewards (robotics, recommendation systems, drug design) could benefit.
+
+**Specific technique**: The advantage shaping scheme (positive advantage for Pareto-optimal solutions in underexplored regions, negative for redundant modes) is a drop-in replacement for standard advantage estimation. You can graft it onto PPO, DPO, or any policy gradient method. The clustering step is the key—without it, you're just doing multi-objective RL, which can still collapse to a single compromise solution.
+:::
+
+:::zh
+**论文**: [2605.22817](https://arxiv.org/abs/2605.22817)
+**作者**: Ryan Bahlous-Boldi, Isha Puri, Idan Shenfeld, Akarsh Kumar, Mehul Damani, Sebastian Risi, Omar Khattab, Zhang-Wei Hong, Pulkit Agrawal
+**分类**: cs.LG, cs.AI, cs.CL, cs.NE
+
+## 缺口
+
+当前的大语言模型后训练使用标量奖励优化（PPO、DPO、GRPO），这会将模型的输出分布压缩到一个狭窄的峰值。
+
+如果只需要一个答案，这没问题。
+
+但现代推理管线——pass@k 采样、best-of-n 选择、像 AlphaEvolve 这样的进化搜索——需要模型生成多样化的候选解，供下游奖励函数筛选。
+
+错配很明显：我们训练时追求收敛，测试时却要求探索。
+
+当部署环境与训练环境不同时，问题更严重。
+
+代码模型可能面对新的测试套件、新的编码风格或新的性能约束。
+
+聊天机器人可能遇到 RLHF 期间未见过的用户画像。
+
+标量强化学习把一个奖励函数的偏好烙进模型，当奖励变化时模型就变脆了。
+
+此前关于多样性的工作（如 DPP 采样或温度调节）把它当作事后的推理技巧。
+
+这篇论文问：如果从一开始就训练多样性呢？
+
+```
+问题：标量强化学习 → 低熵策略 → 测试时搜索效果差
+            |
+            v
+观察：奖励在实践中往往是向量值
+            |
+            v
+方法：VPO 优化跨奖励维度的多样化解
+            |
+            v
+证据：在 pass@k、best@k、进化搜索上击败 GRPO
+            |
+            v
+结论：多样性应成为后训练的默认目标
+```
+
+## 增量
+
+**一句话**：VPO 之前，我们训练大语言模型最大化单一标量奖励；VPO 之后，我们训练它们产生一个解的组合，覆盖向量奖励空间中的不同权衡。
+
+### 核心机制
+
+VPO 从一个观察出发：大多数"标量"奖励实际上是向量分量的聚合。
+
+代码正确性是逐测试用例的通过/失败。
+
+聊天机器人质量可能是有用性 + 安全性 + 简洁性。
+
+VPO 不在训练时把这些折叠成加权和，而是保持它们分离。
+
+算法修改了 GRPO 的优势估计。
+
+标准 GRPO 用标量奖励基线计算优势。
+
+VPO 则将每个解投影到向量奖励空间的帕累托前沿上，然后根据每个解覆盖该前沿未充分探索区域的程度分配优势。
+
+专注于不同奖励权衡的解获得正优势；靠近众数的冗余解被惩罚。
+
+具体来说：每个提示采样 N 个解，计算它们的向量奖励，识别帕累托前沿，按解在哪个奖励维度上表现优异进行聚类，然后加权策略梯度以鼓励每个簇一个解。
+
+模型学会对冲——输出一个针对奖励维度 1 优化的解，另一个针对维度 2，依此类推。
+
+```
+输入提示
+     |
+     v
+从策略采样 N 个解
+     |
+     v
+计算每个解的向量奖励：[r1, r2, ..., rk]
+     |
+     v
+识别奖励空间中的帕累托前沿
+     |
+     v
+按奖励专业化聚类解
+     |
+     v
+分配优势：多样化专家 +1，冗余众数 -1
+     |
+     v
+策略梯度步骤推向多样性
+```
+
+把 VPO 想象成训练餐厅厨房。
+
+标量强化学习像是告诉每个厨师做主评委最喜欢的菜——你最终得到五个一模一样的盘子。
+
+VPO 像是有五个口味不同的评委（辣、甜、鲜、口感、摆盘），训练每个厨师专攻赢得一个评委的青睐。
+
+测试时，当新评委出现，你的某个厨师的菜更有可能合他胃口。
+
+厨房（模型）学会维持一个菜谱库，而非收敛到单一配方。
+
+### 关键概念
+
+- **向量奖励**：不把多个评估标准折叠成单一数字（如 0.5 ** 正确性 + 0.3 * 效率 + 0.2 * 可读性），而是保持为向量 [正确性, 效率, 可读性]。
+
+这保留了关于权衡的信息。
+
+一个解可能得分 [0.9, 0.4, 0.7]——高正确性，低效率。
+
+另一个可能是 [0.7, 0.9, 0.5]。
+
+标量聚合会给它们排序，但向量表示让你看到它们在解决不同的问题。
+
+VPO 利用这一点：训练模型产生两种类型的解，这样测试时你可以根据哪个维度最重要来选择。
+
+- **帕累托前沿**：想象在奖励空间中绘制所有解。
+
+帕累托前沿是这样一组解：你无法在不牺牲另一个维度的情况下改进一个维度。
+
+如果解 A 得分 [0.8, 0.6]，解 B 得分 [0.7, 0.7]，B 在帕累托前沿上（平衡），但如果有解 C 在 [0.8, 0.7] 支配 A，A 可能不在。
+
+VPO 使用帕累托前沿识别哪些解真正提供了不同的权衡，哪些只是同一策略的更差版本。
+
+- **多样性的优势塑形**：在标准强化学习中，优势 = （这个解的奖励）-（平均奖励）。
+
+正优势 → 强化，负优势 → 抑制。
+
+VPO 修改了这一点：优势 = （这个解覆盖帕累托前沿未充分探索部分的程度）。
+
+如果模型已经输出三个针对奖励维度 1 优化的解，第四个即使绝对奖励高也会得到负优势。
+
+这推动模型将概率质量分散到奖励空间，而非堆积在一个众数上。
+
+## 框架转变
+
+```
+之前（标量强化学习）：            之后（VPO）：
+
+提示                              提示
+  |                                 |
+  v                                 v
+策略输出                          策略输出
+分布                              分布
+  |                                 |
+  v                                 v
+采样 N 个解                       采样 N 个解
+  |                                 |
+  v                                 v
+计算标量奖励                      计算向量奖励
+r = w1*r1 + w2*r2                 [r1, r2, r3, ...]
+  |                                 |
+  v                                 v
+优势 = r - 基线                   按专业化聚类
+  |                                 |
+  v                                 v
+梯度推向                          优势 = 多样性分数
+高奖励众数                          |
+  |                                 v
+  v                               梯度推向
+低熵策略                          覆盖帕累托前沿
+（一个主导解）                      |
+                                    v
+                                  高熵策略
+                                  （专家组合）
+```
+
+从优化单一峰值到培育山脊——核心转变是把多样性当作目标，而非副作用。
+
+## 专家评审
+
+**选题眼光**：这是真缺口。
+
+该领域一直在扩展测试时计算（o1、AlphaCode、自洽解码），同时仍用与这些方法所需多样性相悖的标量强化学习训练模型。
+
+时机很准——推理时搜索正在成为标准，所以这个问题只会越来越大。
+
+不是人造的。
+
+**方法成熟度**：VPO 概念上干净，但实现有活动部件。
+
+帕累托前沿计算和聚类增加了开销。
+
+论文没有深入探讨失败模式——当奖励维度相关时会怎样，或者向量结构有噪声时会怎样？核心洞见（通过保留向量结构训练多样性）很强，但我想看到关于聚类方案的消融实验和对超参数的敏感性分析。
+
+不是蛮力，但也不是一行改动。
+
+**实验诚意**：基线公平——GRPO、PPO、DPO 是正确的比较对象。
+
+任务（代码生成、指令遵循、数学、创意写作）覆盖了不同的奖励结构。
+
+数字令人信服，尤其是进化搜索结果，GRPO 模型完全失败。
+
+一个担忧：论文没有报告实际训练时间或内存开销。
+
+如果 VPO 比 GRPO 慢 3 倍，这是实践者需要知道的代价。
+
+另外，"向量奖励"框架假设你能访问逐维度分数，这并非总是成立（例如，人类偏好数据通常是标量）。
+
+**写作功力**：引言和方法部分简洁。
+
+相关工作部分单薄——没有深入讨论多目标强化学习或进化计算中的质量-多样性算法，它们已经做这个很多年了。
+
+结果部分把胜利放在前面，但埋藏了 VPO 不起作用的分析（低搜索预算、高度相关的奖励维度）。
+
+重写第 5 节，先讲失败模式再展示 VPO 的闪光点，会让主张更可信。
+
+**判决**：**弱接收** — 用有原则的方法解决了一个真实且日益严重的问题，实证结果强劲，但需要更透明地说明计算成本和失败模式。
+
+## 要点总结
+
+**对实践者**：如果你在构建使用 pass@k、best-of-n 或任何形式测试时搜索的系统，VPO 的核心思想可以立即迁移——训练模型产生多样化候选解，而非只产生高奖励解。
+
+即使无法完全实现 VPO，也可以近似：训练时采样多个解，惩罚冗余，奖励覆盖不同解类型。
+
+**对研究者**：向量奖励框架是真正的贡献。
+
+大多数强化学习设置已经有向量结构（逐样本奖励、多任务目标、奖励模型集成），但我们为了方便把它折叠成标量。
+
+VPO 表明，训练时保留该结构在测试时有回报。
+
+这超越了大语言模型——任何部署奖励与训练奖励不同的领域（机器人、推荐系统、药物设计）都可能受益。
+
+**具体技术**：优势塑形方案（对未充分探索区域的帕累托最优解给正优势，对冗余众数给负优势）是标准优势估计的即插即用替代品。
+
+你可以把它嫁接到 PPO、DPO 或任何策略梯度方法上。
+
+聚类步骤是关键——没有它，你只是在做多目标强化学习，仍可能坍缩到单一折衷解。
+
+:::
