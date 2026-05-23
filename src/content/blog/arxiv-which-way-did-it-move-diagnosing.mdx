@@ -1,0 +1,340 @@
+---
+title:
+  en: "Which Way Did It Move? Diagnosing and Overcoming Directional Motion Blindness in Video-LLMs"
+  zh: "它往哪边动了？诊断并克服视频大语言模型的方向运动盲区"
+description:
+  en: "Video-LLMs fail at basic motion direction tasks despite strong temporal understanding. This paper diagnoses the 'direction binding gap' and introduces DeltaDirect to fix it."
+  zh: "视频大语言模型在时序理解上表现强劲，却在基本的运动方向任务上接近随机猜测。本文诊断出\"方向绑定缺口\"并提出 DeltaDirect 修复方案。"
+date: 2026-05-23
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-which-way-did-it-move-diagnosing.png"
+---
+
+![Concept animation](/arxiv-visuals/which-way-did-it-move-diagnosing/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2605.22823](https://arxiv.org/abs/2605.22823)
+**Authors**: Jongseo Lee, Hyuntak Lee, Sunghun Kim, Sooa Kim, Jihoon Chung, Jinwoo Choi
+**Categories**: cs.CV
+
+## The Gap
+
+Video-LLMs like VideoChat, Video-LLaVA, and LLaVA-NeXT-Video excel at complex temporal reasoning—they can summarize plots, track events, answer "what happens after X?" Yet show them a ball moving left and ask "which direction?", they score 25-30%, barely above random chance. The field assumed temporal understanding implies motion understanding. This paper reveals that's false: models can track *what* and *when* without knowing *which way*.
+
+Prior work focused on action recognition (what happened) and temporal localization (when it happened). Motion direction—a signed 2-D vector in image plane—was treated as a solved primitive. Existing benchmarks (ActivityNet, Kinetics) don't isolate directional motion. When models fail, we don't know if it's the vision encoder, the projector, or the LLM's answer binding.
+
+```
+Problem: Video-LLMs fail at basic motion direction (left/right/up/down)
+   |
+   v
+Hypothesis: Motion signal exists but fails to bind to verbal answers
+   |
+   v
+Method: Trace signal through pipeline + add projector-level motion objective
+   |
+   v
+Evidence: Linear probes find signal at all stages; DeltaDirect fixes binding
+   |
+   v
+Conclusion: Direction binding gap, not perception failure
+```
+
+## The Increment
+
+**One sentence**: Before this paper, Video-LLMs could describe temporal sequences but not reliably tell left from right; after, a projector-level motion objective (DeltaDirect) raises motion direction accuracy from 25.9% to 85.4% on synthetic data and improves real-world accuracy by 21.9 points without real-world training.
+
+### Core Mechanism
+
+DeltaDirect operates at the projector level—the adapter between vision encoder and LLM. For adjacent video frames, it computes feature deltas (difference vectors in embedding space), then predicts a normalized 2-D motion vector (dx, dy) in image coordinates. This prediction is supervised with ground-truth optical flow, averaged over the frame and normalized to unit length.
+
+The key insight: motion direction is a *geometric* signal that should be extracted before language binding. The projector already compresses spatial-temporal features; DeltaDirect adds a lightweight prediction head (two linear layers) that forces the projector to preserve directional information in a form the LLM can later decode. During training, this auxiliary loss runs alongside standard instruction tuning. At inference, the motion head is discarded—the projector's learned representations now carry directional signal that the LLM can access through its normal text generation.
+
+```
+Frame t, Frame t+1
+   |         |
+   v         v
+[Vision Encoder]  (CLIP/SigLIP)
+   |         |
+   +----+----+
+        |
+   [Feature Delta]  (subtract embeddings)
+        |
+        v
+   [Projector]  (MLP adapter)
+        |
+        +---> [Motion Head] ---> predict (dx, dy)
+        |                         compare to ground truth
+        |                         backprop auxiliary loss
+        v
+   [LLM tokens] ---> "The object moves left"
+```
+
+Think of it like teaching someone to navigate by compass. The vision encoder sees the landscape (raw visual features). The projector is a guide who must compress the landscape into directions. Without DeltaDirect, the guide learns to describe landmarks ("there's a tree, then a river") but never learns to point north. DeltaDirect is compass training: for every pair of observations, the guide must explicitly state "we moved 30 degrees northeast." After enough practice, the guide internalizes directional thinking—even when just describing landmarks, they now naturally encode which way things are. The compass itself (motion head) can be removed later; the directional habit remains in how the guide compresses information.
+
+### Key Concepts
+
+- **Directional Motion Blindness**: Video-LLMs perform near chance (25-30% on 4-way classification) when asked to identify motion direction of a single object moving left/right/up/down, despite strong performance on complex temporal tasks. This isn't a vision encoder failure—linear probes show motion direction is linearly separable from encoder features. It's a **binding* failure: the model has the signal but can't connect it to the correct verbal answer token ("left" vs "right").
+
+- **Direction Binding Gap**: The paper traces motion direction information through the pipeline using linear probes. At every stage (vision encoder output, projector output, LLM hidden states), a linear classifier can recover motion direction with 70-90% accuracy. Yet the LLM's final answer is near random. The gap: motion direction remains **accessible* in the representation space but fails to *bind* to the correct answer option during text generation. It's like having a compass reading in your pocket but answering "north" when you meant "south"—the information is there, but the connection to language is scrambled.
+
+- **Motion Concept Vector**: Borrowed from concept activation literature, this is the direction in embedding space that maximally separates motion directions (e.g., "left" vs "right"). The paper measures concept vector magnitude across visual complexity levels. On simple synthetic videos (solid color backgrounds), the magnitude is strong. On real-world videos (cluttered scenes, camera motion), it weakens. This explains why synthetic instruction tuning doesn't transfer: the concept vector learned from clean data is too weak to survive real-world noise. DeltaDirect's explicit geometric supervision maintains stronger concept vectors across complexity levels.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+Video --> [Encoder] --> [Projector]  Video --> [Encoder] --> [Projector]
+              |              |                     |         /    |    \
+              v              v                     |    motion   |     |
+          [LLM tokens]  "moves left"               |     head    |     |
+                                                   v      |      v     v
+          (hope motion direction                [Delta] -+   [LLM tokens]
+           emerges from temporal                   |
+           instruction tuning)                     v
+                                              (dx,dy) loss
+                                              
+                                          (force projector to preserve
+                                           geometric motion signal)
+```
+
+From implicit emergence to explicit geometric supervision, the core shift is: treat motion direction as a projector-level primitive that must be directly supervised, not as an emergent property of language-aligned temporal features.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The field conflated temporal reasoning with motion perception. Action recognition benchmarks (Kinetics, ActivityNet) don't isolate signed direction—"person walks left" vs "person walks right" are often the same action class. The authors constructed a minimal test (single object, four directions) that exposes the failure cleanly. This is good science: find the simplest case where the system breaks.
+
+**Method maturity**: Clever and minimal. DeltaDirect adds ~2M parameters (two linear layers) and requires optical flow labels, but optical flow is cheap to compute or synthesize. The projector-level placement is smart—it's the natural bottleneck where spatial-temporal compression happens. Alternative approaches (fine-tuning the vision encoder, adding motion tokens to the LLM) would be heavier and less modular. One concern: the method assumes adjacent-frame deltas capture motion, which breaks for fast motion or low frame rates. The paper doesn't explore temporal stride as a hyperparameter.
+
+**Experimental integrity**: Baselines are fair. The paper tests 8 Video-LLMs (VideoChat, Video-LLaVA, LLaVA-NeXT, etc.) and shows consistent failure. Linear probe analysis is rigorous—they control for prediction bias by measuring balanced accuracy. The synthetic→real transfer experiment is the key test: DeltaDirect improves real-world accuracy by 21.9 points **without real-world training data*. That's strong evidence the method learns transferable geometric structure, not dataset-specific shortcuts. One weakness: the real-world benchmark (MoDirect-RealBench) is only 400 samples. Larger-scale validation would strengthen claims.
+
+**Writing quality**: Section 3 (diagnosis) is excellent—clear logic, good visualizations. Section 4 (method) is too brief. The motion head architecture (two linear layers, hidden dim, activation function) is buried in the appendix. The relationship between DeltaDirect loss weight and standard instruction tuning loss is underspecified. Rewriting Section 4 with an ablation table (loss weight, head architecture, temporal stride) would clarify design choices.
+
+**Verdict**: **weak accept** — Identifies a real, overlooked failure mode and proposes a simple, effective fix with solid diagnostic work. The method is practical and the results are convincing, but the paper would benefit from deeper exploration of when and why the approach works (temporal stride, motion magnitude, camera motion).
+
+## Takeaways
+
+- **Diagnostic methodology**: When a model fails, trace the signal through the pipeline with linear probes. If the signal is present at intermediate layers but absent in final outputs, the problem is binding, not perception. This technique transfers to debugging other modality gaps (audio-text, 3D-text).
+
+- **Projector-level objectives**: For multimodal models, the projector is a leverage point. Adding lightweight auxiliary heads with explicit supervision (geometry, physics, causality) can force the projector to preserve structure that language alignment alone doesn't capture. This is cheaper than retraining encoders or scaling LLMs.
+
+- **Synthetic→real transfer via geometric priors**: DeltaDirect's real-world transfer without real-world data suggests that geometric supervision (normalized motion vectors) learns more robust representations than language-only tuning. If your domain has geometric or physical structure (robotics, medical imaging, scientific video), consider explicit geometric losses even if your end task is language generation.
+:::
+
+:::zh
+**论文**: [2605.22823](https://arxiv.org/abs/2605.22823)
+**作者**: Jongseo Lee, Hyuntak Lee, Sunghun Kim, Sooa Kim, Jihoon Chung, Jinwoo Choi
+**分类**: cs.CV
+
+## 缺口
+
+视频大语言模型（Video-LLM）如 VideoChat、Video-LLaVA、LLaVA-NeXT-Video 在复杂时序推理上表现出色——它们能总结剧情、追踪事件、回答"X 之后发生了什么？"。
+
+但给它们看一个向左移动的球，问"往哪个方向？"，准确率只有 25-30%，几乎等于随机猜测。
+
+该领域此前假设时序理解蕴含运动理解。
+
+本文揭示这是错的：模型能追踪*什么*和*何时*，却不知道*往哪边*。
+
+此前工作聚焦于动作识别（发生了什么）和时序定位（何时发生）。
+
+运动方向——图像平面上的有符号二维向量——被当作已解决的基础问题。
+
+现有基准（ActivityNet、Kinetics）不隔离方向运动。
+
+当模型失败时，我们不知道是视觉编码器、投影器还是大语言模型的答案绑定出了问题。
+
+```
+问题：Video-LLM 在基本运动方向（左/右/上/下）上失败
+   |
+   v
+假设：运动信号存在，但未能绑定到语言答案
+   |
+   v
+方法：追踪信号流经管线 + 在投影器层加运动目标
+   |
+   v
+证据：线性探针在各阶段都找到信号；DeltaDirect 修复绑定
+   |
+   v
+结论：方向绑定缺口，而非感知失败
+```
+
+## 增量
+
+**一句话**：这篇论文之前，Video-LLM 能描述时序但分不清左右；之后，投影器层的运动目标（DeltaDirect）将合成数据上的运动方向准确率从 25.9% 提升到 85.4%，并在无真实世界训练数据的情况下将真实世界准确率提升 21.9 个百分点。
+
+### 核心机制
+
+DeltaDirect 作用于投影器层——视觉编码器与大语言模型之间的适配器。
+
+对相邻视频帧，它计算特征差值（嵌入空间中的差分向量），然后预测归一化的二维运动向量（dx, dy），坐标系为图像坐标。
+
+这个预测由真实光流监督，在帧上平均后归一化为单位长度。
+
+核心洞见：运动方向是*几何*信号，应在语言绑定之前提取。
+
+投影器本就压缩时空特征；DeltaDirect 添加一个轻量预测头（两层线性层），强制投影器以大语言模型后续能解码的形式保留方向信息。
+
+训练时，这个辅助损失与标准指令微调并行。
+
+推理时，运动头被丢弃——投影器学到的表示已携带方向信号，大语言模型可通过正常文本生成访问。
+
+```
+帧 t, 帧 t+1
+   |         |
+   v         v
+[视觉编码器]  (CLIP/SigLIP)
+   |         |
+   +----+----+
+        |
+   [特征差值]  (嵌入相减)
+        |
+        v
+   [投影器]  (MLP 适配器)
+        |
+        +---> [运动头] ---> 预测 (dx, dy)
+        |                   与真值比较
+        |                   反向传播辅助损失
+        v
+   [LLM 词元] ---> "物体向左移动"
+```
+
+把它想象成教人用指南针导航。
+
+视觉编码器看到地形（原始视觉特征）。
+
+投影器是向导，必须把地形压缩成方向。
+
+没有 DeltaDirect，向导学会描述地标（"有棵树，然后是条河"）但从不学指北。
+
+DeltaDirect 是指南针训练：每对观测，向导必须明确说"我们往东北偏 30 度移动了"。
+
+练够了，向导内化了方向思维——即使只是描述地标，现在也自然编码了事物往哪边。
+
+指南针本身（运动头）后来可以拿掉；方向习惯留在了向导压缩信息的方式里。
+
+### 关键概念
+
+- **方向运动盲区**：当被要求识别单个物体向左/右/上/下移动的方向时，Video-LLM 的表现接近随机（四分类 25-30%），尽管它们在复杂时序任务上表现强劲。
+
+这不是视觉编码器的失败——线性探针显示运动方向在编码器特征中线性可分。
+
+这是*绑定*失败：模型有信号，但无法将其连接到正确的语言答案词元（"左"vs"右"）。
+
+- **方向绑定缺口**：论文用线性探针追踪运动方向信息流经管线。
+
+在每个阶段（视觉编码器输出、投影器输出、大语言模型隐藏状态），线性分类器都能以 70-90% 的准确率恢复运动方向。
+
+但大语言模型的最终答案接近随机。
+
+缺口在于：运动方向在表示空间中保持*可访问*，但在文本生成时未能*绑定*到正确答案选项。
+
+就像口袋里有指南针读数，却在想说"北"时答成"南"——信息在那儿，但与语言的连接乱了。
+
+- **运动概念向量**：借用概念激活文献，这是嵌入空间中最大化分离运动方向（如"左"vs"右"）的方向。
+
+论文测量概念向量幅度在不同视觉复杂度下的变化。
+
+在简单合成视频（纯色背景）上，幅度强。
+
+在真实世界视频（杂乱场景、相机运动）上，幅度减弱。
+
+这解释了为何合成指令微调不迁移：从干净数据学到的概念向量太弱，扛不住真实世界噪声。
+
+DeltaDirect 的显式几何监督在各复杂度级别维持更强的概念向量。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+
+视频 --> [编码器] --> [投影器]    视频 --> [编码器] --> [投影器]
+              |           |                      |        /    |    \
+              v           v                      |    运动头   |     |
+          [LLM词元]  "向左移动"                  |       |     |     |
+                                                 v       |     v     v
+          (期望运动方向                        [差值] ---+  [LLM词元]
+           从时序指令微调中涌现)                   |
+                                                  v
+                                             (dx,dy) 损失
+                                             
+                                          (强制投影器保留
+                                           几何运动信号)
+```
+
+从隐式涌现到显式几何监督，核心转变是：把运动方向当作投影器层必须直接监督的基元，而非语言对齐时序特征的涌现属性。
+
+## 专家评审
+
+**选题眼光**：真缺口。
+
+该领域混淆了时序推理与运动感知。
+
+动作识别基准（Kinetics、ActivityNet）不隔离有符号方向——"人向左走"vs"人向右走"常是同一动作类别。
+
+作者构造了最小测试（单物体，四方向），干净地暴露失败。
+
+这是好科学：找到系统崩溃的最简情形。
+
+**方法成熟度**：巧妙且精简。
+
+DeltaDirect 添加约 200 万参数（两层线性层）并需要光流标签，但光流计算或合成成本低。
+
+投影器层的位置选得聪明——那是时空压缩发生的自然瓶颈。
+
+替代方案（微调视觉编码器、给大语言模型加运动词元）会更重且模块化更差。
+
+一个担忧：方法假设相邻帧差值捕获运动，这在快速运动或低帧率时失效。
+
+论文未探索时间步长作为超参数。
+
+**实验诚意**：基线公平。
+
+论文测试了 8 个 Video-LLM（VideoChat、Video-LLaVA、LLaVA-NeXT 等），显示一致失败。
+
+线性探针分析严谨——他们通过测量平衡准确率控制预测偏差。
+
+合成→真实迁移实验是关键测试：DeltaDirect 在*无真实世界训练数据*的情况下将真实世界准确率提升 21.9 个百分点。
+
+这是强证据，表明方法学到了可迁移的几何结构，而非数据集特定捷径。
+
+一个弱点：真实世界基准（MoDirect-RealBench）只有 400 样本。
+
+更大规模验证会强化结论。
+
+**写作功力**：第 3 节（诊断）优秀——逻辑清晰，可视化好。
+
+第 4 节（方法）太简略。
+
+运动头架构（两层线性层、隐藏维度、激活函数）埋在附录里。
+
+DeltaDirect 损失权重与标准指令微调损失的关系说得不够。
+
+重写第 4 节，加消融表（损失权重、头架构、时间步长）会澄清设计选择。
+
+**判决**：**弱接收** — 识别出真实的、被忽视的失败模式，提出简单有效的修复方案，诊断工作扎实。
+
+方法实用，结果有说服力，但论文会受益于更深入探索方法何时为何有效（时间步长、运动幅度、相机运动）。
+
+## 要点总结
+
+- **诊断方法论**：当模型失败时，用线性探针追踪信号流经管线。
+
+如果信号在中间层存在但在最终输出缺失，问题是绑定而非感知。
+
+这个技术可迁移到调试其他模态缺口（音频-文本、3D-文本）。
+
+- **投影器层目标**：对多模态模型，投影器是杠杆点。
+
+添加轻量辅助头，配以显式监督（几何、物理、因果），可强制投影器保留单靠语言对齐捕获不到的结构。
+
+这比重训编码器或扩大语言模型更便宜。
+
+- **通过几何先验实现合成→真实迁移**：DeltaDirect 在无真实世界数据的情况下实现真实世界迁移，表明几何监督（归一化运动向量）比纯语言微调学到更鲁棒的表示。
+
+如果你的领域有几何或物理结构（机器人、医学影像、科学视频），考虑显式几何损失，即使最终任务是语言生成。
+
+:::
