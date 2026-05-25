@@ -1,0 +1,296 @@
+---
+title:
+  en: "Training-Free Looped Transformers: Retrofitting Recurrence at Test Time"
+  zh: "免训练循环Transformer：测试时改装递归结构"
+description:
+  en: "A method that loops mid-stack transformer blocks at inference time without retraining, treating block reapplication as ODE refinement to boost performance on frozen checkpoints."
+  zh: "一种在推理时循环中层Transformer块的方法，无需重训练，将块重复应用视为ODE细化，提升冻结检查点的性能。"
+date: 2026-05-25
+tags: ["arxiv", "ai", "cs.lg", "math.na", "stat.ml"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2605.23872](https://arxiv.org/abs/2605.23872)
+**Authors**: Lizhang Chen, Jonathan Li, Chen Liang, Ni Lao, Qiang Liu
+**Categories**: cs.LG, math.NA, stat.ML
+
+## The Gap
+
+Existing looped transformers (Universal Transformers, Block-Recurrent Transformers) train with recurrence baked into the architecture from scratch. This requires full retraining or continued pretraining, making it expensive to apply to existing checkpoints. Meanwhile, practitioners have billions of parameters sitting in frozen pretrained models that could benefit from deeper computation at inference time, but no way to add recurrence without starting over.
+
+The boundary: Can you retrofit recurrence onto a pretrained transformer without touching its weights?
+
+```
+Problem: Frozen checkpoints lack recurrence
+   |
+   v
+Assumption: Pre-norm blocks ~ forward Euler ODE steps
+   |
+   v
+Method: Loop mid-stack blocks with damped sub-steps
+   |
+   v
+Evidence: +1-2.6pp on MMLU-Pro, CommonsenseQA, OpenBookQA
+   |
+   v
+Conclusion: Test-time looping works if you treat it as ODE refinement
+```
+
+## The Increment
+
+**One sentence**: Before this paper, adding recurrence to transformers meant retraining from scratch; after, you can loop existing checkpoints at test time by treating blocks as ODE steps and refining them with damped iterations.
+
+### Core Mechanism
+
+The method wraps a contiguous block of layers (say, layers 10-15 of a 32-layer model) in a loop that runs multiple times during inference. Instead of naively reapplying the same block, which degrades performance, it treats each transformer block as a forward Euler step approximating an ODE. Looping becomes ODE refinement: replace one large step with multiple smaller damped steps.
+
+Concretely, if a block computes `x_{t+1} = x_t + f(x_t)`, naive looping does `x_{t+k} = x_t + k*f(...)` which overshoots. The paper's damped approach does `x_{t+1} = x_t + (1/k)*f(x_t)`, then repeats k times, keeping the total update magnitude similar but refining the trajectory. A lightweight wrapper manages loop state and damping factors, but the frozen checkpoint never changes.
+
+```
+Frozen checkpoint (32 layers):
+[L1...L9] -> [L10...L15] -> [L16...L32]
+              ^         |
+              |_________|  <-- Loop wrapper (k iterations)
+                            with damping factor 1/k
+```
+
+Think of it like crossing a river on stepping stones. The pretrained model gives you stones at fixed intervals (layers). Naive looping is like jumping on the same stone multiple times—you don't get farther, you just tire yourself out. This paper's approach is like placing smaller intermediate stones between the original ones: you still cross the same distance, but with more careful footing. The ODE view tells you where to place those stones (damped sub-steps) so you follow a smoother path to the same destination.
+
+### Key Concepts
+
+- **Pre-norm transformer as ODE**: A pre-norm block does `x_{t+1} = x_t + MLP(LN(x_t + Attn(LN(x_t))))`. If you squint, this looks like `x_{t+1} = x_t + f(x_t)`, the forward Euler method for solving `dx/dt = f(x)`. The "time step" is implicitly 1. Looping k times with damping factor 1/k is like taking k smaller Euler steps of size 1/k, which refines the ODE approximation. This isn't just metaphor—it's the mathematical justification for why damping prevents divergence.
+
+- **Damping factor**: When you loop a block k times, you scale the residual update by 1/k each iteration. Without damping, the k-th iteration adds k times the original update, causing the hidden state to explode or collapse. With damping, the total update magnitude stays roughly constant, but the path is refined. It's like turning one big jump into k small hops—you land in the same place, but with better control.
+
+- **Loop application strategy**: Not all blocks benefit equally from looping. The paper finds mid-stack blocks (roughly layers 30-60% into the model) work best. Early layers are still building representations; late layers are collapsing to output space. Mid-stack is where reasoning happens, so refining those steps yields the biggest gains. The strategy also includes when to start/stop looping and how to blend loop outputs.
+
+## Framework Shift
+
+```
+Before (train-time looping):        After (test-time looping):
+
+Train:                              Train:
+[Random init] -> [Train with        [Standard pretraining]
+                  recurrence]          |
+    |                                  v
+    v                               [Frozen checkpoint]
+[Looped checkpoint]                    
+                                    Inference:
+Inference:                          [Wrap mid-stack block]
+[Use trained loops]                     |
+                                        v
+                                    [Loop with damping]
+```
+
+From baking recurrence into training to retrofitting it at test time, the core shift is **decoupling architectural flexibility from training cost**.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Practitioners have massive frozen checkpoints (Llama, Qwen, etc.) and want more compute at inference without retraining. This is a practical pain point, not a manufactured problem. It sits at the intersection of efficient inference and model reuse—both hot areas.
+
+**Method maturity**: Clever insight (ODE view justifies damping) backed by solid math. The damping factor isn't arbitrary—it's derived from numerical ODE theory. However, the paper doesn't deeply explore **why* mid-stack blocks work best beyond empirical observation. A tighter theoretical characterization of which blocks benefit from looping would strengthen the contribution. The method is simple enough to implement in 50 lines of code, which is a feature, not a bug.
+
+**Experimental integrity**: Baselines are fair (naive looping, no looping). The gains are modest (+1-2.6pp) but consistent across model families (dense, MoE, MLA+MoE). The paper tests on 7 model families and multiple benchmarks, which is thorough. One red flag: no analysis of failure cases. When does looping hurt? The paper mentions "naive looping degrades performance" but doesn't quantify how often or by how much. Also, no wall-clock time measurements—looping adds latency, and the paper doesn't discuss the speed/accuracy tradeoff.
+
+**Writing quality**: The ODE motivation is well-explained, but the loop application strategy section is rushed. The paper lists heuristics (loop mid-stack, use damping factor 1/k) without ablating them systematically. A table showing "loop layers 10-15 vs 20-25 vs 30-35" would clarify the design space. The related work section undersells the novelty—it reads like "we're just applying existing ODE ideas," when the contribution is showing this works on frozen checkpoints without retraining.
+
+**Verdict**: **weak accept** — Solid practical contribution with theoretical grounding, but experimental analysis could be deeper and the writing undersells the novelty.
+
+## Takeaways
+
+**For practitioners**: If you have a frozen checkpoint and want more reasoning depth at inference, loop mid-stack blocks (30-60% into the model) with damping factor 1/k for k iterations. This is cheaper than scaling model size and doesn't require retraining. The code is trivial—wrap the block in a for-loop and scale residuals.
+
+**For researchers**: The ODE lens on transformers is underexplored. If a block is an Euler step, what about higher-order integrators (Runge-Kutta)? Could you adaptively choose loop count per input (easy examples loop less, hard examples loop more)? The paper opens a design space of "inference-time architectural modifications" that don't require retraining.
+
+**Transferable technique**: Damped iteration as a refinement strategy. Anytime you have a pretrained model doing `x_{t+1} = x_t + f(x_t)`, you can refine it by replacing one step with k damped steps. This applies beyond transformers—think diffusion models, iterative optimization, or any residual architecture.
+:::
+
+:::zh
+**论文**: [2605.23872](https://arxiv.org/abs/2605.23872)
+**作者**: Lizhang Chen, Jonathan Li, Chen Liang, Ni Lao, Qiang Liu
+**分类**: cs.LG, math.NA, stat.ML
+
+## 缺口
+
+现有的循环Transformer（通用Transformer、块递归Transformer）从头开始训练时就把递归结构烘焙进架构。
+
+这需要完全重训练或继续预训练，成本高昂，难以应用到现有检查点。
+
+与此同时，实践者手里有数十亿参数的冻结预训练模型，这些模型在推理时可以受益于更深的计算，但没办法在不重新开始的情况下添加递归。
+
+边界问题：能否在不触碰权重的情况下，给预训练Transformer改装递归？
+
+```
+问题：冻结检查点缺乏递归
+   |
+   v
+假设：预归一化块 ~ 前向欧拉ODE步
+   |
+   v
+方法：用阻尼子步循环中层块
+   |
+   v
+证据：MMLU-Pro等任务上+1-2.6pp
+   |
+   v
+结论：测试时循环可行，前提是视为ODE细化
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，给Transformer添加递归意味着从头重训练；
+
+之后，你可以在测试时循环现有检查点，把块视为ODE步并用阻尼迭代细化它们。
+
+### 核心机制
+
+该方法在推理时把一段连续的层块（比如32层模型的第10-15层）包裹在循环中，多次运行。
+
+与其天真地重复应用同一个块（会降低性能），不如把每个Transformer块视为近似ODE的前向欧拉步。
+
+循环变成ODE细化：用多个更小的阻尼步替换一个大步。
+
+具体来说，如果一个块计算`x_{t+1} = x_t + f(x_t)`，天真循环会做`x_{t+k} = x_t + k*f(...)`，这会过冲。
+
+本文的阻尼方法做`x_{t+1} = x_t + (1/k)*f(x_t)`，然后重复k次，保持总更新幅度相似但细化轨迹。
+
+一个轻量级包装器管理循环状态和阻尼因子，但冻结检查点从不改变。
+
+```
+冻结检查点（32层）：
+[L1...L9] -> [L10...L15] -> [L16...L32]
+              ^         |
+              |_________|  <-- 循环包装器（k次迭代）
+                            阻尼因子 1/k
+```
+
+把它想象成过河踩石头。
+
+预训练模型给你固定间隔的石头（层）。
+
+天真循环就像在同一块石头上跳多次——你走不远，只是把自己累坏了。
+
+本文的方法像是在原石头之间放置更小的中间石头：你仍然跨越相同距离，但脚步更稳。
+
+ODE视角告诉你在哪里放这些石头（阻尼子步），这样你沿着更平滑的路径到达同一目的地。
+
+### 关键概念
+
+- **预归一化Transformer作为ODE**: 预归一化块做`x_{t+1} = x_t + MLP(LN(x_t + Attn(LN(x_t))))`。
+
+眯着眼看，这像`x_{t+1} = x_t + f(x_t)`，即求解`dx/dt = f(x)`的前向欧拉方法。
+
+"时间步长"隐式为1。
+
+用阻尼因子1/k循环k次，就像取k个大小为1/k的更小欧拉步，这细化了ODE近似。
+
+这不只是比喻——它是阻尼防止发散的数学依据。
+
+- **阻尼因子**: 当你循环一个块k次时，每次迭代把残差更新缩放1/k。
+
+没有阻尼，第k次迭代会加上k倍的原始更新，导致隐藏状态爆炸或坍缩。
+
+有了阻尼，总更新幅度大致保持恒定，但路径被细化。
+
+这就像把一次大跳变成k次小跳——你落在同一个地方，但控制更好。
+
+- **循环应用策略**: 不是所有块都同样受益于循环。
+
+论文发现中层块（大约在模型30-60%深度的层）效果最好。
+
+早期层还在构建表示；
+
+晚期层在坍缩到输出空间。
+
+中层是推理发生的地方，所以细化这些步骤收益最大。
+
+策略还包括何时开始/停止循环以及如何混合循环输出。
+
+## 框架转变
+
+```
+之前（训练时循环）：            之后（测试时循环）：
+
+训练：                          训练：
+[随机初始化] -> [带递归训练]    [标准预训练]
+    |                              |
+    v                              v
+[循环检查点]                    [冻结检查点]
+                                    
+推理：                          推理：
+[使用训练好的循环]              [包装中层块]
+                                    |
+                                    v
+                                [带阻尼循环]
+```
+
+从把递归烘焙进训练到在测试时改装它，核心转变是**将架构灵活性与训练成本解耦**。
+
+## 专家评审
+
+**选题眼光**: 真实缺口。
+
+实践者有大量冻结检查点（Llama、Qwen等），想在推理时增加计算而不重训练。
+
+这是实际痛点，不是人造问题。
+
+它处于高效推理和模型复用的交叉点——都是热门领域。
+
+**方法成熟度**: 巧妙洞察（ODE视角证明阻尼合理）有扎实数学支撑。
+
+阻尼因子不是任意的——它源自数值ODE理论。
+
+然而，论文没有深入探索*为什么*中层块效果最好，除了经验观察。
+
+对哪些块受益于循环的更严格理论刻画会加强贡献。
+
+方法简单到可以用50行代码实现，这是优点而非缺点。
+
+**实验诚意**: 基线公平（天真循环、无循环）。
+
+增益适度（+1-2.6pp）但在模型家族（密集、MoE、MLA+MoE）间一致。
+
+论文测试了7个模型家族和多个基准，很全面。
+
+一个警示：没有失败案例分析。
+
+循环何时有害？
+
+论文提到"天真循环降低性能"但没量化频率或程度。
+
+此外，没有实际运行时间测量——循环增加延迟，论文没讨论速度/准确率权衡。
+
+**写作功力**: ODE动机解释得好，但循环应用策略部分仓促。
+
+论文列出启发式规则（循环中层、用阻尼因子1/k）但没系统消融。
+
+一张表格显示"循环第10-15层 vs 20-25层 vs 30-35层"会澄清设计空间。
+
+相关工作部分低估了新颖性——读起来像"我们只是应用现有ODE想法"，而贡献是展示这在冻结检查点上无需重训练就能工作。
+
+**判决**: **弱接收** — 有理论基础的扎实实践贡献，但实验分析可以更深，写作低估了新颖性。
+
+## 要点总结
+
+**给实践者**: 如果你有冻结检查点，想在推理时增加推理深度，用阻尼因子1/k循环中层块（模型30-60%深度）k次迭代。
+
+这比扩大模型规模便宜，不需要重训练。
+
+代码很简单——把块包在for循环里并缩放残差。
+
+**给研究者**: Transformer的ODE视角探索不足。
+
+如果块是欧拉步，那高阶积分器（龙格-库塔）呢？
+
+能否根据输入自适应选择循环次数（简单例子少循环，难例子多循环）？
+
+论文打开了"推理时架构修改"的设计空间，不需要重训练。
+
+**可迁移技术**: 阻尼迭代作为细化策略。
+
+任何时候你有预训练模型做`x_{t+1} = x_t + f(x_t)`，都可以通过用k个阻尼步替换一步来细化它。
+
+这超越Transformer——想想扩散模型、迭代优化或任何残差架构。
+
+:::

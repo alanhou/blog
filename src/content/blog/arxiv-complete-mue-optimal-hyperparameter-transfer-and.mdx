@@ -1,0 +1,332 @@
+---
+title:
+  en: "Complete-μE: Tune Dense Once, Transfer to All MoE Configurations"
+  zh: "Complete-μE：调一次稠密模型，迁移到所有 MoE 配置"
+description:
+  en: "A two-bridge framework that enables hyperparameter transfer from dense models to any MoE setup, eliminating costly per-configuration tuning."
+  zh: "一个双桥框架，实现从稠密模型到任意 MoE 配置的超参数迁移，消除昂贵的逐配置调优。"
+date: 2026-05-25
+tags: ["arxiv", "ai", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2605.23893](https://arxiv.org/abs/2605.23893)
+**Authors**: Hongwu Peng, Ohiremen Dibua, Yuanjun Xiong, Yifan Gong, Jianming Zhang, Yan Kang
+**Categories**: cs.LG
+
+## The Gap
+
+Mixture-of-Experts (MoE) models promise better scaling than dense models by activating only a subset of parameters per token. But there's a catch: every time you change the MoE configuration (number of experts, routing strategy, capacity), you need to retune hyperparameters from scratch. Existing transfer methods fail here. μP requires fixed architecture (but dense-to-MoE changes architecture). SDE requires fixed tokens-per-step (but MoE changes tokens-per-expert as you scale). The result: practitioners either stick with dense models or burn compute on hyperparameter sweeps for each MoE variant.
+
+```
+Problem: Dense → MoE hyperparameter transfer
+   |
+   v
+Existing tools fail:
+   μP: architecture must stay fixed
+   SDE: per-step token count must stay fixed
+   |
+   v
+Complete-μE: Two-bridge system
+   Bridge I:  Dense FFN ←→ Dense MoE (active-width μP)
+   Bridge II: Dense MoE ←→ Sparse MoE (activated-expert scaling)
+   |
+   v
+Evidence: Language + diffusion model experiments
+   - Hyperparameters stable across configs
+   - Minor drift within acceptable bounds
+   |
+   v
+Conclusion: Tune dense once → transfer to all MoE setups
+```
+
+## The Increment
+
+**One sentence**: Before this paper, scaling MoE models required hyperparameter retuning for each configuration; after, you tune once on a dense model and transfer to any MoE setup with near-optimal performance.
+
+### Core Mechanism
+
+Complete-μE splits the transfer problem into two bridges. Bridge I handles the dense-to-MoE transition by treating the MoE as a "wide" dense layer where only some neurons activate. It applies μP's width-scaling rules but normalizes them by the number of active experts, not total experts. This keeps learning rates stable when you convert a dense FFN into an MoE with the same active capacity.
+
+Bridge II handles scaling within MoE configurations (changing total experts while keeping active experts constant). Here, the key insight is that first-order learning rate and weight decay corrections cancel out when you scale experts proportionally. What remains is a bounded residual shift in initialization scale (σ₀), which empirically causes only minor drift. The framework composes these bridges to cover arbitrary changes: width, depth, batch size, number of experts, routing granularity, and hybrid architectures.
+
+```
+Input: Dense model hyperparameters (LR, WD, init scale)
+   |
+   v
+[Bridge I: Dense → Dense MoE]
+   Active-width μP scaling
+   Router scale normalization
+   |
+   v
+Dense MoE hyperparameters
+   |
+   v
+[Bridge II: Dense MoE → Sparse MoE]
+   Activated-expert scaling
+   First-order corrections cancel
+   Residual σ₀ shift (bounded)
+   |
+   v
+Output: Sparse MoE hyperparameters (any config)
+```
+
+Think of Complete-μE as a currency exchange system. Bridge I is the exchange booth that converts dollars (dense model) to euros (dense MoE) using a fixed rate based on active purchasing power. Bridge II is the ATM network that lets you withdraw different denominations (sparse MoE configs) — the exchange rate drifts slightly due to fees (σ₀ shift), but it's predictable and small enough that you don't need to re-negotiate the base rate. The two-stage conversion preserves value (hyperparameter optimality) across arbitrary denominations (MoE configurations).
+
+### Key Concepts
+
+- **Active-width μP**: Standard μP scales learning rates by 1/width to keep feature learning stable as networks widen. In MoE, "width" is ambiguous — do you count all experts or just active ones? Active-width μP says: scale by active experts only, because those are the neurons actually processing each token. If you have 8 experts but activate 2, treat it like a dense layer of width 2×expert_dim, not 8×expert_dim. This prevents learning rates from collapsing when you add dormant experts.
+
+- **Activated-expert scaling**: When you scale from 8 to 16 total experts while keeping 2 active, tokens-per-expert halves. SDE theory says this should require learning rate adjustments. But Complete-μE shows the first-order corrections cancel: the LR boost from fewer tokens-per-expert exactly offsets the LR reduction from more total capacity. What's left is a second-order initialization shift that's small enough to ignore in practice.
+
+- **Router scale normalization**: MoE routers produce logits that determine which experts activate. If you don't scale these logits properly, adding more experts makes routing probabilities collapse toward uniform (entropy increases). Complete-μE normalizes router output scale by √(active_experts), keeping routing sharpness constant as you change the expert count. Without this, transferred hyperparameters would produce degenerate routing.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+Dense model                          Dense model
+    |                                    |
+    | tune HP                            | tune HP once
+    v                                    v
+MoE config A                         [Complete-μE transfer]
+    |                                    |
+    | retune HP                          +---> MoE config A
+    v                                    |
+MoE config B                             +---> MoE config B
+    |                                    |
+    | retune HP                          +---> MoE config C
+    v                                    |
+MoE config C                             +---> (any MoE config)
+    
+Each config = new HP search            One dense tune → all configs
+```
+
+From per-configuration tuning to universal transfer, the core shift is treating MoE scaling as a composition of two well-behaved transformations rather than a monolithic architecture change.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. MoE adoption is bottlenecked by hyperparameter tuning costs, not model quality. The paper targets a practical pain point that existing theory (μP, SDE) genuinely doesn't solve. This sits at the intersection of scaling laws and systems efficiency — timely given the industry's MoE push.
+
+**Method maturity**: Clever decomposition. The two-bridge structure is elegant because it reuses existing theory (μP for Bridge I, SDE for Bridge II) rather than inventing new scaling laws. The router normalization is a small but critical detail that prior work missed. However, the "first-order cancellation" claim in Bridge II deserves more theoretical rigor — the paper leans on empirical validation where a tighter proof would strengthen the contribution.
+
+**Experimental integrity**: Solid baselines. The paper tests on both language models (GPT-style) and diffusion models (DiT), showing the method isn't domain-specific. The experiments sweep across expert counts, routing strategies, and model sizes. One weakness: all experiments use relatively small models (up to a few billion parameters). The "minor drift" in Bridge II might amplify at GPT-4 scale, but we don't have evidence either way. The comparison to μP and SDE is fair — those methods genuinely can't handle the MoE case.
+
+**Writing quality**: The abstract and intro are crisp, but Section 3 (method) buries the key insight under notation. The paper would benefit from leading with the two-bridge intuition before diving into scaling equations. The experimental section is thorough but repetitive — consolidating similar results would improve readability. Figure quality is high, especially the transfer stability plots.
+
+**Verdict**: **weak accept** — Solves a real problem with a principled method and solid experiments, but the theoretical justification for Bridge II could be tighter, and large-scale validation is missing.
+
+## Takeaways
+
+**Decompose hard transfer problems**: When direct transfer fails, look for intermediate representations where existing theory applies. Complete-μE's two-bridge structure is a template: find a "dense MoE" middle ground where one set of rules works, then apply different rules for the second hop.
+
+**Normalize by active capacity, not total capacity**: In any sparse architecture (MoE, sparse attention, conditional computation), scale hyperparameters by what's actually active per forward pass, not the total parameter count. This principle likely transfers to other sparse models.
+
+**First-order cancellations are real**: When scaling two dimensions simultaneously (here: experts and tokens-per-expert), their first-order effects can cancel, leaving only bounded residuals. If you're doing hyperparameter transfer, check whether your scaling dimensions have this property — it might save you from overcomplicating the transfer rule.
+
+**Router entropy matters**: The router normalization trick (scale by √active_experts) is a concrete detail worth stealing. If you're building any gating mechanism, keep the output logit scale constant as you change the number of choices, or the gate will degrade into uniform noise.
+:::
+
+:::zh
+**论文**: [2605.23893](https://arxiv.org/abs/2605.23893)
+**作者**: Hongwu Peng, Ohiremen Dibua, Yuanjun Xiong, Yifan Gong, Jianming Zhang, Yan Kang
+**分类**: cs.LG
+
+## 缺口
+
+混合专家（MoE）模型承诺通过每个 token 只激活部分参数来实现比稠密模型更好的扩展性。
+
+但有个问题：每次改变 MoE 配置（专家数量、路由策略、容量），你都需要从头重新调整超参数。
+
+现有的迁移方法在这里失效了。
+
+μP 要求固定架构（但稠密到 MoE 会改变架构）。
+
+SDE 要求固定每步 token 数（但 MoE 在扩展时会改变每专家 token 数）。
+
+结果：实践者要么坚持用稠密模型，要么为每个 MoE 变体烧算力做超参数搜索。
+
+```
+问题：稠密 → MoE 超参数迁移
+   |
+   v
+现有工具失效：
+   μP：架构必须固定
+   SDE：每步 token 数必须固定
+   |
+   v
+Complete-μE：双桥系统
+   桥 I：  稠密 FFN ←→ 稠密 MoE（活跃宽度 μP）
+   桥 II： 稠密 MoE ←→ 稀疏 MoE（激活专家缩放）
+   |
+   v
+证据：语言模型 + 扩散模型实验
+   - 超参数在各配置间稳定
+   - 轻微漂移在可接受范围内
+   |
+   v
+结论：调一次稠密模型 → 迁移到所有 MoE 配置
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，扩展 MoE 模型需要为每个配置重新调整超参数；之后，你在稠密模型上调一次就能迁移到任何 MoE 配置并获得接近最优的性能。
+
+### 核心机制
+
+Complete-μE 把迁移问题拆成两座桥。
+
+桥 I 处理稠密到 MoE 的转换，把 MoE 当作一个"宽"稠密层，其中只有部分神经元激活。
+
+它应用 μP 的宽度缩放规则，但按激活专家数而非总专家数归一化。
+
+这样当你把稠密 FFN 转换成具有相同激活容量的 MoE 时，学习率保持稳定。
+
+桥 II 处理 MoE 配置内的扩展（改变总专家数同时保持激活专家数不变）。
+
+这里的关键洞察是：当你按比例扩展专家时，一阶学习率和权重衰减修正会相互抵消。
+
+剩下的是初始化尺度（σ₀）的有界残差偏移，经验上只造成轻微漂移。
+
+该框架组合这两座桥来覆盖任意变化：宽度、深度、批大小、专家数量、路由粒度和混合架构。
+
+```
+输入：稠密模型超参数（LR、WD、初始化尺度）
+   |
+   v
+[桥 I：稠密 → 稠密 MoE]
+   活跃宽度 μP 缩放
+   路由器尺度归一化
+   |
+   v
+稠密 MoE 超参数
+   |
+   v
+[桥 II：稠密 MoE → 稀疏 MoE]
+   激活专家缩放
+   一阶修正相互抵消
+   残差 σ₀ 偏移（有界）
+   |
+   v
+输出：稀疏 MoE 超参数（任意配置）
+```
+
+把 Complete-μE 想象成货币兑换系统。
+
+桥 I 是兑换柜台，用基于活跃购买力的固定汇率把美元（稠密模型）换成欧元（稠密 MoE）。
+
+桥 II 是 ATM 网络，让你取不同面额（稀疏 MoE 配置）——汇率因手续费（σ₀ 偏移）略有漂移，但可预测且足够小，你不需要重新协商基础汇率。
+
+两阶段转换在任意面额（MoE 配置）间保持价值（超参数最优性）。
+
+### 关键概念
+
+- **活跃宽度 μP**: 标准 μP 按 1/宽度 缩放学习率，以在网络变宽时保持特征学习稳定。
+
+在 MoE 中，"宽度"是模糊的——你是数所有专家还是只数激活的？活跃宽度 μP 说：只按激活专家缩放，因为那些是实际处理每个 token 的神经元。
+
+如果你有 8 个专家但激活 2 个，把它当作宽度为 2×专家维度的稠密层，而非 8×专家维度。
+
+这防止了当你添加休眠专家时学习率崩溃。
+
+- **激活专家缩放**: 当你从 8 个总专家扩展到 16 个同时保持 2 个激活时，每专家 token 数减半。
+
+SDE 理论说这应该需要学习率调整。
+
+但 Complete-μE 表明一阶修正会抵消：来自更少每专家 token 的 LR 提升恰好抵消来自更多总容量的 LR 降低。
+
+剩下的是二阶初始化偏移，在实践中小到可以忽略。
+
+- **路由器尺度归一化**: MoE 路由器产生决定哪些专家激活的 logits。
+
+如果你不正确缩放这些 logits，添加更多专家会使路由概率向均匀分布坍缩（熵增加）。
+
+Complete-μE 按 √(激活专家数) 归一化路由器输出尺度，在改变专家数时保持路由锐度恒定。
+
+没有这个，迁移的超参数会产生退化的路由。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+
+稠密模型                          稠密模型
+    |                                |
+    | 调 HP                           | 调一次 HP
+    v                                v
+MoE 配置 A                        [Complete-μE 迁移]
+    |                                |
+    | 重调 HP                         +---> MoE 配置 A
+    v                                |
+MoE 配置 B                           +---> MoE 配置 B
+    |                                |
+    | 重调 HP                         +---> MoE 配置 C
+    v                                |
+MoE 配置 C                           +---> (任意 MoE 配置)
+    
+每个配置 = 新 HP 搜索              一次稠密调优 → 所有配置
+```
+
+从逐配置调优到通用迁移，核心转变是把 MoE 扩展当作两个良好行为的变换的组合，而非单体架构变化。
+
+## 专家评审
+
+**选题眼光**: 真实缺口。
+
+MoE 采用的瓶颈是超参数调优成本，而非模型质量。
+
+论文针对的是现有理论（μP、SDE）确实无法解决的实际痛点。
+
+这处于扩展定律和系统效率的交叉点——考虑到业界的 MoE 推动，时机恰当。
+
+**方法成熟度**: 巧妙的分解。
+
+双桥结构很优雅，因为它重用现有理论（桥 I 用 μP，桥 II 用 SDE）而非发明新的扩展定律。
+
+路由器归一化是先前工作遗漏的小但关键的细节。
+
+然而，桥 II 中的"一阶抵消"主张需要更严格的理论论证——论文依赖经验验证，而更严密的证明会加强贡献。
+
+**实验诚意**: 基线扎实。
+
+论文在语言模型（GPT 风格）和扩散模型（DiT）上测试，表明方法不是领域特定的。
+
+实验横跨专家数量、路由策略和模型大小。
+
+一个弱点：所有实验使用相对较小的模型（最多几十亿参数）。
+
+桥 II 中的"轻微漂移"可能在 GPT-4 规模放大，但我们没有任何方向的证据。
+
+与 μP 和 SDE 的比较是公平的——那些方法确实无法处理 MoE 情况。
+
+**写作功力**: 摘要和引言简洁，但第 3 节（方法）把关键洞察埋在符号下。
+
+论文应该在深入缩放方程前先用双桥直觉引导。
+
+实验部分彻底但重复——合并相似结果会提高可读性。
+
+图表质量高，尤其是迁移稳定性图。
+
+**判决**: **弱接收** — 用有原则的方法和扎实的实验解决真实问题，但桥 II 的理论论证可以更严密，且缺少大规模验证。
+
+## 要点总结
+
+**分解困难的迁移问题**: 当直接迁移失败时，寻找现有理论适用的中间表示。
+
+Complete-μE 的双桥结构是个模板：找到一个"稠密 MoE"中间地带，一套规则在那里有效，然后为第二跳应用不同规则。
+
+**按活跃容量而非总容量归一化**: 在任何稀疏架构（MoE、稀疏注意力、条件计算）中，按每次前向传播实际激活的内容缩放超参数，而非总参数数量。
+
+这个原则可能迁移到其他稀疏模型。
+
+**一阶抵消是真实的**: 当同时缩放两个维度（这里：专家和每专家 token）时，它们的一阶效应可以抵消，只留下有界残差。
+
+如果你在做超参数迁移，检查你的缩放维度是否有这个性质——它可能让你避免过度复杂化迁移规则。
+
+**路由器熵很重要**: 路由器归一化技巧（按 √激活专家数 缩放）是值得偷的具体细节。
+
+如果你在构建任何门控机制，在改变选择数量时保持输出 logit 尺度恒定，否则门会退化成均匀噪声。
+
+:::
