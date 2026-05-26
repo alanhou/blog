@@ -1,0 +1,362 @@
+---
+title:
+  en: "Language Models Need Sleep: Consolidating Context Through Offline Recurrence"
+  zh: "语言模型需要睡眠：通过离线循环巩固上下文"
+description:
+  en: "A sleep-like mechanism that converts recent context into fast weights through offline recurrent passes, enabling transformers to handle long-horizon tasks without quadratic attention costs."
+  zh: "一种类睡眠机制，通过离线循环将近期上下文转化为快速权重，使 Transformer 能够处理长时程任务而无需二次方注意力开销。"
+date: 2026-05-26
+tags: ["arxiv", "ai", "cs.cl", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2605.26099](https://arxiv.org/abs/2605.26099)
+**Authors**: Sangyun Lee, Sean McLeish, Tom Goldstein, Giulia Fanti
+**Categories**: cs.CL, cs.AI
+
+## The Gap
+
+Transformers dominate long-context tasks but hit a wall: attention scales quadratically with sequence length. You can't just keep extending the key-value cache — memory and compute explode. Prior work tried sparse attention, retrieval augmentation, or hybrid architectures mixing transformers with state-space models (SSMs). But sparse attention loses information, retrieval is brittle, and hybrids still carry the KV cache burden during inference.
+
+The core problem: transformers treat all context equally at inference time, recomputing attention over everything. No mechanism exists to consolidate old context into a compressed form that's cheap to query but still preserves reasoning capacity.
+
+```
+Problem: Long context → quadratic attention cost
+         |
+         v
+Assumption: Can we compress context offline
+            without losing reasoning ability?
+         |
+         v
+Method: Sleep phase = N recurrent passes
+        converting context → fast weights (SSM)
+         |
+         v
+Evidence: Synthetic tasks (cellular automata, graph retrieval)
+          + math reasoning (GSM8K-style)
+         |
+         v
+Conclusion: Sleep duration N correlates with
+            reasoning depth required
+```
+
+## The Increment
+
+**One sentence**: Before this paper, transformers either kept growing their KV cache or lost context; after, they can "sleep" to compress recent context into fast weights, shifting computation offline while preserving wake-time latency.
+
+### Core Mechanism
+
+The method introduces a two-phase cycle: wake and sleep. During wake, the model processes new tokens normally using attention, accumulating context in a KV cache. When the cache fills (or at regular intervals), the model enters sleep. During sleep, it performs N recurrent passes over the accumulated context. Each pass updates fast weights in SSM blocks through a learned local rule — think of it as distilling the cache into a compressed state representation. After sleep, the KV cache is cleared, and the model wakes with updated fast weights that encode the consolidated context.
+
+The architecture is a hybrid: attention layers for flexible reasoning during wake, SSM blocks for efficient state compression during sleep. The SSM blocks use a state-space formulation where hidden states evolve recurrently. The learned update rule adjusts these states based on the context being consolidated. Crucially, sleep happens offline — it doesn't add latency to token generation during wake.
+
+```
+Wake Phase:
+  Input tokens → Attention (uses KV cache) → Output
+                      |
+                      v
+                 Cache fills
+                      |
+                      v
+Sleep Phase:
+  Cached context → [Recurrent pass 1] → Update SSM fast weights
+                → [Recurrent pass 2] → Update SSM fast weights
+                → ...
+                → [Recurrent pass N] → Update SSM fast weights
+                      |
+                      v
+                 Clear cache
+                      |
+                      v
+  Wake with updated fast weights
+```
+
+Think of it like a student cramming for an exam. During the day (wake), you read new material and take notes (KV cache). At night (sleep), you review your notes multiple times (N recurrent passes), extracting key concepts and connections (fast weights). The next morning, you throw away the notes (clear cache) but retain the distilled understanding (updated SSM state). When a question comes (inference), you answer quickly using the distilled knowledge, not by re-reading all your notes.
+
+The metaphor is load-bearing: the notes are the KV cache (explicit, bulky), the distilled understanding is the fast weights (implicit, compact), and the review process is the recurrent consolidation. Just as reviewing notes multiple times (higher N) helps with harder exams, more sleep passes improve performance on tasks requiring deeper reasoning.
+
+### Key Concepts
+
+- **Fast Weights**: Parameters that change rapidly during inference, unlike the frozen base model weights. In this paper, fast weights are the hidden states in SSM blocks. They're "fast" because they update during sleep to encode recent context, acting as a compressed memory. Contrast with slow weights (the base transformer parameters, fixed after training). Example: if the model just read "Alice gave Bob a book," the fast weights might encode the transfer relationship without storing the full sentence.
+
+- **State-Space Models (SSMs)**: A class of sequence models where hidden states evolve recurrently according to linear dynamics. Unlike transformers (which attend to all positions), SSMs maintain a fixed-size state vector that updates at each step. They're efficient for long sequences because state updates are constant-time. In this paper, SSM blocks provide the substrate for fast weight updates during sleep. Think of SSMs as a conveyor belt: items (tokens) pass through, and the belt's state (hidden vector) changes incrementally, carrying forward a summary of what's passed.
+
+- **Learned Local Rule**: The update mechanism for fast weights during sleep. "Local" means it operates on individual tokens or small windows, not the full context at once. "Learned" means it's trained end-to-end, not hand-designed. During sleep, the model applies this rule N times over the cached context, refining the fast weights iteratively. Example: the rule might say "if you see a causal relationship, strengthen the connection between entities in the state vector."
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+Inference:                           Inference:
+  Token → Attention over             Wake:
+          full KV cache →              Token → Attention over
+          Output                               short KV cache →
+                                               Output
+  [Cache grows unbounded]                      |
+                                               v
+                                          Cache full?
+                                               |
+                                               v
+                                          Sleep (offline):
+                                            N recurrent passes →
+                                            Update fast weights →
+                                            Clear cache
+                                               |
+                                               v
+                                          Resume wake with
+                                          compressed state
+
+Cost: O(L^2) per token               Cost: O(L) per token (wake)
+      where L = context length             + O(N*L) amortized (sleep)
+```
+
+From unbounded cache growth to periodic consolidation, the core shift is moving from stateless attention (recompute everything) to stateful compression (distill and forget).
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Long-context scaling is a bottleneck for deployment, and existing solutions (sparse attention, retrieval) are band-aids. The biological sleep analogy is cute but not necessary — the core insight is offline consolidation, which is sound. This sits at the intersection of efficiency and capability, a high-value area.
+
+**Method maturity**: Clever but not fully baked. The learned local rule is underspecified in the abstract — how exactly does it work? Is it gradient-based? Hebbian? The hybrid architecture (attention + SSM) is pragmatic but adds complexity. A simpler baseline would be pure SSMs with periodic resets. The N-pass recurrence is elegant, though it's unclear if N needs to be fixed or can adapt per task.
+
+**Experimental integrity**: Synthetic tasks (cellular automata, graph retrieval) are good for controlled analysis but limited in scope. GSM8K-style math reasoning is more realistic, though the abstract doesn't specify dataset size or baseline details. The claim that "regular transformer as well as SSM-attention hybrid models fail" is strong — need to see if baselines were given equivalent compute budgets. The correlation between sleep duration N and reasoning depth is interesting but could be confounded by total compute.
+
+**Writing quality**: Abstract is dense and jargon-heavy ("fast weights," "state-space model blocks," "learned local rule") without enough intuition. The sleep metaphor is introduced but not exploited for clarity. The results section is vague ("largest gains on examples that require deeper reasoning") — quantify "largest" and define "deeper." The related work comparison (what fails, what doesn't) needs more precision.
+
+**Verdict**: weak accept — The core idea (offline consolidation via recurrent passes) is novel and addresses a real problem. The experimental setup is reasonable but not exhaustive. The method's complexity and underspecified components raise questions about reproducibility and generalization. With clearer exposition and stronger baselines, this could be a strong accept.
+
+## Takeaways
+
+**Offline consolidation as a design pattern**: Don't process everything online. Identify phases where you can shift computation offline (batch jobs, background threads) to compress state. This applies beyond LLMs — think databases (compaction), caches (eviction policies), or even personal knowledge management (periodic review).
+
+**Recurrent refinement**: One pass isn't always enough. If you're distilling information, multiple passes with a simple rule can outperform a single complex pass. This is the "review your notes multiple times" principle — applicable to training (curriculum learning), data processing (iterative refinement), or even writing (multiple drafts).
+
+**Hybrid architectures for efficiency**: Combine a flexible but expensive component (attention) with a cheap but limited one (SSM). Use the expensive part sparingly (short contexts) and the cheap part for bulk work (long contexts). This tradeoff pattern shows up in systems design (fast path / slow path), algorithms (quicksort + insertion sort), and more.
+:::
+
+:::zh
+**论文**: [2605.26099](https://arxiv.org/abs/2605.26099)
+**作者**: Sangyun Lee, Sean McLeish, Tom Goldstein, Giulia Fanti
+**分类**: cs.CL, cs.AI
+
+## 缺口
+
+Transformer 在长上下文任务中占主导地位，但遇到了瓶颈：注意力机制的计算复杂度随序列长度呈二次方增长。
+
+你不能无限扩展键值缓存——内存和计算量会爆炸。
+
+此前的工作尝试了稀疏注意力、检索增强或混合架构（将 Transformer 与状态空间模型 SSM 结合）。
+
+但稀疏注意力会丢失信息，检索方法脆弱，混合架构在推理时仍然背负着键值缓存的负担。
+
+核心问题：Transformer 在推理时平等对待所有上下文，对一切重新计算注意力。
+
+不存在一种机制能将旧上下文压缩成查询成本低但仍保留推理能力的形式。
+
+```
+问题：长上下文 → 二次方注意力开销
+      |
+      v
+假设：能否离线压缩上下文
+      而不损失推理能力？
+      |
+      v
+方法：睡眠阶段 = N 次循环
+      将上下文 → 快速权重（SSM）
+      |
+      v
+证据：合成任务（元胞自动机、图检索）
+      + 数学推理（GSM8K 风格）
+      |
+      v
+结论：睡眠时长 N 与所需
+      推理深度相关
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，Transformer 要么不断增长键值缓存，要么丢失上下文；之后，它们可以"睡眠"来将近期上下文压缩为快速权重，将计算转移到离线阶段，同时保持清醒时的推理延迟。
+
+### 核心机制
+
+该方法引入了两阶段循环：清醒和睡眠。
+
+在清醒阶段，模型正常使用注意力机制处理新 token，在键值缓存中积累上下文。
+
+当缓存填满（或定期），模型进入睡眠。
+
+在睡眠期间，它对积累的上下文执行 N 次循环。
+
+每次循环通过学习到的局部规则更新 SSM 块中的快速权重——可以理解为将缓存蒸馏成压缩的状态表示。
+
+睡眠后，键值缓存被清空，模型带着更新后的快速权重醒来，这些权重编码了巩固后的上下文。
+
+架构是混合的：注意力层用于清醒时的灵活推理，SSM 块用于睡眠时的高效状态压缩。
+
+SSM 块使用状态空间公式，其中隐藏状态循环演化。
+
+学习到的更新规则根据正在巩固的上下文调整这些状态。
+
+关键是，睡眠发生在离线——它不会增加清醒时 token 生成的延迟。
+
+```
+清醒阶段：
+  输入 token → 注意力（使用 KV 缓存）→ 输出
+                    |
+                    v
+               缓存填满
+                    |
+                    v
+睡眠阶段：
+  缓存的上下文 → [循环 1] → 更新 SSM 快速权重
+              → [循环 2] → 更新 SSM 快速权重
+              → ...
+              → [循环 N] → 更新 SSM 快速权重
+                    |
+                    v
+               清空缓存
+                    |
+                    v
+  带着更新后的快速权重醒来
+```
+
+把它想象成学生备考。
+
+白天（清醒），你阅读新材料并做笔记（键值缓存）。
+
+晚上（睡眠），你多次复习笔记（N 次循环），提取关键概念和联系（快速权重）。
+
+第二天早上，你扔掉笔记（清空缓存）但保留了蒸馏后的理解（更新后的 SSM 状态）。
+
+当问题来临（推理），你用蒸馏后的知识快速回答，而不是重新阅读所有笔记。
+
+这个比喻是承重的：笔记是键值缓存（显式、笨重），蒸馏后的理解是快速权重（隐式、紧凑），复习过程是循环巩固。
+
+正如多次复习笔记（更高的 N）有助于应对更难的考试，更多的睡眠循环能提升需要更深推理的任务的性能。
+
+### 关键概念
+
+- **快速权重**: 在推理期间快速变化的参数，不同于冻结的基础模型权重。
+
+在本文中，快速权重是 SSM 块中的隐藏状态。
+
+它们"快速"是因为在睡眠期间更新以编码近期上下文，充当压缩记忆。
+
+对比慢权重（基础 Transformer 参数，训练后固定）。
+
+例子：如果模型刚读到"Alice 给了 Bob 一本书"，快速权重可能编码转移关系而不存储完整句子。
+
+- **状态空间模型（SSM）**: 一类序列模型，其中隐藏状态根据线性动力学循环演化。
+
+与 Transformer（关注所有位置）不同，SSM 维护一个固定大小的状态向量，在每一步更新。
+
+它们对长序列高效，因为状态更新是常数时间。
+
+在本文中，SSM 块为睡眠期间的快速权重更新提供基础。
+
+把 SSM 想象成传送带：物品（token）通过，传送带的状态（隐藏向量）逐步变化，向前传递已通过内容的摘要。
+
+- **学习到的局部规则**: 睡眠期间快速权重的更新机制。
+
+"局部"意味着它作用于单个 token 或小窗口，而非一次性处理全部上下文。
+
+"学习到的"意味着它是端到端训练的，而非手工设计。
+
+在睡眠期间，模型对缓存的上下文应用此规则 N 次，迭代地精炼快速权重。
+
+例子：规则可能说"如果你看到因果关系，加强状态向量中实体之间的连接"。
+
+## 框架转变
+
+```
+之前（主流方法）：              之后（本文方法）：
+
+推理：                          推理：
+  Token → 对完整                清醒：
+          KV 缓存的注意力 →       Token → 对短 KV 缓存
+          输出                           的注意力 →
+                                         输出
+  [缓存无限增长]                         |
+                                         v
+                                    缓存满了？
+                                         |
+                                         v
+                                    睡眠（离线）：
+                                      N 次循环 →
+                                      更新快速权重 →
+                                      清空缓存
+                                         |
+                                         v
+                                    带着压缩状态
+                                    恢复清醒
+
+开销：每个 token O(L^2)         开销：每个 token O(L)（清醒）
+      其中 L = 上下文长度             + 摊销 O(N*L)（睡眠）
+```
+
+从无界缓存增长到周期性巩固，核心转变是从无状态注意力（重新计算一切）到有状态压缩（蒸馏并遗忘）。
+
+## 专家评审
+
+**选题眼光**: 真实缺口。
+
+长上下文扩展是部署的瓶颈，现有解决方案（稀疏注意力、检索）是权宜之计。
+
+生物睡眠类比很可爱但非必需——核心洞见是离线巩固，这是合理的。
+
+这处于效率与能力的交叉点，是高价值领域。
+
+**方法成熟度**: 巧妙但未完全成熟。
+
+摘要中学习到的局部规则描述不足——它到底如何工作？是基于梯度的？Hebbian 的？混合架构（注意力 + SSM）务实但增加了复杂性。
+
+更简单的基线应该是纯 SSM 加周期性重置。
+
+N 次循环很优雅，但不清楚 N 是否需要固定或能根据任务自适应。
+
+**实验诚意**: 合成任务（元胞自动机、图检索）适合受控分析但范围有限。
+
+GSM8K 风格的数学推理更现实，但摘要未说明数据集大小或基线细节。
+
+"常规 Transformer 以及 SSM-注意力混合模型失败"的声明很强——需要看基线是否获得了等价的计算预算。
+
+睡眠时长 N 与推理深度的相关性有趣，但可能被总计算量混淆。
+
+**写作功力**: 摘要密集且术语繁重（"快速权重"、"状态空间模型块"、"学习到的局部规则"），直觉不足。
+
+睡眠比喻被引入但未充分利用以增强清晰度。
+
+结果部分含糊（"需要更深推理的例子上获得最大收益"）——量化"最大"并定义"更深"。
+
+相关工作比较（什么失败了，什么没有）需要更精确。
+
+**判决**: 弱接收 — 核心想法（通过循环进行离线巩固）新颖且解决了真实问题。
+
+实验设置合理但不详尽。
+
+方法的复杂性和未充分说明的组件引发了关于可重现性和泛化性的问题。
+
+如果表述更清晰、基线更强，这可能是强接收。
+
+## 要点总结
+
+**离线巩固作为设计模式**: 不要在线处理一切。
+
+识别可以将计算转移到离线的阶段（批处理作业、后台线程）以压缩状态。
+
+这超越了 LLM——想想数据库（压缩）、缓存（驱逐策略）或个人知识管理（定期复习）。
+
+**循环精炼**: 一次不总是够。
+
+如果你在蒸馏信息，用简单规则多次循环可以胜过单次复杂循环。
+
+这是"多次复习笔记"原则——适用于训练（课程学习）、数据处理（迭代精炼）甚至写作（多次草稿）。
+
+**混合架构提升效率**: 结合灵活但昂贵的组件（注意力）与廉价但受限的组件（SSM）。
+
+谨慎使用昂贵部分（短上下文），用廉价部分处理大量工作（长上下文）。
+
+这种权衡模式出现在系统设计（快速路径/慢速路径）、算法（快速排序 + 插入排序）等更多地方。
+
+:::
