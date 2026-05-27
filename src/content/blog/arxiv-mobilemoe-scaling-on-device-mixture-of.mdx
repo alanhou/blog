@@ -1,0 +1,358 @@
+---
+title:
+  en: "MobileMoE: Bringing Mixture-of-Experts to Your Smartphone"
+  zh: "MobileMoE：把混合专家模型装进手机"
+description:
+  en: "First practical MoE architecture for on-device LLMs, achieving 2-4× faster inference than dense models with comparable quality through mobile-optimized sparse routing."
+  zh: "首个实用的端侧混合专家模型架构，通过移动端优化的稀疏路由实现比稠密模型快 2-4 倍的推理速度，质量相当。"
+date: 2026-05-27
+tags: ["arxiv", "ai", "cs.lg", "cs.ai", "cs.cl"]
+image: "/arxiv-visuals/mobilemoe-scaling-on-device-mixture-of/HeroScene.png"
+---
+
+![Concept animation](/arxiv-visuals/mobilemoe-scaling-on-device-mixture-of/ConceptScene.gif)
+
+
+
+![Hero diagram](/arxiv-visuals/mobilemoe-scaling-on-device-mixture-of/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2605.27358](https://arxiv.org/abs/2605.27358)
+**Authors**: Yanbei Chen, Hanxian Huang, Ernie Chang, Jacob Szwejbka, Digant Desai, Zechun Liu, Vikas Chandra, Raghuraman Krishnamoorthi
+**Categories**: cs.LG, cs.AI, cs.CL
+
+## The Gap
+
+Mixture-of-Experts (MoE) works brilliantly at 100B+ parameters—GPT-4, Mixtral, and others use it to scale efficiently. But nobody knew if MoE made sense below 1B parameters, especially on phones where memory is tight and every millisecond counts. The conventional wisdom: MoE's routing overhead and memory fragmentation would kill performance at small scales. Dense models like MobileLLM dominated the sub-billion regime.
+
+The gap: Does MoE's conditional computation advantage survive when you shrink the model to fit in 2-4GB of phone memory and optimize for ARM chips?
+
+```
+Problem: On-device LLMs need speed + quality in <1B active params
+   |
+   v
+Assumption: MoE's sparse activation can beat dense models
+            even under mobile memory/compute constraints
+   |
+   v
+Method: Derive mobile-specific MoE scaling laws
+        -> Find "sweet spot" architecture (moderate sparsity, fine-grained experts)
+        -> Train with 4-stage recipe + quantization-aware training
+   |
+   v
+Evidence: 2-4x faster inference than dense baselines
+          Matches quality with 60% fewer total parameters
+   |
+   v
+Conclusion: MoE is viable and superior for sub-billion on-device LLMs
+```
+
+## The Increment
+
+**One sentence**: Before this paper, MoE was a datacenter-scale technique; after, it's a proven architecture for phone-based LLMs with concrete deployment recipes.
+
+### Core Mechanism
+
+MobileMoE starts by formulating scaling laws specifically for mobile constraints. Unlike datacenter MoE that optimizes for training efficiency, this paper jointly optimizes for memory footprint (model must fit in phone RAM) and inference compute (latency on ARM CPUs). The key finding: moderate sparsity (activating 25-33% of experts) with fine-grained experts (many small experts instead of few large ones) hits the sweet spot. Too sparse and routing overhead dominates; too dense and you lose the speed advantage.
+
+The architecture uses shared experts—a subset of experts that always activate—alongside routed experts. This design reduces memory fragmentation (shared experts stay in cache) and stabilizes training. Each token routes to top-k experts per layer, but unlike datacenter MoE that might use 8-of-128 routing, MobileMoE uses 2-of-8 or 3-of-12 patterns optimized for mobile memory bandwidth.
+
+Training follows a four-stage recipe: (1) pre-training on web text, (2) mid-training on curated data to improve instruction-following, (3) supervised fine-tuning on instruction datasets, (4) quantization-aware training to INT4 weights. The last stage is critical—naive quantization destroys MoE routing decisions, so they retrain the router and experts jointly under quantization noise.
+
+```
+Input Token
+    |
+    v
+  Router (learns which experts to activate)
+    |
+    +---> Shared Experts (always active, stay in cache)
+    |
+    +---> Top-K Routed Experts (conditionally active)
+          |
+          +---> Expert 1 (FFN)
+          +---> Expert 2 (FFN)
+          +---> Expert 3 (FFN)
+          ...
+    |
+    v
+  Weighted Sum of Expert Outputs
+    |
+    v
+  Next Layer
+```
+
+Think of MobileMoE like a restaurant kitchen with specialized stations. A dense model is one chef doing everything—slow but simple. A datacenter MoE is a massive kitchen with 128 stations where each dish visits 8 stations—fast but needs huge space. MobileMoE is a food truck: 8-12 compact stations, each dish visits 2-3, plus a prep station (shared experts) that handles every order. The dispatcher (router) is trained to send orders to the right stations without causing congestion. The food truck constraint forces smart specialization—you can't have 128 stations, so each station must be genuinely useful, and the dispatcher must be accurate because wrong routing wastes precious time.
+
+### Key Concepts
+
+- **Moderate Sparsity**: In MoE, sparsity means what fraction of the model activates per token. Datacenter MoE uses extreme sparsity (activate 5-10% of parameters) to scale to trillions of parameters. But on phones, extreme sparsity backfires—routing overhead (deciding which experts to use) becomes a larger fraction of total compute, and memory access patterns get chaotic. Moderate sparsity (25-33% activation) keeps routing cheap and memory access predictable. Imagine a library: extreme sparsity is retrieving 1 book from 1000 shelves (lots of walking), moderate sparsity is retrieving 3 books from 12 shelves (less overhead, still specialized).
+
+- **Fine-Grained Experts**: Instead of 8 large experts (each expert is a big neural network), use 12 smaller experts. Why? Memory bandwidth. On ARM chips, loading one giant expert from DRAM is slower than loading two small experts because you can pipeline the loads. Fine-grained experts also improve specialization—12 experts can cover more distinct patterns than 8. The tradeoff: more routing decisions, but the paper shows this is negligible compared to memory savings.
+
+- **Quantization-Aware Training for MoE**: Standard quantization (converting FP16 weights to INT4) assumes all weights matter equally. But in MoE, the router's decisions are fragile—small weight changes can flip which expert activates, cascading into quality loss. Quantization-aware training simulates INT4 noise during training, so the router learns to make robust decisions even with coarse weights. It's like training a pilot in a flight simulator with turbulence instead of only smooth conditions—the pilot (router) learns to handle the noise (quantization error) that will exist in deployment.
+
+## Framework Shift
+
+```
+Before (Dense LLMs):                After (MobileMoE):
+                                    
+Input --> Layer 1 --> Layer 2       Input --> Router --> Shared + Top-K Experts
+          (all params active)                  |              |
+          |                                    v              v
+          v                               (25-33% active) (always active)
+       Output                                  |
+                                               v
+       Memory: 100%                         Output
+       Compute: 100%                        
+                                            Memory: 100% (total params)
+                                            Compute: 25-33% (active params)
+```
+
+From "activate everything every time" to "activate what you need, keep essentials always ready"—the core shift is conditional computation with mobile-aware routing.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. On-device LLMs are exploding (Apple Intelligence, Gemini Nano, etc.) but everyone's using dense models because MoE seemed too complex for mobile. This paper directly challenges that assumption with a well-motivated question: can we get MoE's efficiency at sub-billion scale?
+
+**Method maturity**: Solid engineering with some clever insights. The mobile-specific scaling laws are genuinely useful—they don't just port datacenter MoE, they rethink the architecture under different constraints. The four-stage training recipe is thorough but not groundbreaking (it's standard practice applied carefully). The quantization-aware training for MoE is a nice touch that shows attention to deployment reality. No major shortcuts, though the paper could have explored dynamic expert selection (adapting sparsity per input) more deeply.
+
+**Experimental integrity**: Strong baselines and fair comparisons. They compare against MobileLLM (dense baseline from the same team) and OLMoE (state-of-the-art open MoE), both reasonable choices. The 14 benchmarks cover reasoning, knowledge, and instruction-following. On-device profiling on actual Pixel phones is rare and valuable—most papers stop at FLOPs. One quibble: they don't report training cost or carbon footprint, which matters for reproducibility. The numbers hold up, no obvious cherry-picking.
+
+**Writing quality**: Clear and well-structured, but the scaling law section (Section 3) is dense and could use more intuition before diving into equations. The related work is thorough but reads like a checklist. The deployment section (Section 6) is excellent—concrete latency numbers, memory breakdowns, and profiling insights. If they rewrote Section 3 to lead with intuition (why moderate sparsity? show the tradeoff curve first, then formalize), the paper would be much more accessible.
+
+**Verdict**: Strong accept—this is solid systems research that solves a real problem with careful engineering and thorough evaluation. It's not a conceptual breakthrough, but it's the kind of work that moves the field forward by making a technique practical in a new regime.
+
+## Takeaways
+
+**For practitioners building on-device models**: The moderate sparsity insight transfers beyond MoE. If you're designing any conditional computation system for mobile (early exit, dynamic depth, adaptive width), aim for 25-35% sparsity—it's the sweet spot where routing overhead is manageable and memory access stays predictable.
+
+**For MoE researchers**: Quantization-aware training for routers is underexplored. Most MoE papers quantize post-hoc and report quality loss. This paper shows joint training of routers and experts under quantization noise is essential for deployment. Steal this for any MoE system targeting INT8 or INT4.
+
+**For mobile ML engineers**: The four-stage training recipe (pre-train → mid-train → SFT → QAT) is a practical template. Mid-training on curated data before instruction tuning is often skipped but clearly helps here. The on-device profiling methodology (Section 6) is a good reference for how to report mobile performance beyond FLOPs.
+
+**Transferable technique**: Fine-grained experts with shared experts. This architectural pattern (many small specialists + always-on generalists) is applicable to any resource-constrained conditional computation system, not just LLMs. Think recommendation systems, on-device vision models, or even compiler optimization passes.
+:::
+
+:::zh
+**论文**: [2605.27358](https://arxiv.org/abs/2605.27358)
+**作者**: Yanbei Chen, Hanxian Huang, Ernie Chang, Jacob Szwejbka, Digant Desai, Zechun Liu, Vikas Chandra, Raghuraman Krishnamoorthi
+**分类**: cs.LG, cs.AI, cs.CL
+
+## 缺口
+
+混合专家模型（MoE）在千亿参数规模表现出色——GPT-4、Mixtral 等都用它来高效扩展。
+
+但没人知道 MoE 在 10 亿参数以下是否有意义，尤其是在内存紧张、每毫秒都要计较的手机上。
+
+传统观点认为：MoE 的路由开销和内存碎片会在小规模上扼杀性能。
+
+MobileLLM 这类稠密模型主导了十亿参数以下的领域。
+
+缺口在于：当你把模型压缩到能装进手机 2-4GB 内存、并针对 ARM 芯片优化时，MoE 的条件计算优势还能保持吗？
+
+```
+问题：端侧大模型需要在 <1B 活跃参数下兼顾速度和质量
+   |
+   v
+假设：即使在移动端内存/计算约束下，
+      MoE 的稀疏激活也能击败稠密模型
+   |
+   v
+方法：推导移动端专用的 MoE 缩放定律
+      -> 找到"甜点"架构（适度稀疏度 + 细粒度专家）
+      -> 用四阶段训练方案 + 量化感知训练
+   |
+   v
+证据：比稠密基线快 2-4 倍
+      用 60% 更少的总参数达到相同质量
+   |
+   v
+结论：MoE 对十亿参数以下的端侧大模型可行且更优
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，MoE 是数据中心规模的技术；
+
+之后，它成了手机端大模型的成熟架构，有具体的部署方案。
+
+### 核心机制
+
+MobileMoE 从为移动约束专门制定缩放定律开始。
+
+与优化训练效率的数据中心 MoE 不同，本文联合优化内存占用（模型必须装进手机 RAM）和推理计算（ARM CPU 上的延迟）。
+
+关键发现：适度稀疏度（激活 25-33% 的专家）配合细粒度专家（许多小专家而非少数大专家）击中了甜点。
+
+太稀疏则路由开销占主导；
+
+太稠密则失去速度优势。
+
+架构使用共享专家——一部分专家总是激活——配合路由专家。
+
+这种设计减少了内存碎片（共享专家留在缓存中）并稳定训练。
+
+每个 token 路由到每层的 top-k 专家，但与可能使用 8-of-128 路由的数据中心 MoE 不同，MobileMoE 使用针对移动内存带宽优化的 2-of-8 或 3-of-12 模式。
+
+训练遵循四阶段方案：（1）在网页文本上预训练，（2）在精选数据上中期训练以改进指令遵循，（3）在指令数据集上监督微调，（4）量化感知训练到 INT4 权重。
+
+最后一阶段至关重要——朴素量化会破坏 MoE 路由决策，所以他们在量化噪声下联合重训路由器和专家。
+
+```
+输入 Token
+    |
+    v
+  路由器（学习激活哪些专家）
+    |
+    +---> 共享专家（总是激活，留在缓存）
+    |
+    +---> Top-K 路由专家（条件激活）
+          |
+          +---> 专家 1（前馈网络）
+          +---> 专家 2（前馈网络）
+          +---> 专家 3（前馈网络）
+          ...
+    |
+    v
+  专家输出的加权和
+    |
+    v
+  下一层
+```
+
+把 MobileMoE 想象成一个有专业工作站的餐厅厨房。
+
+稠密模型是一个厨师做所有事——慢但简单。
+
+数据中心 MoE 是有 128 个工作站的大厨房，每道菜访问 8 个工作站——快但需要巨大空间。
+
+MobileMoE 是一辆餐车：8-12 个紧凑工作站，每道菜访问 2-3 个，加上一个处理每个订单的备菜站（共享专家）。
+
+调度员（路由器）被训练成把订单发到正确的工作站而不造成拥堵。
+
+餐车约束迫使聪明的专业化——你不能有 128 个工作站，所以每个工作站必须真正有用，调度员必须准确，因为错误路由会浪费宝贵时间。
+
+### 关键概念
+
+- **适度稀疏度**: 在 MoE 中，稀疏度指每个 token 激活模型的多大比例。
+
+数据中心 MoE 使用极端稀疏度（激活 5-10% 参数）来扩展到万亿参数。
+
+但在手机上，极端稀疏度适得其反——路由开销（决定使用哪些专家）成为总计算的更大部分，内存访问模式变得混乱。
+
+适度稀疏度（25-33% 激活）保持路由开销低廉和内存访问可预测。
+
+想象一个图书馆：极端稀疏度是从 1000 个书架检索 1 本书（大量走动），适度稀疏度是从 12 个书架检索 3 本书（更少开销，仍然专业化）。
+
+- **细粒度专家**: 不用 8 个大专家（每个专家是一个大神经网络），而用 12 个小专家。
+
+为什么？
+
+内存带宽。
+
+在 ARM 芯片上，从 DRAM 加载一个巨大专家比加载两个小专家慢，因为你可以流水线化加载。
+
+细粒度专家还改进专业化——12 个专家能覆盖比 8 个更多的不同模式。
+
+权衡：更多路由决策，但论文显示这相比内存节省可以忽略。
+
+- **MoE 的量化感知训练**: 标准量化（把 FP16 权重转换为 INT4）假设所有权重同等重要。
+
+但在 MoE 中，路由器的决策很脆弱——小的权重变化可能翻转激活哪个专家，级联导致质量损失。
+
+量化感知训练在训练期间模拟 INT4 噪声，所以路由器学会即使用粗糙权重也做出鲁棒决策。
+
+这就像在有湍流的飞行模拟器中训练飞行员，而不是只在平稳条件下——飞行员（路由器）学会处理部署中会存在的噪声（量化误差）。
+
+## 框架转变
+
+```
+之前（稠密大模型）：              之后（MobileMoE）：
+                                    
+输入 --> 层1 --> 层2                输入 --> 路由器 --> 共享 + Top-K 专家
+        （所有参数激活）                    |              |
+        |                                   v              v
+        v                              (25-33% 激活)  (总是激活)
+      输出                                  |
+                                            v
+      内存：100%                          输出
+      计算：100%                        
+                                         内存：100%（总参数）
+                                         计算：25-33%（活跃参数）
+```
+
+从"每次激活所有东西"到"激活你需要的，保持必需品随时就绪"——核心转变是带移动感知路由的条件计算。
+
+## 专家评审
+
+**选题眼光**: 真实缺口。
+
+端侧大模型正在爆发（Apple Intelligence、Gemini Nano 等），但大家都在用稠密模型，因为 MoE 对移动端似乎太复杂。
+
+本文直接挑战这个假设，提出一个动机充分的问题：我们能在十亿参数以下规模获得 MoE 的效率吗？
+
+**方法成熟度**: 扎实的工程加一些巧妙洞见。
+
+移动端专用缩放定律真正有用——它们不只是移植数据中心 MoE，而是在不同约束下重新思考架构。
+
+四阶段训练方案彻底但不算突破性（是仔细应用的标准实践）。
+
+MoE 的量化感知训练是个好点子，显示了对部署现实的关注。
+
+没有重大捷径，尽管论文可以更深入探索动态专家选择（根据输入调整稀疏度）。
+
+**实验诚意**: 强基线和公平比较。
+
+他们与 MobileLLM（来自同一团队的稠密基线）和 OLMoE（最先进的开源 MoE）比较，都是合理选择。
+
+14 个基准覆盖推理、知识和指令遵循。
+
+在真实 Pixel 手机上的端侧性能分析很罕见且有价值——大多数论文止步于 FLOPs。
+
+一个小问题：他们没报告训练成本或碳足迹，这对可复现性很重要。
+
+数字经得起推敲，没有明显的挑选数据。
+
+**写作功力**: 清晰且结构良好，但缩放定律部分（第 3 节）密集，在深入方程前可以多些直觉。
+
+相关工作彻底但读起来像清单。
+
+部署部分（第 6 节）优秀——具体的延迟数字、内存分解和性能分析洞见。
+
+如果他们重写第 3 节，先给直觉（为什么适度稀疏度？
+
+先展示权衡曲线，再形式化），论文会更易理解。
+
+**判决**: 强接收——这是扎实的系统研究，用仔细的工程和彻底的评估解决了真实问题。
+
+它不是概念突破，但是通过让一项技术在新领域实用来推动领域前进的那种工作。
+
+## 要点总结
+
+**对构建端侧模型的实践者**: 适度稀疏度洞见超越 MoE。
+
+如果你在为移动端设计任何条件计算系统（早退出、动态深度、自适应宽度），瞄准 25-35% 稀疏度——这是路由开销可管理且内存访问保持可预测的甜点。
+
+**对 MoE 研究者**: 路由器的量化感知训练探索不足。
+
+大多数 MoE 论文事后量化并报告质量损失。
+
+本文显示在量化噪声下联合训练路由器和专家对部署至关重要。
+
+为任何目标 INT8 或 INT4 的 MoE 系统偷走这个。
+
+**对移动机器学习工程师**: 四阶段训练方案（预训练 → 中期训练 → 监督微调 → 量化感知训练）是实用模板。
+
+指令调优前在精选数据上中期训练常被跳过，但在这里明显有帮助。
+
+端侧性能分析方法（第 6 节）是如何报告超越 FLOPs 的移动性能的好参考。
+
+**可迁移技术**: 带共享专家的细粒度专家。
+
+这种架构模式（许多小专家 + 总是在线的通才）适用于任何资源受限的条件计算系统，不只是大模型。
+
+想想推荐系统、端侧视觉模型，甚至编译器优化过程。
+
+:::
