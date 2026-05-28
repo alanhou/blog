@@ -1,0 +1,382 @@
+---
+title:
+  en: "CaMBRAIN: Streaming EEG Analysis with Causal State Space Models"
+  zh: "CaMBRAIN：基于因果状态空间模型的流式脑电信号分析"
+description:
+  en: "First causal state space model for real-time, continuous EEG inference with linear complexity, achieving 10x throughput over attention-based methods."
+  zh: "首个用于实时连续脑电信号推理的因果状态空间模型，线性复杂度，吞吐量比注意力机制方法高10倍以上。"
+date: 2026-05-28
+tags: ["arxiv", "ai", "cs.ai", "cs.hc", "cs.lg"]
+image: "/arxiv-visuals/arxiv-cambrain-real-time-continuous-eeg-inference.png"
+---
+
+![Concept animation](/arxiv-visuals/cambrain-real-time-continuous-eeg-inference/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2605.28792](https://arxiv.org/abs/2605.28792)
+**Authors**: Abhilash Durgam, Nyle Siddiqui, Jeffrey A. Chan-Santiago, Qiushi Fu, Elakkat D. Gireesh, Mubarak Shah
+**Categories**: cs.AI, cs.HC, cs.LG
+
+## The Gap
+
+Existing EEG analysis models hit a wall with long recordings. Attention-based architectures (the current standard) scale quadratically with sequence length — a 10-minute EEG at 256 Hz means 153,600 time steps, making full-sequence processing prohibitively expensive. The workaround? Sliding windows. But this fragments the signal into isolated chunks, preventing the model from seeing patterns that span minutes (like seizure buildup or sleep stage transitions).
+
+Bidirectional models like BIOT and LaBraM process signals in both directions, which seems sensible for offline analysis but is fundamentally incompatible with real-time streaming. You can't look into the future when the future hasn't happened yet. The field lacks a model that can (1) process arbitrarily long EEG in linear time, (2) maintain global context across the entire recording, and (3) operate causally for real-time deployment.
+
+```
+Problem: Long EEG (hours) + Attention (O(n^2)) = Infeasible
+         |
+         v
+Assumption: Causality is sufficient (no future needed)
+         |
+         v
+Method: Causal SSM (Mamba) + Multi-stage self-supervised training
+         |
+         v
+Evidence: SOTA on 3 datasets, 10x throughput, linear scaling
+         |
+         v
+Conclusion: First streaming-capable EEG foundation model
+```
+
+## The Increment
+
+**One sentence**: Before this paper, EEG models chose between global context (too slow) or real-time processing (no long-range memory); after, a single causal model does both with linear complexity.
+
+### Core Mechanism
+
+CaMBRAIN replaces attention with a Mamba-based state space model (SSM) that processes EEG causally — left to right, never looking ahead. The core is a selective state space: at each time step, the model updates a hidden state vector based on the current input and previous state. Unlike RNNs, SSMs use structured matrices that enable parallel training while maintaining the recurrent inference property needed for streaming.
+
+The architecture stacks Mamba blocks with residual connections. Each block contains: (1) a selective SSM layer that updates the hidden state, (2) a gating mechanism that decides what information to retain or discard, and (3) layer normalization. Input EEG (raw voltage time series) passes through a patch embedding layer that converts short segments into tokens, then flows through the Mamba stack, producing representations at each time step.
+
+```
+Raw EEG: [v1, v2, v3, ..., vn]
+         |
+         v
+Patch Embed: [e1, e2, ..., em]  (m < n, non-overlapping windows)
+         |
+         v
+    +---[Mamba Block 1]---+
+    |   SSM + Gate + Norm |
+    +----------+-----------+
+               |
+    +---[Mamba Block 2]---+
+    |   SSM + Gate + Norm |
+    +----------+-----------+
+               |
+              ...
+               |
+    +---[Mamba Block L]---+
+    |   SSM + Gate + Norm |
+    +----------+-----------+
+               |
+               v
+    Hidden States: [h1, h2, ..., hm]
+               |
+               v
+    Task Head (classification/regression)
+```
+
+Think of CaMBRAIN as a **conveyor belt with memory stations**. Raw EEG is the stream of items moving down the belt. Each Mamba block is a worker station that examines the current item, checks a notepad (hidden state) containing summaries of all previous items, updates the notepad with new information, and passes both the item and updated notepad to the next station. The notepad is compact — it doesn't store every detail, only what the worker learned to remember through training. Crucially, workers never peek ahead at items still upstream; they only see what's already passed through. The final station reads the notepad and makes a decision (classify the EEG segment). Because each station operates in constant time and stations work in parallel during training, the whole belt scales linearly with the number of items.
+
+### Key Concepts
+
+- **State Space Models (SSMs)**: Imagine you're tracking a ball's position over time, but you can only measure it noisily. An SSM maintains a "hidden state" (your best guess of the true position and velocity) that gets updated each time you receive a new measurement. The update rule is a linear transformation: new_state = A × old_state + B × input. For EEG, the "hidden state" is a learned representation of everything important that happened so far, and the update rule is learned from data. The key advantage: you can compute all updates in parallel during training (using convolution tricks), but at inference time, you only need the previous state — perfect for streaming.
+
+- **Causal vs Bidirectional Processing**: Causal means "only use the past." When processing time step t, a causal model only sees inputs from steps 1 to t. Bidirectional models see the entire sequence (past and future) before making any decision. For offline analysis, bidirectional seems better — more information, better accuracy. But for real-time systems (seizure detection, brain-computer interfaces), you can't wait for the future. The paper's insight: EEG is inherently causal (brain activity unfolds forward in time), so bidirectional processing is overkill. A well-trained causal model can match or exceed bidirectional performance while enabling streaming.
+
+- **Multi-stage Self-Supervised Training**: Training a streaming SSM on EEG is tricky. Standard self-supervised objectives (mask and reconstruct) don't explicitly teach the hidden state to remember long-range context — they optimize for local reconstruction. CaMBRAIN uses three stages: (1) **Masked reconstruction** on short segments to learn local patterns, (2) **Contrastive learning** across long windows to force the hidden state to encode information that distinguishes distant time points, (3) **Fine-tuning** on downstream tasks. Stage 2 is critical: by contrasting representations separated by minutes, the model learns to retain salient events in its hidden state, not just recent inputs.
+
+## Framework Shift
+
+```
+Before (Attention-based):              After (CaMBRAIN):
+
+Full EEG sequence                      Full EEG sequence
+[===================]                  [===================]
+         |                                      |
+    Chunk into                            Process causally
+    overlapping                           left-to-right
+    windows                                    |
+         |                                     v
+    +----+----+----+                      h1->h2->h3->...->hn
+    |    |    |    |                      (hidden state flows)
+    v    v    v    v                           |
+  [Attn][Attn][Attn]...                       v
+    |    |    |    |                      Single global
+    v    v    v    v                      representation
+  Isolated predictions                         |
+  (no global context)                          v
+                                          Streaming inference
+  O(n^2) per window                       O(n) total
+  Cannot stream                           Real-time capable
+```
+
+**One sentence**: From fragmenting long EEG into isolated attention windows to maintaining a single causal hidden state that flows through the entire recording, the core shift is **global memory without quadratic cost**.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Clinical EEG recordings routinely span hours (overnight sleep studies, long-term epilepsy monitoring), and existing models genuinely struggle with this. The attention bottleneck is well-documented, and sliding windows do lose global context. The problem sits at the intersection of clinical need (real-time monitoring) and architectural limitation (quadratic scaling). Not manufactured.
+
+**Method maturity**: Solid engineering, not groundbreaking science. Mamba (the SSM backbone) already existed; the contribution is adapting it to EEG and designing a training pipeline that makes it work. The multi-stage training is clever — contrastive learning across long windows is a principled way to encourage long-range memory. But there's no deep theoretical insight here. The paper doesn't explain **why* SSMs should outperform attention on EEG beyond computational efficiency. Could a well-designed linear attention variant achieve similar results? Unclear.
+
+**Experimental integrity**: Baselines are fair (BIOT, LaBraM, BENDR — current SOTA). Three datasets (TUH Abnormal, SHHS, Sleep-EDF) cover different tasks (abnormality detection, sleep staging). Results are convincing: SOTA accuracy with 10x throughput. However, the paper doesn't ablate the multi-stage training — how much does each stage contribute? Also, all experiments use relatively short evaluation windows (30-60 seconds). The claim of "hours-long" capability is supported by throughput numbers, not end-to-end experiments on truly long recordings. Minor red flag.
+
+**Writing quality**: Clear motivation and method description. The multi-stage training pipeline is well-explained. Weakness: the related work section is thin — doesn't engage deeply with prior SSM work or explain why previous SSM attempts on time series failed. The results section focuses heavily on throughput but underexplores failure modes. Which types of EEG events does the causal model miss compared to bidirectional baselines? Rewriting Section 4 (Results) to include error analysis would elevate the paper significantly.
+
+**Verdict**: **Weak accept** — Solves a real problem with solid engineering, achieves strong empirical results, and enables a new capability (streaming EEG inference). But the method is incremental (apply existing SSM to new domain), and the evaluation could be more thorough. Useful contribution, not a landmark.
+
+## Takeaways
+
+**For practitioners**:
+1. **Causal is enough for time series**: If your data has a natural temporal direction (sensor streams, logs, medical signals), don't default to bidirectional models. A well-trained causal model can match accuracy while enabling streaming deployment.
+2. **Self-supervised objectives matter for SSMs**: Standard masked reconstruction doesn't teach SSMs to remember long-range context. Add a contrastive stage that explicitly forces the hidden state to encode information across long intervals.
+3. **Linear complexity unlocks new use cases**: The 10x throughput isn't just faster — it makes previously infeasible applications viable (real-time monitoring of hours-long recordings, edge deployment on low-power devices).
+
+**Transferable technique**: The multi-stage training pipeline (local reconstruction → long-range contrastive → task fine-tuning) is domain-agnostic. Apply it to any streaming time series where rare, brief events are separated by long intervals (network intrusion detection, industrial sensor monitoring, financial tick data).
+:::
+
+:::zh
+**论文**: [2605.28792](https://arxiv.org/abs/2605.28792)
+**作者**: Abhilash Durgam, Nyle Siddiqui, Jeffrey A. Chan-Santiago, Qiushi Fu, Elakkat D. Gireesh, Mubarak Shah
+**分类**: cs.AI, cs.HC, cs.LG
+
+## 缺口
+
+现有的脑电信号分析模型在处理长时程记录时遇到瓶颈。
+
+基于注意力机制的架构（当前主流）复杂度随序列长度平方增长——一段10分钟、采样率256 Hz的脑电信号意味着153,600个时间步，全序列处理的计算成本高得离谱。
+
+权宜之计？
+
+滑动窗口。
+
+但这会把信号切成孤立的碎片，模型无法看到跨越数分钟的模式（比如癫痫发作的累积过程或睡眠阶段的转换）。
+
+像BIOT和LaBraM这样的双向模型在两个方向上处理信号，这对离线分析似乎合理，但与实时流式处理根本不兼容。
+
+未来还没发生时，你无法窥视未来。
+
+该领域缺少一个能够(1)以线性时间处理任意长度的脑电信号，(2)在整个记录中保持全局上下文，(3)因果地运行以支持实时部署的模型。
+
+```
+问题：长时程脑电（数小时）+ 注意力机制（O(n^2)）= 不可行
+         |
+         v
+假设：因果性已足够（无需未来信息）
+         |
+         v
+方法：因果状态空间模型（Mamba）+ 多阶段自监督训练
+         |
+         v
+证据：3个数据集上达到SOTA，吞吐量10倍提升，线性扩展
+         |
+         v
+结论：首个支持流式处理的脑电基础模型
+```
+
+## 增量
+
+**一句话**：这篇论文之前，脑电模型要么选择全局上下文（太慢）要么选择实时处理（无长程记忆）；
+
+之后，单个因果模型以线性复杂度同时做到两者。
+
+### 核心机制
+
+CaMBRAIN用基于Mamba的状态空间模型（SSM）替换注意力机制，因果地处理脑电信号——从左到右，从不前瞻。
+
+核心是选择性状态空间：在每个时间步，模型基于当前输入和先前状态更新一个隐状态向量。
+
+与RNN不同，SSM使用结构化矩阵，既能并行训练，又保持流式推理所需的递归特性。
+
+架构堆叠了带残差连接的Mamba块。
+
+每个块包含：(1)更新隐状态的选择性SSM层，(2)决定保留或丢弃哪些信息的门控机制，(3)层归一化。
+
+输入脑电信号（原始电压时间序列）通过补丁嵌入层，将短片段转换为token，然后流经Mamba堆栈，在每个时间步产生表示。
+
+```
+原始脑电：[v1, v2, v3, ..., vn]
+         |
+         v
+补丁嵌入：[e1, e2, ..., em]  (m < n, 非重叠窗口)
+         |
+         v
+    +---[Mamba块 1]---+
+    |  SSM+门控+归一化 |
+    +----------+-----------+
+               |
+    +---[Mamba块 2]---+
+    |  SSM+门控+归一化 |
+    +----------+-----------+
+               |
+              ...
+               |
+    +---[Mamba块 L]---+
+    |  SSM+门控+归一化 |
+    +----------+-----------+
+               |
+               v
+    隐状态：[h1, h2, ..., hm]
+               |
+               v
+    任务头（分类/回归）
+```
+
+把CaMBRAIN想象成**带记忆站的传送带**。
+
+原始脑电信号是沿传送带移动的物品流。
+
+每个Mamba块是一个工作站，检查当前物品，查看记事本（隐状态）上所有先前物品的摘要，用新信息更新记事本，然后把物品和更新后的记事本一起传给下一站。
+
+记事本很紧凑——它不存储每个细节，只记录工作站通过训练学会记住的内容。
+
+关键是，工作站从不偷看上游尚未到达的物品；
+
+它们只看已经通过的内容。
+
+最后一站读取记事本并做出决策（对脑电片段分类）。
+
+因为每个工作站以常数时间运行，且训练时各站并行工作，整条传送带随物品数量线性扩展。
+
+### 关键概念
+
+- **状态空间模型（SSM）**：想象你在追踪一个球随时间的位置，但只能进行有噪声的测量。
+
+SSM维护一个"隐状态"（你对真实位置和速度的最佳猜测），每次收到新测量值时更新它。
+
+更新规则是线性变换：新状态 = A × 旧状态 + B × 输入。
+
+对于脑电信号，"隐状态"是迄今为止发生的所有重要事件的学习表示，更新规则从数据中学习。
+
+关键优势：训练时可以并行计算所有更新（使用卷积技巧），但推理时只需要前一个状态——非常适合流式处理。
+
+- **因果处理 vs 双向处理**：因果意味着"只使用过去"。
+
+处理时间步t时，因果模型只看到步骤1到t的输入。
+
+双向模型在做任何决策前看到整个序列（过去和未来）。
+
+对于离线分析，双向似乎更好——信息更多，准确率更高。
+
+但对于实时系统（癫痫检测、脑机接口），你不能等待未来。
+
+本文的洞察：脑电信号本质上是因果的（大脑活动向前展开），所以双向处理是过度设计。
+
+训练良好的因果模型可以匹配甚至超越双向性能，同时支持流式处理。
+
+- **多阶段自监督训练**：在脑电信号上训练流式SSM很棘手。
+
+标准的自监督目标（掩码和重建）不会显式地教隐状态记住长程上下文——它们优化局部重建。
+
+CaMBRAIN使用三个阶段：(1)**短片段上的掩码重建**以学习局部模式，(2)**长窗口上的对比学习**以强制隐状态编码区分远距离时间点的信息，(3)**下游任务上的微调**。
+
+阶段2至关重要：通过对比相隔数分钟的表示，模型学会在隐状态中保留显著事件，而不仅仅是最近的输入。
+
+## 框架转变
+
+```
+之前（基于注意力）：                之后（CaMBRAIN）：
+
+完整脑电序列                        完整脑电序列
+[===================]              [===================]
+         |                                  |
+    切分为重叠窗口                      从左到右因果处理
+         |                                  |
+         v                                  v
+    +----+----+----+                   h1->h2->h3->...->hn
+    |    |    |    |                   （隐状态流动）
+    v    v    v    v                        |
+  [注意力][注意力][注意力]...                v
+    |    |    |    |                   单一全局表示
+    v    v    v    v                        |
+  孤立的预测                                v
+  （无全局上下文）                      流式推理
+                                            
+  每窗口O(n^2)                         总计O(n)
+  无法流式处理                         支持实时
+```
+
+**一句话**：从把长时程脑电切分成孤立的注意力窗口，到维护一个流经整个记录的单一因果隐状态，核心转变是**无需平方代价的全局记忆**。
+
+## 专家评审
+
+**选题眼光**：真实缺口。
+
+临床脑电记录常规跨越数小时（过夜睡眠研究、长期癫痫监测），现有模型确实在这方面挣扎。
+
+注意力瓶颈有充分记录，滑动窗口确实会丢失全局上下文。
+
+问题位于临床需求（实时监测）和架构限制（平方扩展）的交叉点。
+
+不是人造缺口。
+
+**方法成熟度**：扎实的工程，不是突破性科学。
+
+Mamba（SSM骨干）已经存在；
+
+贡献在于将其适配到脑电信号并设计一个让它工作的训练流程。
+
+多阶段训练很巧妙——跨长窗口的对比学习是鼓励长程记忆的原则性方法。
+
+但这里没有深刻的理论洞察。
+
+论文没有解释*为什么*SSM在脑电信号上应该超越注意力机制，除了计算效率。
+
+精心设计的线性注意力变体能否达到类似结果？
+
+不清楚。
+
+**实验诚意**：基线公平（BIOT、LaBraM、BENDR——当前SOTA）。
+
+三个数据集（TUH Abnormal、SHHS、Sleep-EDF）涵盖不同任务（异常检测、睡眠分期）。
+
+结果令人信服：SOTA准确率加10倍吞吐量。
+
+然而，论文没有消融多阶段训练——每个阶段贡献多少？
+
+此外，所有实验使用相对较短的评估窗口（30-60秒）。
+
+"数小时长度"的能力由吞吐量数字支持，而非真正长记录上的端到端实验。
+
+轻微警示。
+
+**写作功力**：动机和方法描述清晰。
+
+多阶段训练流程解释得很好。
+
+弱点：相关工作部分单薄——没有深入讨论先前的SSM工作或解释为什么之前在时间序列上的SSM尝试失败了。
+
+结果部分过度关注吞吐量，对失败模式探索不足。
+
+因果模型相比双向基线会漏掉哪些类型的脑电事件？
+
+重写第4节（结果）加入错误分析会显著提升论文质量。
+
+**判决**：**弱接收**——用扎实的工程解决真实问题，取得强劲的实证结果，并实现新能力（流式脑电推理）。
+
+但方法是增量式的（将现有SSM应用到新领域），评估可以更彻底。
+
+有用的贡献，不是里程碑。
+
+## 要点总结
+
+**对实践者**：
+
+1. **因果性对时间序列已足够**：如果你的数据有自然的时间方向（传感器流、日志、医疗信号），不要默认使用双向模型。
+
+训练良好的因果模型可以匹配准确率，同时支持流式部署。
+
+2. **自监督目标对SSM很重要**：标准的掩码重建不会教SSM记住长程上下文。
+
+添加一个对比阶段，显式地强制隐状态编码跨长间隔的信息。
+
+3. **线性复杂度解锁新用例**：10倍吞吐量不仅仅是更快——它使之前不可行的应用变得可行（数小时记录的实时监测、低功耗设备上的边缘部署）。
+
+**可迁移技术**：多阶段训练流程（局部重建 → 长程对比 → 任务微调）与领域无关。
+
+应用到任何流式时间序列，其中罕见的短暂事件被长间隔分隔（网络入侵检测、工业传感器监测、金融tick数据）。
+
+:::
