@@ -1,0 +1,335 @@
+---
+title:
+  en: "SurGe: Fixing the Bumpy Surfaces in Single-Image 3D Reconstruction"
+  zh: "SurGe：修复单图3D重建中的粗糙表面"
+description:
+  en: "Feedforward 3D reconstruction gets global shape right but local surfaces wrong. SurGe introduces a normal metric to expose these errors and a gradient matching loss plus neighborhood attention decoder to fix them."
+  zh: "前馈式3D重建能抓住全局形状，却在局部表面上翻车。SurGe引入法向量指标暴露这些错误，并用梯度匹配损失和邻域注意力解码器修复它们。"
+date: 2026-06-01
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-surge-improved-surface-geometry-in-point.png"
+---
+
+![Concept animation](/arxiv-visuals/surge-improved-surface-geometry-in-point/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2605.31577](https://arxiv.org/abs/2605.31577)
+**Authors**: Karim Knaebel, Gonzalo Martin Garcia, Christian Schmidt, Ilya Fradlin, Lucas Nunes, Daan de Geus, Bastian Leibe
+**Categories**: cs.CV
+
+## The Gap
+
+Recent feedforward methods (Depth Anything, Metric3D) predict point maps from single images and nail the global 3D structure—room layouts, object positions, overall depth ordering. But zoom in and the surfaces look like crumpled aluminum foil: bumpy, noisy, with normals pointing in inconsistent directions. The problem is invisible to standard metrics like AbsRel, which only measure per-pixel depth error and miss local surface coherence.
+
+Prior work optimized for global accuracy. No one asked: "Are neighboring predictions forming smooth, plausible surfaces?" The evaluation gap enabled a training gap—models learned to place points at roughly the right depth without caring if those points implied a sensible surface.
+
+```
+Problem: Global metrics hide local surface errors
+   |
+   v
+Assumption: Supervising 3D gradients + local feature mixing
+            will enforce surface coherence
+   |
+   v
+Method: Point gradient matching loss (supervise finite differences)
+        + Neighborhood Attention Decoder (local upsampling)
+   |
+   v
+Evidence: New "point map normal" metric shows improvement
+          + SOTA on 8 zero-shot benchmarks
+   |
+   v
+Conclusion: Explicit surface supervision fixes the bumpiness
+```
+
+## The Increment
+
+**One sentence**: Before SurGe, feedforward 3D reconstruction gave you the right room but wrong walls; after SurGe, the walls are smooth and the corners meet cleanly.
+
+### Core Mechanism
+
+SurGe has two components working in tandem. First, a **point gradient matching loss** that supervises the 3D finite differences between neighboring predictions. Instead of just checking if each point is at the right depth, it checks if the **change* from one point to the next matches the ground truth surface gradient. This is depth-normalized—scaled by the predicted depth—so gradients at near and far surfaces are weighted equally.
+
+Second, a **Neighborhood Attention Decoder (NAD)** that progressively upsamples features from coarse to fine resolution. At each scale, it uses Neighborhood Attention (a windowed self-attention mechanism) to mix features within local spatial windows. This lets each pixel's prediction incorporate information from its immediate neighbors, enforcing local consistency. The decoder starts from a ViT encoder's output and upsamples through four stages, each with NAD blocks that refine the point map.
+
+```
+Input Image
+    |
+    v
+ViT Encoder --> Coarse Features (low res)
+    |
+    v
+NAD Stage 1: Upsample + Neighborhood Attention
+    |                (local feature mixing)
+    v
+NAD Stage 2: Upsample + Neighborhood Attention
+    |
+    v
+NAD Stage 3: Upsample + Neighborhood Attention
+    |
+    v
+NAD Stage 4: Upsample + Neighborhood Attention
+    |
+    v
+Point Map (X, Y, Z per pixel)
+    |
+    +---> Point Gradient Loss: Compare finite differences
+          (supervise dX/dx, dY/dy, dZ/dz between neighbors)
+```
+
+Think of it like sculpting clay. Standard methods drop clay blobs at roughly the right depths—the sculpture's silhouette looks right from a distance, but up close it's lumpy. The point gradient loss is like running a smoothing tool between each blob and its neighbors, checking that the slope from one to the next matches the reference. The Neighborhood Attention Decoder is like having multiple sculpting passes, where each pass looks at a small neighborhood and adjusts the clay so it flows smoothly into adjacent areas. By the final pass, the surface is coherent—not just a collection of independent depth guesses, but a connected mesh where each point respects its neighbors.
+
+### Key Concepts
+
+- **Point Map**: A dense 3D representation where every pixel in the input image maps to an (X, Y, Z) coordinate in 3D space. Unlike depth maps (which only give distance along the camera ray), point maps give full 3D positions, making it easier to reason about surface geometry. If you have a 480×640 image, you get 480×640 points in 3D—a point cloud with known pixel correspondence.
+
+- **Point Gradient Matching**: Supervising the **derivative* of predictions rather than the predictions themselves. For a surface, the gradient (how Z changes as you move in X or Y) encodes the surface orientation. By matching gradients to ground truth, you enforce that neighboring points form a plausible surface tangent. This is computed as finite differences: `(point[i+1] - point[i]) / depth[i]`, normalized by depth so near and far surfaces are treated equally. Without this, the model can place points at correct depths but with inconsistent slopes—like a staircase where each step is the right height but tilted at random angles.
+
+- **Neighborhood Attention**: A windowed self-attention mechanism where each token (pixel feature) only attends to tokens within a local spatial window (e.g., 7×7 or 15×15). This is cheaper than full self-attention (which scales quadratically with image size) but still allows local feature mixing. In the context of point map prediction, it lets each pixel's 3D coordinate be influenced by nearby pixels, enforcing smoothness. It's the architectural counterpart to the gradient loss—one supervises the output, the other structures the computation to naturally produce smooth outputs.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (SurGe):
+
+Image --> Encoder --> Decoder        Image --> Encoder --> NAD
+            |            |                        |            |
+            v            v                        v            v
+      Per-pixel      Point Map              Local mixing   Point Map
+      prediction                             at each scale      |
+            |                                                   |
+            v                                                   v
+      Loss on absolute                    Loss on gradients
+      depth/position                      (finite differences)
+      
+Optimization target:                 Optimization target:
+"Put each point at                   "Make neighboring points
+ the right depth"                     form smooth surfaces"
+```
+
+**One sentence**: From independent per-pixel depth regression to neighborhood-aware surface reconstruction, the core shift is treating 3D prediction as a surface coherence problem rather than a point placement problem.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The qualitative bumpiness in feedforward 3D reconstructions has been obvious for years—look at any Depth Anything output under raking light and you see noise. But the field kept optimizing AbsRel because that's what the benchmarks measured. Introducing a normal-based metric is overdue and makes the problem legible to optimization. This sits at the intersection of "everyone knows it's a problem" and "no one formalized it," which is a sweet spot.
+
+**Method maturity**: The gradient matching loss is elegant—supervising derivatives is a classic trick from physics-informed learning, applied cleanly here. Neighborhood Attention is borrowed from NAT (2022) but used appropriately. The depth normalization in the gradient loss is a nice touch that prevents near-surface bias. However, the paper doesn't explore simpler baselines: would a standard smoothness regularizer (Laplacian penalty) get you 80% of the way there? The ablation shows NAD helps, but doesn't isolate whether it's the attention mechanism or just the progressive upsampling doing the work.
+
+**Experimental integrity**: Eight zero-shot benchmarks is thorough. The normal metric is well-motivated and the results are consistent across datasets. Baselines are recent SOTA methods (Depth Anything V2, Metric3D V2), which is fair. One concern: the normal metric is computed from the predicted point map itself, so it's not fully independent—a model could game it by producing locally smooth but globally wrong surfaces. The paper doesn't show failure cases or discuss when the method breaks down (e.g., on textureless regions or thin structures).
+
+**Writing quality**: The abstract and intro are crisp. The method section is clear but could use a diagram showing the gradient computation explicitly—the text describes it but a visual would help. The related work section is thorough but reads like a literature dump; cutting it by 30% and focusing on the most relevant comparisons would tighten the narrative. The results section is strong, but the qualitative figures (if present) should be larger—surface errors are subtle and need high-resolution visualization.
+
+**Verdict**: **weak accept** — Solid incremental contribution with a useful new metric and clean method, but lacks depth in ablations and doesn't explore the boundary of when the approach fails.
+
+## Takeaways
+
+**Supervise derivatives, not just values**: When your output has spatial structure (images, meshes, point clouds), adding a loss on finite differences or gradients can enforce coherence that per-element losses miss. This transfers to any dense prediction task—optical flow, surface normals, semantic segmentation boundaries.
+
+**Windowed attention for local consistency**: If full self-attention is too expensive but you need local feature mixing, Neighborhood Attention is a practical middle ground. Useful for high-resolution dense prediction where global context matters less than local smoothness.
+
+**Metrics shape research**: The field optimized AbsRel for years and got globally accurate but locally noisy outputs. The moment someone introduced a normal-based metric, the problem became solvable. If your domain has a quality gap that metrics don't capture, formalizing it is half the battle.
+
+**Depth normalization matters**: When supervising gradients or differences, normalizing by depth (or scale) prevents near-field bias. This is a small implementation detail with large impact—without it, the model focuses on nearby surfaces and ignores distant ones.
+:::
+
+:::zh
+**论文**: [2605.31577](https://arxiv.org/abs/2605.31577)
+**作者**: Karim Knaebel, Gonzalo Martin Garcia, Christian Schmidt, Ilya Fradkin, Lucas Nunes, Daan de Geus, Bastian Leibe
+**分类**: cs.CV
+
+## 缺口
+
+最近的前馈方法（Depth Anything、Metric3D）能从单张图像预测点图，全局3D结构抓得很准——房间布局、物体位置、整体深度顺序都没问题。
+
+但放大看，表面像揉皱的铝箔：凹凸不平，噪声满满，法向量指向混乱。
+
+标准指标如AbsRel看不到这个问题，它只测量逐像素深度误差，漏掉了局部表面连贯性。
+
+前人优化全局精度，没人问："相邻预测点能组成平滑、合理的表面吗？"评估缺口导致训练缺口——模型学会把点放在大致正确的深度，却不在乎这些点是否暗示了合理的表面。
+
+```
+问题：全局指标掩盖局部表面错误
+   |
+   v
+假设：监督3D梯度 + 局部特征混合
+      能强制表面连贯性
+   |
+   v
+方法：点梯度匹配损失（监督有限差分）
+      + 邻域注意力解码器（局部上采样）
+   |
+   v
+证据：新的"点图法向量"指标显示改进
+      + 8个零样本基准上达到SOTA
+   |
+   v
+结论：显式表面监督修复了粗糙度
+```
+
+## 增量
+
+**一句话**：SurGe之前，前馈3D重建给你正确的房间但错误的墙；SurGe之后，墙面平滑，拐角整齐。
+
+### 核心机制
+
+SurGe有两个协同工作的组件。
+
+第一，**点梯度匹配损失**，监督相邻预测之间的3D有限差分。
+
+不只检查每个点是否在正确深度，还检查从一个点到下一个点的*变化*是否匹配真实表面梯度。
+
+这是深度归一化的——按预测深度缩放——所以近处和远处表面的梯度权重相等。
+
+第二，**邻域注意力解码器（NAD）**，从粗到细逐步上采样特征。
+
+在每个尺度，它用邻域注意力（窗口化自注意力机制）在局部空间窗口内混合特征。
+
+这让每个像素的预测能融合其邻近像素的信息，强制局部一致性。
+
+解码器从ViT编码器输出开始，通过四个阶段上采样，每个阶段都有NAD块来细化点图。
+
+```
+输入图像
+    |
+    v
+ViT编码器 --> 粗糙特征（低分辨率）
+    |
+    v
+NAD阶段1：上采样 + 邻域注意力
+    |              （局部特征混合）
+    v
+NAD阶段2：上采样 + 邻域注意力
+    |
+    v
+NAD阶段3：上采样 + 邻域注意力
+    |
+    v
+NAD阶段4：上采样 + 邻域注意力
+    |
+    v
+点图（每像素X, Y, Z）
+    |
+    +---> 点梯度损失：比较有限差分
+          （监督相邻点间的dX/dx, dY/dy, dZ/dz）
+```
+
+把它想象成雕刻黏土。
+
+标准方法在大致正确的深度扔下黏土块——雕塑的轮廓从远处看没问题，但近看坑坑洼洼。
+
+点梯度损失像在每个黏土块和其邻居之间运行平滑工具，检查从一个到下一个的斜率是否匹配参考。
+
+邻域注意力解码器像多次雕刻，每次都看一小块邻域，调整黏土使其平滑过渡到相邻区域。
+
+到最后一遍，表面连贯了——不再是独立深度猜测的集合，而是连接的网格，每个点都尊重其邻居。
+
+### 关键概念
+
+- **点图**：密集3D表示，输入图像的每个像素映射到3D空间的(X, Y, Z)坐标。
+
+不同于深度图（只给沿相机射线的距离），点图给出完整3D位置，更容易推理表面几何。
+
+如果有480×640图像，就得到480×640个3D点——一个有已知像素对应关系的点云。
+
+- **点梯度匹配**：监督预测的**导数*而非预测本身。
+
+对表面来说，梯度（Z随X或Y移动如何变化）编码了表面方向。
+
+通过匹配梯度到真值，强制相邻点形成合理的表面切线。
+
+这通过有限差分计算：`(point[i+1] - point[i]) / depth[i]`，按深度归一化使近远表面平等对待。
+
+没有这个，模型能把点放在正确深度但斜率不一致——像楼梯每级高度对的但随机倾斜。
+
+- **邻域注意力**：窗口化自注意力机制，每个token（像素特征）只关注局部空间窗口内的token（如7×7或15×15）。
+
+这比全自注意力（随图像大小二次方缩放）便宜，但仍允许局部特征混合。
+
+在点图预测中，它让每个像素的3D坐标受附近像素影响，强制平滑。
+
+这是梯度损失的架构对应物——一个监督输出，另一个构造计算以自然产生平滑输出。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（SurGe）：
+
+图像 --> 编码器 --> 解码器        图像 --> 编码器 --> NAD
+            |            |                    |            |
+            v            v                    v            v
+      逐像素预测      点图              每尺度局部混合   点图
+            |                                              |
+            v                                              v
+      绝对深度/位置损失                    梯度损失
+                                          （有限差分）
+      
+优化目标：                           优化目标：
+"把每个点放在                       "让相邻点形成
+ 正确深度"                           平滑表面"
+```
+
+**一句话**：从独立逐像素深度回归到邻域感知表面重建，核心转变是把3D预测当作表面连贯性问题而非点放置问题。
+
+## 专家评审
+
+**选题眼光**：真缺口。
+
+前馈3D重建的定性粗糙度明显多年了——看任何Depth Anything输出在侧光下都能看到噪声。
+
+但领域一直优化AbsRel因为基准测这个。
+
+引入基于法向量的指标早该做了，让问题对优化可见。
+
+这处于"人人知道是问题"和"无人形式化"的交叉点，是个甜蜜点。
+
+**方法成熟度**：梯度匹配损失优雅——监督导数是物理信息学习的经典技巧，这里应用得干净。
+
+邻域注意力借自NAT（2022）但用得恰当。
+
+梯度损失中的深度归一化是个好细节，防止近表面偏差。
+
+但论文没探索更简单的基线：标准平滑正则化（拉普拉斯惩罚）能达到80%效果吗？消融显示NAD有帮助，但没隔离是注意力机制还是渐进上采样在起作用。
+
+**实验诚意**：八个零样本基准很全面。
+
+法向量指标动机充分，结果在数据集间一致。
+
+基线是最近的SOTA方法（Depth Anything V2、Metric3D V2），公平。
+
+一个担忧：法向量指标从预测点图本身计算，所以不完全独立——模型可能通过产生局部平滑但全局错误的表面来作弊。
+
+论文没展示失败案例或讨论方法何时崩溃（如无纹理区域或细结构）。
+
+**写作功力**：摘要和引言简洁。
+
+方法部分清晰但需要显式展示梯度计算的图——文字描述了但视觉会有帮助。
+
+相关工作部分全面但读起来像文献堆砌；削减30%聚焦最相关比较会收紧叙事。
+
+结果部分强，但定性图（如果有）应该更大——表面错误微妙，需要高分辨率可视化。
+
+**判决**：**弱接收** — 扎实的增量贡献，有用的新指标和干净的方法，但消融缺乏深度，没探索方法失败的边界。
+
+## 要点总结
+
+**监督导数而非值**：当输出有空间结构（图像、网格、点云），在有限差分或梯度上加损失能强制逐元素损失漏掉的连贯性。
+
+这迁移到任何密集预测任务——光流、表面法向量、语义分割边界。
+
+**窗口注意力用于局部一致性**：如果全自注意力太贵但需要局部特征混合，邻域注意力是实用的中间地带。
+
+对高分辨率密集预测有用，全局上下文不如局部平滑重要。
+
+**指标塑造研究**：领域优化AbsRel多年，得到全局准确但局部噪声的输出。
+
+有人引入基于法向量的指标那一刻，问题变得可解。
+
+如果你的领域有指标捕捉不到的质量缺口，形式化它就是成功一半。
+
+**深度归一化重要**：监督梯度或差分时，按深度（或尺度）归一化防止近场偏差。
+
+这是个小实现细节但影响大——没有它，模型聚焦近处表面忽略远处。
+
+:::

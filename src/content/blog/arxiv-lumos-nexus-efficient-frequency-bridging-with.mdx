@@ -1,0 +1,387 @@
+---
+title:
+  en: "Lumos-Nexus: Training Cheap, Inferring Expensive for High-Fidelity Video Generation"
+  zh: "Lumos-Nexus：训练用轻量模型，推理换高清生成器"
+description:
+  en: "A two-stage framework that trains with lightweight generators but swaps in high-capacity models at inference via frequency-domain bridging, achieving both strong reasoning and visual fidelity without expensive joint training."
+  zh: "训练时用轻量生成器学推理控制，推理时通过频域桥接换入高容量模型，既省训练成本又得高保真视频。"
+date: 2026-06-01
+tags: ["arxiv", "ai", "cs.cv", "cs.ai"]
+image: "/arxiv-visuals/lumos-nexus-efficient-frequency-bridging-with/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/lumos-nexus-efficient-frequency-bridging-with/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2605.31603](https://arxiv.org/abs/2605.31603)
+**Authors**: Jiazheng Xing, Hangjie Yuan, Lingling Cai, Xinyu Liu, Yujie Wei, Fei Du, Hai Ci, Tao Feng, Jiasheng Tang, Weihua Chen
+**Categories**: cs.CV, cs.AI
+
+## The Gap
+
+Unified video models (like VideoPoet, Emu Video) combine understanding and generation in one framework. They use a connector to bridge a language model (for reasoning) with a video generator. The problem: training these end-to-end with a high-fidelity generator is computationally prohibitive. You need massive compute to jointly optimize understanding + generation with a billion-parameter diffusion model. So existing work settles for lower-quality generators during training, which caps the visual fidelity of the final output.
+
+The gap: **How do you get strong reasoning-driven generation without paying the cost of training a heavyweight generator in the loop?**
+
+```
+Problem: Joint training with high-fidelity generator = expensive
+   |
+   v
+Assumption: Reasoning and generation can be decoupled in training
+   |
+   v
+Method: Train with lightweight generator, swap in pretrained
+        high-capacity generator at inference via latent bridging
+   |
+   v
+Evidence: VBench (visual quality), VR-Bench (reasoning quality)
+   |
+   v
+Conclusion: Achieves both strong reasoning and high fidelity
+            without expensive joint training
+```
+
+## The Increment
+
+**One sentence**: Before, you trained reasoning and generation together with a weak generator (cheap but low quality) or a strong generator (expensive). After, you train with a weak generator but inference with a strong one via frequency-domain handoff.
+
+### Core Mechanism
+
+Lumos-Nexus has two stages. **Stage 1 (training)**: A language model processes instructions and outputs semantic tokens. A lightweight generator (the "training generator") learns to take these tokens and produce video. Only the connector and this small generator are trained—the language model stays frozen. This is cheap because the generator is small.
+
+**Stage 2 (inference)**: The trained connector feeds semantic tokens to the lightweight generator, which produces a coarse video in latent space. Then comes the trick: Unified Progressive Frequency Bridging (UPFB). The latent representation is decomposed into frequency bands (low, mid, high). The lightweight generator handles low frequencies (coarse structure). A pretrained high-capacity generator (like CogVideoX) refines mid and high frequencies (fine details). The two generators share the same latent space (VAE), so their outputs can be blended. The result: high-fidelity video guided by the reasoning from stage 1, without ever training the big generator.
+
+```
+Training:
+  Instruction --> [LLM] --> Semantic Tokens --> [Connector] 
+                                                     |
+                                                     v
+                                            [Lightweight Gen] --> Video
+                                            (only this trained)
+
+Inference:
+  Instruction --> [LLM] --> Semantic Tokens --> [Connector]
+                                                     |
+                                                     v
+                                            [Lightweight Gen] --> Coarse Latent
+                                                     |
+                                                     v
+                                                  [UPFB]
+                                                  /    \
+                                    Low Freq (keep)   Mid/High Freq (refine)
+                                                              |
+                                                              v
+                                                    [Pretrained High-Cap Gen]
+                                                              |
+                                                              v
+                                                      High-Fidelity Video
+```
+
+Think of it like **drafting a blueprint with a pencil, then hiring a master painter to fill in the details**. During training, you teach an apprentice (lightweight generator) to understand your instructions and sketch the layout. The apprentice is cheap to train. At inference, you hand the sketch to a master painter (pretrained generator) who was never in your training loop. The master refines the sketch into a finished painting. The key: both work on the same canvas (shared latent space), and you use frequency decomposition to decide who handles what—apprentice does structure, master does texture.
+
+### Key Concepts
+
+- **Latent Space Homogeneity**: Both the lightweight and high-capacity generators use the same VAE encoder/decoder. This means their intermediate representations live in the same mathematical space. You can take a latent vector from one generator and feed it to the other without translation. It's like two artists using the same color palette—they can hand off a canvas mid-painting because they speak the same visual language. Without this, you'd need a separate translation step, which would degrade quality.
+
+- **Frequency Decomposition**: A video latent can be split into frequency bands via Fourier transform. Low frequencies encode coarse structure (object positions, scene layout). High frequencies encode fine details (textures, edges). The lightweight generator is good at low frequencies (it learned semantic control during training). The pretrained generator is good at high frequencies (it was trained on high-res data). UPFB progressively hands off frequency bands: start with all low-freq from lightweight, gradually blend in mid/high-freq from pretrained. It's like adjusting focus on a camera—first you get the scene in frame, then you sharpen the details.
+
+- **Reasoning-Driven Generation**: The language model infers intent from instructions (e.g., "a cat chasing a laser" implies motion, causality, object persistence). The connector translates this inferred intent into semantic tokens that guide generation. This is different from text-to-video models that treat prompts as bag-of-words. Here, the LLM does reasoning first (what should happen, in what order), then generation follows that plan. VR-Bench tests this: it gives instructions requiring inference (e.g., "show the consequence of X"), not just literal description.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+  [Instruction]                        [Instruction]
+       |                                    |
+       v                                    v
+    [LLM + Generator]                    [LLM] (frozen)
+    (trained jointly)                      |
+       |                                   v
+       v                                [Connector] (trained)
+  [Video Output]                           |
+  (quality capped by                       v
+   training budget)                  [Lightweight Gen] (trained)
+                                            |
+                                            v
+                                      [Coarse Latent]
+                                            |
+                                            v
+                                         [UPFB]
+                                            |
+                                            v
+                                   [Pretrained High-Cap Gen]
+                                       (never trained)
+                                            |
+                                            v
+                                    [High-Fidelity Video]
+```
+
+From monolithic joint training to staged decoupling, the core shift is **deferring fidelity to inference time**.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Unified models are compute-hungry, and the field has been stuck choosing between reasoning quality (big LLM, small generator) and visual quality (small LLM, big generator). This paper asks: why not both? The problem sits at the intersection of efficiency and capability, which is where the field needs to go for practical deployment.
+
+**Method maturity**: The frequency bridging idea is clever but not novel in isolation—multi-scale refinement exists in image generation. The contribution is applying it to video with a shared latent space and showing it preserves reasoning. The two-stage design is pragmatic, not groundbreaking. One concern: the method assumes latent space compatibility. If the pretrained generator's VAE drifts from the lightweight one's, the handoff degrades. The paper doesn't deeply explore failure modes here.
+
+**Experimental integrity**: VBench is standard for video quality. VR-Bench is new and needed—existing benchmarks don't test reasoning-driven generation. The baselines (VideoPoet, Emu Video) are fair. Numbers look solid, but the paper doesn't ablate UPFB's frequency schedule thoroughly. What happens if you hand off too early or too late? Also, the pretrained generator (CogVideoX) is doing heavy lifting—how much of the gain is just "we used a better generator" vs. "our bridging method is smart"? A comparison with naive latent-space swapping would clarify this.
+
+**Writing quality**: The method section is dense. The UPFB algorithm is buried in notation when a visual walkthrough would help. The related work undersells how this fits into the broader landscape of modular generation (e.g., compositional diffusion, ControlNet-style guidance). The VR-Bench section is strong—clear motivation, good examples. If I were rewriting, I'd expand the failure case analysis and add a "when does this not work" subsection.
+
+**Verdict**: **weak accept** — Solid engineering contribution with a useful benchmark, but the core idea (deferred refinement) is incremental rather than paradigm-shifting. The value is in execution and the VR-Bench dataset, not methodological novelty.
+
+## Takeaways
+
+**Decouple training cost from inference quality**: If your task has a cheap-to-train proxy and an expensive-to-run oracle, train on the proxy and swap in the oracle at inference. The key: ensure they share a common representation space (here, VAE latents). This pattern applies beyond video—think text (train on small LM, inference with GPT-4 for refinement) or audio (train on low-res, inference with high-res vocoder).
+
+**Frequency as a handoff protocol**: When blending outputs from two models, frequency decomposition is a principled way to divide labor. Low-freq = structure, high-freq = detail. If one model is better at structure and the other at detail, split the spectrum. This is cleaner than naive blending or sequential refinement.
+
+**Benchmark the reasoning, not just the pixels**: VR-Bench is the real contribution. If you're building instruction-following systems, test whether the model infers intent, not just whether it matches keywords. Example: "show what happens next" requires causal reasoning, not just scene continuation. Steal this eval design for your domain.
+:::
+
+:::zh
+**论文**: [2605.31603](https://arxiv.org/abs/2605.31603)
+**作者**: Jiazheng Xing, Hangjie Yuan, Lingling Cai, Xinyu Liu, Yujie Wei, Fei Du, Hai Ci, Tao Feng, Jiasheng Tang, Weihua Chen
+**分类**: cs.CV, cs.AI
+
+## 缺口
+
+统一视频模型（如 VideoPoet、Emu Video）把理解和生成放在一个框架里。
+
+它们用连接器把语言模型（负责推理）和视频生成器桥接起来。
+
+问题在于：用高保真生成器端到端训练这套系统，计算成本高得离谱。
+
+你需要海量算力来联合优化理解+生成，而生成器可能有十亿参数。
+
+所以现有工作在训练时妥协，用低质量生成器，这就限制了最终输出的视觉保真度。
+
+缺口：**如何在不付出训练重量级生成器代价的前提下，获得强推理驱动的生成能力？**
+
+```
+问题：联合训练高保真生成器 = 太贵
+   |
+   v
+假设：推理和生成在训练时可以解耦
+   |
+   v
+方法：训练时用轻量生成器，推理时通过潜空间桥接
+      换入预训练的高容量生成器
+   |
+   v
+证据：VBench（视觉质量）、VR-Bench（推理质量）
+   |
+   v
+结论：既有强推理又有高保真，无需昂贵的联合训练
+```
+
+## 增量
+
+**一句话**: 之前要么用弱生成器联合训练（便宜但质量低），要么用强生成器联合训练（贵）。
+
+现在训练时用弱生成器，推理时通过频域交接换成强生成器。
+
+### 核心机制
+
+Lumos-Nexus 分两阶段。
+
+**阶段1（训练）**：语言模型处理指令，输出语义 token。
+
+轻量生成器（"训练生成器"）学习接收这些 token 并生成视频。
+
+只训练连接器和这个小生成器——语言模型保持冻结。
+
+这很便宜，因为生成器很小。
+
+**阶段2（推理）**：训练好的连接器把语义 token 喂给轻量生成器，后者在潜空间生成粗糙视频。
+
+然后是关键技巧：统一渐进频率桥接（UPFB）。
+
+潜表示被分解成频段（低、中、高）。
+
+轻量生成器处理低频（粗糙结构）。
+
+预训练的高容量生成器（如 CogVideoX）精炼中高频（精细细节）。
+
+两个生成器共享同一潜空间（VAE），所以它们的输出可以混合。
+
+结果：高保真视频，由阶段1的推理引导，且从未训练过大生成器。
+
+```
+训练：
+  指令 --> [LLM] --> 语义Token --> [连接器] 
+                                      |
+                                      v
+                              [轻量生成器] --> 视频
+                              (只训练这个)
+
+推理：
+  指令 --> [LLM] --> 语义Token --> [连接器]
+                                      |
+                                      v
+                              [轻量生成器] --> 粗糙潜表示
+                                      |
+                                      v
+                                   [UPFB]
+                                   /    \
+                     低频（保留）        中高频（精炼）
+                                              |
+                                              v
+                                    [预训练高容量生成器]
+                                              |
+                                              v
+                                        高保真视频
+```
+
+把它想象成**用铅笔画草图，然后请大师画家填细节**。
+
+训练时，你教学徒（轻量生成器）理解你的指令并勾勒布局。
+
+学徒训练成本低。
+
+推理时，你把草图交给从未参与训练的大师画家（预训练生成器）。
+
+大师把草图精炼成成品画作。
+
+关键：两者在同一画布上工作（共享潜空间），你用频率分解决定谁负责什么——学徒做结构，大师做纹理。
+
+### 关键概念
+
+- **潜空间同质性**：轻量和高容量生成器都用同一个 VAE 编码器/解码器。
+
+这意味着它们的中间表示活在同一数学空间里。
+
+你可以把一个生成器的潜向量拿出来喂给另一个，无需翻译。
+
+就像两个艺术家用同一套调色板——他们可以中途交接画布，因为说同一种视觉语言。
+
+没有这个，你需要单独的翻译步骤，会降低质量。
+
+- **频率分解**：视频潜表示可以通过傅里叶变换拆成频段。
+
+低频编码粗糙结构（物体位置、场景布局）。
+
+高频编码精细细节（纹理、边缘）。
+
+轻量生成器擅长低频（它在训练时学了语义控制）。
+
+预训练生成器擅长高频（它在高分辨率数据上训练过）。
+
+UPFB 渐进交接频段：先用轻量生成器的全部低频，逐渐混入预训练生成器的中高频。
+
+就像调相机焦距——先把场景框进来，再锐化细节。
+
+- **推理驱动生成**：语言模型从指令推断意图（如"猫追激光"隐含运动、因果、物体持久性）。
+
+连接器把这个推断出的意图翻译成语义 token 来引导生成。
+
+这和把提示词当词袋的文生视频模型不同。
+
+这里 LLM 先做推理（应该发生什么、什么顺序），然后生成跟着这个计划走。
+
+VR-Bench 测试这个：它给需要推理的指令（如"展示 X 的后果"），而非字面描述。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+
+  [指令]                            [指令]
+    |                                  |
+    v                                  v
+ [LLM + 生成器]                      [LLM]（冻结）
+ （联合训练）                          |
+    |                                  v
+    v                              [连接器]（训练）
+ [视频输出]                            |
+ （质量受限于                          v
+  训练预算）                      [轻量生成器]（训练）
+                                       |
+                                       v
+                                  [粗糙潜表示]
+                                       |
+                                       v
+                                    [UPFB]
+                                       |
+                                       v
+                              [预训练高容量生成器]
+                                  （从未训练）
+                                       |
+                                       v
+                                  [高保真视频]
+```
+
+从整体联合训练到分阶段解耦，核心转变是**把保真度推迟到推理时**。
+
+## 专家评审
+
+**选题眼光**：真缺口。
+
+统一模型很吃算力，领域一直卡在推理质量（大 LLM、小生成器）和视觉质量（小 LLM、大生成器）之间二选一。
+
+这篇论文问：为什么不能都要？问题处在效率和能力的交叉点，这是领域实用化部署必须去的方向。
+
+**方法成熟度**：频率桥接的想法巧妙，但单独看不算新——多尺度精炼在图像生成里已有。
+
+贡献在于把它应用到视频，用共享潜空间，并证明它保留推理能力。
+
+两阶段设计务实，但不算突破。
+
+一个担忧：方法假设潜空间兼容。
+
+如果预训练生成器的 VAE 和轻量生成器的 VAE 漂移了，交接就会退化。
+
+论文没深入探讨这里的失效模式。
+
+**实验诚意**：VBench 是视频质量的标准测试。
+
+VR-Bench 是新的且必要——现有基准不测推理驱动生成。
+
+基线（VideoPoet、Emu Video）公平。
+
+数字看起来扎实，但论文没彻底消融 UPFB 的频率调度。
+
+如果交接太早或太晚会怎样？另外，预训练生成器（CogVideoX）在扛大梁——增益有多少是"我们用了更好的生成器"，多少是"我们的桥接方法聪明"？和朴素的潜空间替换对比一下能澄清这点。
+
+**写作功力**：方法部分密集。
+
+UPFB 算法埋在符号里，视觉演示会更有帮助。
+
+相关工作低估了这个工作在模块化生成大图景中的位置（如组合扩散、ControlNet 式引导）。
+
+VR-Bench 部分很强——动机清晰，例子好。
+
+如果我重写，会扩展失效案例分析，加一个"什么时候不管用"的小节。
+
+**判决**：**弱接收** — 扎实的工程贡献，带了个有用的基准，但核心想法（延迟精炼）是渐进式而非范式转变。
+
+价值在执行和 VR-Bench 数据集，而非方法论新颖性。
+
+## 要点总结
+
+**把训练成本和推理质量解耦**：如果你的任务有便宜训练的代理和昂贵运行的神谕，在代理上训练，推理时换成神谕。
+
+关键：确保它们共享公共表示空间（这里是 VAE 潜表示）。
+
+这个模式超越视频——想想文本（在小 LM 上训练，推理时用 GPT-4 精炼）或音频（在低分辨率上训练，推理时用高分辨率声码器）。
+
+**频率作为交接协议**：混合两个模型的输出时，频率分解是分工的原则性方法。
+
+低频=结构，高频=细节。
+
+如果一个模型擅长结构，另一个擅长细节，就拆分频谱。
+
+这比朴素混合或顺序精炼更干净。
+
+**测推理，不只是测像素**：VR-Bench 是真正的贡献。
+
+如果你在构建指令跟随系统，测试模型是否推断意图，而非只匹配关键词。
+
+例子："展示接下来发生什么"需要因果推理，而非只是场景延续。
+
+把这个评估设计偷到你的领域去。
+
+:::
