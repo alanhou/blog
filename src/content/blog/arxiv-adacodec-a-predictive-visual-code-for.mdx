@@ -1,0 +1,329 @@
+---
+title:
+  en: "AdaCodec: Predictive Visual Coding for Efficient Video MLLMs"
+  zh: "AdaCodec: 视频多模态大模型的预测式视觉编码"
+description:
+  en: "A predictive visual code that sends full frames only when unpredictable, otherwise transmits compact inter-frame changes, achieving 7x token reduction while improving video MLLM performance."
+  zh: "一种预测式视觉编码方法，仅在场景不可预测时发送完整帧，其余情况传输紧凑的帧间变化，在提升视频多模态大模型性能的同时实现7倍token压缩。"
+date: 2026-06-02
+tags: ["arxiv", "ai", "cs.cv", "cs.ai", "cs.cl"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.02569](https://arxiv.org/abs/2606.02569)
+**Authors**: Haowen Hou, Zhen Huang, Zheming Liang, Qingyi Si, Chenglin Li, Shuai Dong, Kele Shao, Ruilin Li, Dianyi Wang, Nan Duan
+**Categories**: cs.CV, cs.AI, cs.CL
+
+## The Gap
+
+Current video multimodal large language models treat each sampled frame as an independent RGB image, encoding it from scratch regardless of temporal redundancy. This per-frame encoding wastes visual tokens on repeated content—adjacent frames share most objects, background, and layout. The core inefficiency: existing video MLLMs lack a mechanism to distinguish "what's new" from "what's already known" across frames. Qwen3-VL-8B using per-frame RGB encoding requires 224k visual tokens for long videos, causing 9.26s time-to-first-token delays.
+
+```
+Problem: Video temporal redundancy ignored
+    |
+    v
+Observation: Adjacent frames share 80%+ content
+    |
+    v
+Hypothesis: Encode full frames only when unpredictable
+    |           otherwise send compact deltas
+    v
+Method: AdaCodec with I-frames + P-tokens
+    |
+    v
+Evidence: 1/7 tokens, same/better performance
+    |
+    v
+Conclusion: Predictive coding >> per-frame encoding
+```
+
+## The Increment
+
+**One sentence**: Before—every video frame encoded independently as RGB; after—full frames only when unpredictable, compact motion/residual codes otherwise.
+
+### Core Mechanism
+
+AdaCodec operates like video compression but for MLLM visual tokens. It maintains a predictive model that estimates the next frame from prior context. When prediction quality is high (low residual error), AdaCodec sends only P-tokens encoding motion vectors and small residuals—typically 10-20 tokens per frame. When prediction fails (scene cut, new object), it sends a full I-frame with complete visual tokens—around 256 tokens. A gating mechanism decides frame-by-frame: compute conditional predictive cost; if below threshold, emit P-tokens; if above, emit I-frame.
+
+The architecture has three components: (1) a reference frame encoder producing full visual embeddings, (2) a predictive module estimating inter-frame changes via optical flow and residual prediction, (3) a compact P-token encoder translating motion/residuals into ~15 tokens. Data flows as: reference frame → full encoding → prediction for next frame → compute prediction error → if error low, encode delta as P-tokens; if error high, encode next frame fully as new I-frame.
+
+```
+Frame sequence:  F1 -----> F2 -----> F3 -----> F4
+                 |         |         |         |
+Predictive cost: LOW ....> LOW ....> HIGH ...> LOW
+                 |         |         |         |
+Action:          I-frame   P-tokens  I-frame   P-tokens
+                 (256 tok) (15 tok)  (256 tok) (15 tok)
+                    |         |         |         |
+                    v         v         v         v
+                 +-------------------------------------+
+                 |   MLLM Context Window (562 tokens) |
+                 +-------------------------------------+
+```
+
+Think of AdaCodec as a storyteller who knows when you're already following along. For the opening scene, she describes everything—the room, the people, the lighting (I-frame). As the conversation continues and people just shift in their chairs, she says "John leans left, Mary nods" (P-tokens)—you fill in the rest from memory. When someone new walks in, she gives you the full picture again (new I-frame). The predictive model is her theory of your mental state; the gating threshold is her judgment of when your mental image has drifted too far from reality. Motion vectors are "John leans left"—directional updates. Residuals are "but his shirt is now wrinkled"—details the motion doesn't capture. Without this mechanism, she'd describe the entire scene every second, even when nothing changes.
+
+### Key Concepts
+
+- **Conditional predictive cost**: The expected encoding length needed to represent a frame given prior context. Low cost means the frame is highly predictable from what came before—a static camera with small object motion. High cost signals unpredictability—scene cuts, new objects, camera jumps. AdaCodec measures this by computing how well a learned predictor reconstructs the frame from previous embeddings; reconstruction error correlates with encoding cost. Concrete example: in a lecture video where the speaker stands still, frames 2-100 have low predictive cost (only lip movement); when the slide changes at frame 101, cost spikes.
+
+- **P-tokens vs I-frames**: Borrowed from video codecs. An I-frame is a full, independently decodable visual encoding (256 tokens capturing the entire frame). A P-token is a compact delta encoding (15 tokens) describing changes relative to a predicted frame—motion direction and prediction residuals. The MLLM reconstructs the frame by applying P-tokens to its predicted state. Example: if frame N shows a person at position (100,50) and frame N+1 shows them at (105,50), the P-token encodes motion vector (+5,0) rather than re-encoding the entire person.
+
+- **Gating mechanism**: The decision rule determining I-frame vs P-token encoding. AdaCodec computes a predictive error score for each frame; if score > threshold τ, emit I-frame; else emit P-tokens. The threshold τ controls the tradeoff: lower τ means more I-frames (higher quality, more tokens), higher τ means more P-tokens (lower tokens, potential quality loss). Training learns both the predictor and the optimal τ per dataset. Example: on long interview videos, τ is set high (mostly P-tokens); on action movies with frequent cuts, τ is lower (more I-frames).
+
+## Framework Shift
+
+```
+Before (per-frame RGB):              After (AdaCodec):
+
+Frame 1 ---> [Encoder] ---> 256 tok  Frame 1 ---> [Encoder] ---> 256 tok (I)
+                             |                      |
+Frame 2 ---> [Encoder] ---> 256 tok                v
+                             |        Frame 2 ---> [Predictor] ---> error low
+Frame 3 ---> [Encoder] ---> 256 tok                |            |
+                             |                     v            v
+Frame 4 ---> [Encoder] ---> 256 tok             [P-encoder]   15 tok (P)
+                                                    |
+Total: 1024 tokens                   Frame 3 ---> [Predictor] ---> error high
+All frames independent                             |            |
+                                                   v            v
+                                                [Encoder]    256 tok (I)
+
+                                     Total: 527 tokens
+                                     Dependencies exploited
+```
+
+From uniform per-frame encoding to adaptive predictive coding, the core shift is: pay full cost only when the past doesn't buy you anything.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Video temporal redundancy has been exploited in codecs for decades, but video MLLMs ignored it because the dominant paradigm treats vision encoders as black boxes operating per-frame. This paper brings a codec-style interface to the MLLM level—obvious in retrospect, but genuinely underexplored. It sits at the intersection of efficient video understanding and MLLM scaling, both hot areas.
+
+**Method maturity**: The core idea is clean—predict, measure error, gate. The execution is competent but not groundbreaking. The predictive module uses standard optical flow estimation plus a learned residual encoder. The gating threshold is set via grid search per benchmark rather than learned end-to-end, which feels like a missed opportunity. A simpler approach might be fixed I-frame intervals (like H.264 GOP structure), but adaptive gating does outperform fixed patterns in their ablations. No red flags, but also no deep novelty beyond the application context.
+
+**Experimental integrity**: Baselines are fair—they compare against Qwen3-VL-8B with matched total token budgets and also at equal per-frame sampling. The 1/7 token reduction claim holds across 11 benchmarks, with consistent wins on long-video tasks. Numbers look credible: 32k AdaCodec beats 224k baseline on all five long-video benchmarks. Time-to-first-token improvement (9.26s → 1.62s) is measured correctly. One concern: the predictive model adds computational overhead during encoding, but they don't report wall-clock encoding time, only inference latency. Also, all experiments are on Qwen3-VL; generalization to other video MLLMs is claimed but not demonstrated.
+
+**Writing quality**: The paper is readable and well-motivated. The introduction clearly articulates the redundancy problem. The method section is detailed enough to reproduce. However, the related work section conflates video compression with MLLM visual encoding without clarifying why codec techniques haven't been adopted before—was it a technical barrier or just an oversight? The ablation study (Section 4.4) is thorough, showing the impact of gating threshold and P-token length. The weakest section is 4.1 (implementation details)—it buries key architectural choices in a dense paragraph. Rewriting that section with a clear component breakdown and a table of hyperparameters would improve clarity.
+
+**Verdict**: weak accept — Solid engineering contribution with clear practical value, but limited conceptual novelty; the idea is "obvious once stated," and the execution is competent but doesn't push boundaries.
+
+## Takeaways
+
+1. **Adaptive gating for token budgets**: The predictive cost → threshold → encoding decision pattern applies beyond video. Any sequential input with temporal correlation (audio, time-series, multi-turn dialogues) could use a similar mechanism: send full context only when prediction fails, otherwise send deltas. Concrete: for multi-turn chat, encode the first message fully, then encode subsequent messages as "topic shifts" or "continuation tokens."
+
+2. **Metric before mechanism**: AdaCodec defines the predictive cost metric first, then builds the encoding around it. This is transferable: for any sequential task, define a predictability score (e.g., next-token perplexity, embedding distance), then let it drive your compression or caching strategy.
+
+3. **Exposure of codec primitives to MLLMs**: Video codecs hide I-frames and P-frames inside binary streams. AdaCodec exposes them as differentiable tokens the MLLM can attend to. This suggests a broader pattern: MLLMs benefit from explicit representations of temporal structure (keyframes, deltas) rather than treating all frames uniformly. Practitioners working on long-context video could experiment with tagged tokens (e.g., `[KEYFRAME]`, `[DELTA]`) to give the model explicit temporal cues.
+:::
+
+:::zh
+**论文**: [2606.02569](https://arxiv.org/abs/2606.02569)
+**作者**: Haowen Hou, Zhen Huang, Zheming Liang, Qingyi Si, Chenglin Li, Shuai Dong, Kele Shao, Ruilin Li, Dianyi Wang, Nan Duan
+**分类**: cs.CV, cs.AI, cs.CL
+
+## 缺口
+
+现有视频多模态大模型将每个采样帧当作独立的RGB图像编码,无视时序冗余。
+
+这种逐帧编码浪费了大量视觉token在重复内容上——相邻帧共享绝大部分物体、背景和布局。
+
+核心低效之处：现有视频MLLM缺乏机制来区分"新信息"和"已知信息"。
+
+Qwen3-VL-8B使用逐帧RGB编码处理长视频需要224k视觉token,导致9.26秒的首token延迟。
+
+```
+问题:视频时序冗余被忽视
+    |
+    v
+观察:相邻帧共享80%+内容
+    |
+    v
+假设:仅在不可预测时编码完整帧
+    |   其余情况发送紧凑增量
+    v
+方法:AdaCodec with I帧+P-token
+    |
+    v
+证据:1/7的token,性能相当或更好
+    |
+    v
+结论:预测式编码>>逐帧编码
+```
+
+## 增量
+
+**一句话**: 之前每个视频帧独立编码为RGB;之后仅在不可预测时发送完整帧,其余情况发送紧凑的运动/残差编码。
+
+### 核心机制
+
+AdaCodec的运作方式类似视频压缩,但目标是MLLM的视觉token。
+
+它维护一个预测模型,从先前上下文估计下一帧。
+
+当预测质量高(残差误差低)时,AdaCodec只发送P-token编码运动矢量和小幅残差——通常每帧10-20个token。
+
+当预测失败(场景切换、新物体)时,发送完整I帧及其全部视觉token——约256个token。
+
+门控机制逐帧决策：计算条件预测代价;若低于阈值,发出P-token;若高于阈值,发出I帧。
+
+架构包含三个组件：(1)参考帧编码器产生完整视觉嵌入,(2)预测模块通过光流和残差预测估计帧间变化,(3)紧凑P-token编码器将运动/残差转译为约15个token。
+
+数据流为：参考帧→完整编码→预测下一帧→计算预测误差→若误差低,将增量编码为P-token;若误差高,将下一帧完整编码为新I帧。
+
+```
+帧序列:      F1 -----> F2 -----> F3 -----> F4
+             |         |         |         |
+预测代价:    低  ....> 低  ....> 高  ...> 低
+             |         |         |         |
+动作:        I帧      P-token   I帧      P-token
+             (256tok) (15tok)   (256tok) (15tok)
+                |         |         |         |
+                v         v         v         v
+             +-------------------------------------+
+             |   MLLM上下文窗口 (562 tokens)       |
+             +-------------------------------------+
+```
+
+把AdaCodec想象成一个知道你何时在跟上节奏的讲故事者。
+
+开场时,她描述一切——房间、人物、灯光(I帧)。
+
+随着对话继续,人们只是在椅子上挪动,她说"约翰向左倾,玛丽点头"(P-token)——你从记忆中补全其余部分。
+
+当有新人走进来,她再给你完整画面(新I帧)。
+
+预测模型是她对你心理状态的理论;门控阈值是她判断你的心理图像何时偏离现实太远。
+
+运动矢量是"约翰向左倾"——方向性更新。
+
+残差是"但他的衬衫现在皱了"——运动无法捕捉的细节。
+
+没有这个机制,她每秒都会描述整个场景,即使什么都没变。
+
+### 关键概念
+
+- **条件预测代价**: 在给定先前上下文的情况下,表示一帧所需的期望编码长度。
+
+低代价意味着该帧从先前内容高度可预测——静态摄像机下的微小物体运动。
+
+高代价标志不可预测性——场景切换、新物体、摄像机跳跃。
+
+AdaCodec通过计算学习到的预测器从先前嵌入重建帧的效果来测量;重建误差与编码代价相关。
+
+具体例子：在讲座视频中演讲者站立不动,第2-100帧预测代价低(仅唇部运动);第101帧幻灯片切换时代价激增。
+
+- **P-token vs I帧**: 借鉴自视频编解码器。
+
+I帧是完整的、可独立解码的视觉编码(256个token捕获整帧)。
+
+P-token是紧凑的增量编码(15个token)描述相对于预测帧的变化——运动方向和预测残差。
+
+MLLM通过将P-token应用于其预测状态来重建帧。
+
+例子：若第N帧显示人在位置(100,50),第N+1帧显示其在(105,50),P-token编码运动矢量(+5,0)而非重新编码整个人。
+
+- **门控机制**: 决定I帧还是P-token编码的判定规则。
+
+AdaCodec为每帧计算预测误差分数;若分数>阈值τ,发出I帧;否则发出P-token。
+
+阈值τ控制权衡：较低τ意味更多I帧(更高质量,更多token),较高τ意味更多P-token(更少token,潜在质量损失)。
+
+训练同时学习预测器和每个数据集的最优τ。
+
+例子：在长访谈视频上,τ设置较高(多数P-token);在频繁切换的动作电影上,τ较低(更多I帧)。
+
+## 框架转变
+
+```
+之前(逐帧RGB):                      之后(AdaCodec):
+
+帧1 ---> [编码器] ---> 256 tok      帧1 ---> [编码器] ---> 256 tok (I)
+                        |                      |
+帧2 ---> [编码器] ---> 256 tok                v
+                        |           帧2 ---> [预测器] ---> 误差低
+帧3 ---> [编码器] ---> 256 tok                |           |
+                        |                     v           v
+帧4 ---> [编码器] ---> 256 tok              [P编码器]   15 tok (P)
+                                               |
+总计:1024 tokens                   帧3 ---> [预测器] ---> 误差高
+所有帧独立                                     |           |
+                                              v           v
+                                           [编码器]    256 tok (I)
+
+                                    总计:527 tokens
+                                    依赖关系被利用
+```
+
+从统一的逐帧编码到自适应预测编码,核心转变是：仅在过去无法提供信息时才付出完整代价。
+
+## 专家评审
+
+**选题眼光**: 真实缺口。
+
+视频时序冗余在编解码器中已被利用数十年,但视频MLLM忽视了这点,因为主流范式将视觉编码器视为逐帧操作的黑盒。
+
+本文将编解码器风格的接口引入MLLM层——事后看来显而易见,但确实未被充分探索。
+
+它处于高效视频理解和MLLM扩展的交叉点,两者都是热门领域。
+
+**方法成熟度**: 核心思想清晰——预测、测量误差、门控。
+
+执行称职但非突破性。
+
+预测模块使用标准光流估计加学习到的残差编码器。
+
+门控阈值通过每个基准的网格搜索设置,而非端到端学习,感觉错失了机会。
+
+更简单的方法可能是固定I帧间隔(如H.264的GOP结构),但自适应门控在其消融实验中确实优于固定模式。
+
+无明显缺陷,但除应用场景外也无深刻创新。
+
+**实验诚意**: 基线公平——他们与Qwen3-VL-8B在匹配总token预算和等量逐帧采样下进行比较。
+
+1/7 token压缩声明在11个基准上成立,在长视频任务上一致获胜。
+
+数字看起来可信：32k的AdaCodec在所有五个长视频基准上击败224k基线。
+
+首token时间改进(9.26s→1.62s)测量正确。
+
+一个担忧：预测模型在编码期间增加计算开销,但他们未报告编码墙上时钟时间,仅报告推理延迟。
+
+另外,所有实验都在Qwen3-VL上;对其他视频MLLM的泛化被声称但未展示。
+
+**写作功力**: 论文可读性好,动机清晰。
+
+引言清楚阐述了冗余问题。
+
+方法部分足够详细可复现。
+
+然而,相关工作部分混淆了视频压缩与MLLM视觉编码,未澄清为何编解码器技术此前未被采用——是技术障碍还是疏忽?
+消融研究(4.4节)详尽,展示了门控阈值和P-token长度的影响。
+
+最弱部分是4.1(实现细节)——将关键架构选择埋在密集段落中。
+
+用清晰的组件分解和超参数表重写该部分可提高清晰度。
+
+**判决**: 弱接收——扎实的工程贡献具有明确实用价值,但概念创新有限;想法"说出来就显而易见",执行称职但未突破边界。
+
+## 要点总结
+
+1. **token预算的自适应门控**: 预测代价→阈值→编码决策模式超越视频。
+
+任何具有时序相关性的序列输入(音频、时间序列、多轮对话)都可使用类似机制：仅在预测失败时发送完整上下文,否则发送增量。
+
+具体：对多轮聊天,完整编码首条消息,然后将后续消息编码为"主题转移"或"延续token"。
+
+2. **机制前先定义度量**: AdaCodec先定义预测代价度量,再围绕它构建编码。
+
+这可迁移：对任何序列任务,定义可预测性分数(如下一token困惑度、嵌入距离),然后让它驱动你的压缩或缓存策略。
+
+3. **向MLLM暴露编解码器原语**: 视频编解码器将I帧和P帧隐藏在二进制流中。
+
+AdaCodec将它们暴露为MLLM可注意的可微token。
+
+这提示更广泛的模式：MLLM受益于时序结构的显式表示(关键帧、增量)而非一视同仁对待所有帧。
+
+研究长上下文视频的实践者可尝试带标签的token(如`[KEYFRAME]`、`[DELTA]`)来给模型显式的时序线索。
+
+:::

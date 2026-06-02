@@ -1,0 +1,367 @@
+---
+title:
+  en: "SubFit: Breaking the Layer Boundary in LLM Compression"
+  zh: "SubFit：打破大模型压缩的层级边界"
+description:
+  en: "A post-training compression method that removes transformer submodules non-contiguously, achieving better perplexity-accuracy trade-offs than layer-level approaches."
+  zh: "一种训练后压缩方法，非连续地移除 Transformer 子模块，在困惑度-准确率权衡上优于层级方法。"
+date: 2026-06-02
+tags: ["arxiv", "ai", "cs.cl", "cs.ai"]
+image: "/arxiv-visuals/from-layers-to-submodules-rethinking-granularity/HeroScene.png"
+---
+
+![Concept animation](/arxiv-visuals/from-layers-to-submodules-rethinking-granularity/ConceptScene.gif)
+
+
+
+![Hero diagram](/arxiv-visuals/from-layers-to-submodules-rethinking-granularity/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2606.02559](https://arxiv.org/abs/2606.02559)
+**Authors**: Elia Cunegatti, Marcus Vukojevic, Erik Nielsen, Giovanni Iacca
+**Categories**: cs.CL, cs.AI
+
+## The Gap
+
+Existing LLM compression methods like ShortGPT and layer dropping operate at full-layer granularity: they remove entire transformer layers at once. These methods also enforce contiguous selection—if you drop layers, they must be consecutive blocks. This design emerged from pruning heuristics that assumed redundancy clusters in adjacent layers.
+
+But transformers don't work that way. Attention heads and feedforward networks contribute differently to model capacity. Some attention blocks are highly redundant; some FFN blocks are not. Redundancy scatters across depth rather than concentrating in neat contiguous chunks. The layer-level abstraction is convenient for implementation but mismatched to the actual structure of pretrained models.
+
+The result: when you delete a full layer, you throw away both redundant and critical components. When you enforce contiguity, you miss scattered pockets of removable capacity. Current methods leave compression headroom on the table.
+
+```
+Problem: Layer-level compression wastes capacity
+    |
+    v
+Assumption: Redundancy != layer boundaries
+    |
+    v
+Method: Submodule-level selection + fitted residuals
+    |
+    v
+Evidence: 84.6% accuracy vs 81.6% baseline at 25% sparsity
+    |
+    v
+Conclusion: Finer granularity > coarser when redundancy is non-uniform
+```
+
+## The Increment
+
+**One sentence**: Before SubFit, you deleted entire layers contiguously; after SubFit, you delete individual Attention/FFN submodules scattered across depth, each with its own fitted bypass.
+
+### Core Mechanism
+
+SubFit operates in three stages. First, it profiles each submodule (every Attention and FFN block) by measuring how much error its removal causes on calibration data. This produces a ranking: which submodules matter least? Second, it selects the lowest-impact submodules to remove, without requiring them to be adjacent—you might drop Attention in layer 3, FFN in layer 7, Attention in layer 11. Third, for each removed submodule, it fits a lightweight residual bypass: a low-rank transformation that approximates what the deleted submodule would have contributed. This bypass is trained on calibration data only, no gradient updates to the rest of the model.
+
+The fitted residual is crucial. When you delete a submodule, its output disappears from the residual stream. SubFit doesn't just zero that contribution—it learns a cheap approximation (typically rank-8 or rank-16) that partially reconstructs the deleted signal. Think of it as a patch: the main road is gone, but you build a dirt path that gets you 70% of the way there.
+
+Data flows like this: input → surviving submodules compute normally → at each deleted position, the fitted residual injects its approximation → output. The residuals are parameter-efficient (add ~0.1% params) and trained independently, so you can search over sparsity levels without retraining the whole model.
+
+```
+Standard layer deletion:
+   Layer N-1 --> [DELETE LAYER N] --> Layer N+1
+                        |
+                        v
+                   (information lost)
+
+SubFit submodule replacement:
+   Layer N-1 --> [Attn] --> [FFN_deleted] --> Layer N+1
+                              |
+                              v
+                     [Fitted Residual: Wx + b]
+                              |
+                              v
+                     (partial signal recovered)
+```
+
+Think of SubFit like renovating a building. Layer-level methods demolish entire floors at once—you lose everything on that floor, even the load-bearing walls you need. SubFit is selective demolition: you remove individual rooms (submodules) based on structural surveys, and for each removed room, you install a temporary support beam (fitted residual) so the building doesn't collapse. The support beams aren't as good as the original structure, but they're vastly cheaper and keep the building functional. Because you're not constrained to removing consecutive floors, you can gut the 3rd, 7th, and 11th floors while leaving critical infrastructure on the 5th and 9th intact.
+
+### Key Concepts
+
+- **Submodule-level granularity**: Transformer layers contain two sequential submodules—Attention and FFN. Prior work treats the pair as atomic: you delete both or neither. SubFit breaks this coupling. It evaluates each submodule independently and allows removing Attention from one layer while keeping its FFN, or vice versa. This matters because Attention and FFN have different redundancy profiles. In many models, middle-layer FFNs are highly compressible while their corresponding Attention blocks are not. Layer-level methods can't exploit this asymmetry; submodule-level can. Concretely: at 25% sparsity, SubFit might remove 12 Attention blocks and 8 FFN blocks spread across 15 layers, rather than deleting 5 entire layers.
+
+- **Fitted residual bypass**: When you remove a submodule, you create a gap in the residual stream. The naive approach zeros out that contribution. SubFit instead trains a low-rank linear layer (W ∈ R^(d×r), r << d) to approximate the deleted submodule's output on calibration data. This is **not* knowledge distillation—you're not matching the full model's final output, you're locally patching the intermediate activation at one deletion point. Training is cheap (a few minutes on a single GPU) because you freeze everything except the bypass parameters. The rank (typically 8-16) controls the fidelity-efficiency trade-off: higher rank = better approximation but more parameters. The key insight: even a rank-8 approximation recovers far more signal than zero, and the parameter overhead is negligible (~0.1% of total).
+
+- **Non-contiguous selection**: Layer-dropping methods (ShortGPT, etc.) assume you remove a contiguous block of layers—say, layers 8-12. This is implementationally simple but empirically suboptimal, because redundancy in pretrained transformers doesn't cluster neatly. Some early layers are redundant, some late layers are redundant, but the middle might be critical. SubFit decouples selection from contiguity: it ranks all submodules by importance, then selects the bottom K regardless of position. You might remove submodules from layers \{2, 4, 7, 9, 13, 18\}. This requires architectural changes (you can't just slice the layer list), but the payoff is substantial: at 25% sparsity, non-contiguous selection recovers 3% more downstream accuracy than contiguous.
+
+## Framework Shift
+
+```
+Before (layer-level):                After (SubFit):
+  Layer 1: [Attn]->[FFN]              Layer 1: [Attn]->[FFN]
+  Layer 2: [Attn]->[FFN]              Layer 2: [DEL]-->[FFN]---[residual]
+  Layer 3: [DELETE ENTIRE LAYER]      Layer 3: [Attn]--[DEL]---[residual]
+  Layer 4: [DELETE ENTIRE LAYER]      Layer 4: [Attn]->[FFN]
+  Layer 5: [Attn]->[FFN]              Layer 5: [DEL]-->[FFN]---[residual]
+           ^                                   ^
+           |                                   |
+    Remove contiguous blocks          Remove scattered submodules
+    Binary layer decisions            Independent Attn/FFN decisions
+    No approximation                  Fitted residuals patch gaps
+```
+
+From monolithic layer deletion to granular submodule surgery, the core shift is treating transformers as collections of independently evaluable components rather than vertically stacked atomic units.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Layer-level compression is a legacy of early pruning heuristics, not a principled constraint. The observation that Attention and FFN have different redundancy profiles is empirically solid and theoretically unsurprising—they perform distinct computations. The non-contiguity constraint is pure engineering convenience, not motivated by model behavior. Breaking both constraints simultaneously is overdue.
+
+**Method maturity**: Solid engineering, not deep insight. The core idea—finer granularity + fitted residuals—is straightforward once you question the layer abstraction. The execution is competent: importance scoring via calibration loss, low-rank bypass training, non-contiguous search. But there's no fundamental innovation here, just removing artificial restrictions. The baselines (ShortGPT, layer dropping) are conceptually weaker, so the gains are somewhat expected. A stronger baseline would be width pruning (removing attention heads or FFN neurons), which also operates below layer granularity—this comparison is absent.
+
+**Experimental integrity**: Baselines are fair within the replacement-based family. Ten models, five sparsity levels, standard benchmarks (perplexity + downstream tasks). The results are consistent: SubFit wins across settings, with larger gaps under aggressive compression (30-37.5% sparsity). The KV-cache savings and speedup measurements are welcome but underdeveloped—only one sparsity level reported, no breakdown by hardware or batch size. The ablation studies (contiguous vs non-contiguous, Attn-only vs FFN-only removal) are well-designed and support the claims. One red flag: no comparison to quantization or hybrid methods (sparsity + quantization), which are the practical competitors. The "replacement-based" framing narrows the scope conveniently.
+
+**Writing quality**: Clear structure, good motivation. The redundancy analysis in Section 3 (showing Attn/FFN contribute differently) is the paper's strongest section—this is where the problem crystallizes. The method section is straightforward but slightly repetitive. The related work undersells width pruning (N:M sparsity, head pruning) as competing approaches. The experimental section is thorough but could trim the model-by-model result tables in favor of aggregate analysis. The conclusion oversells the contribution ("rethinking granularity") when the core move is incremental refinement. Rewriting the related work to position SubFit as "structured pruning at submodule granularity" would clarify the contribution.
+
+**Verdict**: weak accept — Solid incremental contribution with consistent experimental validation, but the conceptual advance is modest and the baseline comparisons are incomplete.
+
+## Takeaways
+
+**For practitioners**: If you're compressing LLMs post-training and care about perplexity, SubFit's two ideas transfer immediately: (1) Profile Attention and FFN blocks separately—they have different importance distributions, so uniform layer deletion is wasteful. (2) When removing components, always train a cheap approximation (low-rank residual, distilled layer, quantized version) rather than zeroing out. The gap between "deleted" and "deleted + patched" is large (3-5% accuracy in this paper), and the patch is nearly free.
+
+**For researchers**: The real lesson is methodological: when inheriting design constraints from prior work (layer granularity, contiguity), check whether they're principled or incidental. In pruning/compression, many constraints are artifacts of early implementation choices rather than fundamental requirements. The experimental protocol here—ablating one constraint at a time (contiguity vs granularity)—is the right way to disentangle contributions. Steal that structure for your own ablations.
+
+**For architecture designers**: The Attention/FFN asymmetry is a hint that these modules should be easier to swap independently at the architectural level. Future designs might formalize submodule interfaces (standardized input/output dims, clean residual connections) to make post-training surgery less brittle. SubFit hacks around this with fitted residuals, but native support for modular replacement would be cleaner.
+:::
+
+:::zh
+**论文**: [2606.02559](https://arxiv.org/abs/2606.02559)
+**作者**: Elia Cunegatti, Marcus Vukojevic, Erik Nielsen, Giovanni Iacca
+**分类**: cs.CL, cs.AI
+
+## 缺口
+
+现有的大模型压缩方法（如 ShortGPT 和层删除）都在整层粒度上操作：它们一次性移除整个 Transformer 层。
+
+这些方法还强制连续选择——如果删层，必须是连续的块。
+
+这种设计源自早期的剪枝启发式，假设冗余聚集在相邻层。
+
+但 Transformer 不是这样工作的。
+
+注意力头和前馈网络对模型容量的贡献不同。
+
+有些注意力块高度冗余，有些 FFN 块则不然。
+
+冗余在深度上分散，而非集中在整齐的连续块中。
+
+层级抽象便于实现，但与预训练模型的实际结构不匹配。
+
+结果：删除整层时，你同时扔掉了冗余和关键组件。
+
+强制连续性时，你错过了分散的可移除容量点。
+
+当前方法留下了压缩空间。
+
+```
+问题：层级压缩浪费容量
+    |
+    v
+假设：冗余 != 层边界
+    |
+    v
+方法：子模块级选择 + 拟合残差
+    |
+    v
+证据：25% 稀疏度下 84.6% 准确率 vs 基线 81.6%
+    |
+    v
+结论：冗余非均匀时，细粒度 > 粗粒度
+```
+
+## 增量
+
+**一句话**：SubFit 之前，你连续删除整层；SubFit 之后，你删除分散在深度上的独立注意力/FFN 子模块，每个都有自己的拟合旁路。
+
+### 核心机制
+
+SubFit 分三个阶段操作。
+
+首先，它剖析每个子模块（每个注意力和 FFN 块），通过在校准数据上测量移除它造成的误差来评估。
+
+这产生一个排名：哪些子模块最不重要？
+
+其次，它选择影响最小的子模块移除，不要求它们相邻——你可能删除第 3 层的注意力、第 7 层的 FFN、第 11 层的注意力。
+
+第三，对每个被移除的子模块，它拟合一个轻量级残差旁路：一个低秩变换，近似被删除子模块本该贡献的内容。
+
+这个旁路只在校准数据上训练，不对模型其他部分做梯度更新。
+
+拟合残差至关重要。
+
+删除子模块时，其输出从残差流中消失。
+
+SubFit 不是简单地将该贡献置零——它学习一个廉价的近似（通常秩为 8 或 16），部分重建被删除的信号。
+
+把它想象成补丁：主路没了，但你修了条土路，能走 70% 的路程。
+
+数据这样流动：输入 → 幸存的子模块正常计算 → 在每个删除位置，拟合残差注入其近似 → 输出。
+
+残差是参数高效的（增加约 0.1% 参数），独立训练，所以你可以搜索不同稀疏度而无需重新训练整个模型。
+
+```
+标准层删除：
+   第 N-1 层 --> [删除第 N 层] --> 第 N+1 层
+                        |
+                        v
+                   (信息丢失)
+
+SubFit 子模块替换：
+   第 N-1 层 --> [Attn] --> [FFN_已删] --> 第 N+1 层
+                              |
+                              v
+                     [拟合残差: Wx + b]
+                              |
+                              v
+                     (部分信号恢复)
+```
+
+把 SubFit 想象成翻修建筑。
+
+层级方法一次拆除整层——你失去那层的一切，甚至你需要的承重墙。
+
+SubFit 是选择性拆除：你根据结构勘测移除单个房间（子模块），对每个移除的房间，你安装临时支撑梁（拟合残差），这样建筑不会倒塌。
+
+支撑梁不如原结构好，但便宜得多，还能保持建筑功能。
+
+因为你不受限于移除连续的楼层，你可以拆除第 3、7、11 层，同时保留第 5、9 层的关键基础设施。
+
+### 关键概念
+
+- **子模块级粒度**：Transformer 层包含两个顺序子模块——注意力和 FFN。
+
+先前工作将这对当作原子：要么都删，要么都留。
+
+SubFit 打破这种耦合。
+
+它独立评估每个子模块，允许移除一层的注意力同时保留其 FFN，反之亦然。
+
+这很重要，因为注意力和 FFN 有不同的冗余特征。
+
+在许多模型中，中间层的 FFN 高度可压缩，而对应的注意力块则不然。
+
+层级方法无法利用这种不对称性；子模块级可以。
+
+具体来说：在 25% 稀疏度下，SubFit 可能移除分布在 15 层的 12 个注意力块和 8 个 FFN 块，而不是删除 5 个完整的层。
+
+- **拟合残差旁路**：移除子模块时，你在残差流中创建了一个缺口。
+
+朴素方法是将该贡献置零。
+
+SubFit 改为训练一个低秩线性层（W ∈ R^(d×r)，r << d）来在校准数据上近似被删除子模块的输出。
+
+这*不是*知识蒸馏——你不是匹配完整模型的最终输出，你是局部修补一个删除点的中间激活。
+
+训练很便宜（单 GPU 几分钟），因为你冻结除旁路参数外的一切。
+
+秩（通常 8-16）控制保真度-效率权衡：更高的秩 = 更好的近似但更多参数。
+
+关键洞见：即使秩为 8 的近似也比零恢复更多信号，参数开销可忽略（总量的约 0.1%）。
+
+- **非连续选择**：层删除方法（ShortGPT 等）假设你移除连续的层块——比如第 8-12 层。
+
+这在实现上简单，但在经验上次优，因为预训练 Transformer 的冗余不会整齐地聚集。
+
+一些早期层是冗余的，一些后期层是冗余的，但中间可能是关键的。
+
+SubFit 将选择与连续性解耦：它按重要性排列所有子模块，然后选择最底部的 K 个，不管位置。
+
+你可能从 \{2, 4, 7, 9, 13, 18\} 层移除子模块。
+
+这需要架构改动（你不能只是切片层列表），但回报可观：在 25% 稀疏度下，非连续选择比连续多恢复 3% 下游准确率。
+
+## 框架转变
+
+```
+之前（层级）：                      之后（SubFit）：
+  第 1 层：[Attn]->[FFN]              第 1 层：[Attn]->[FFN]
+  第 2 层：[Attn]->[FFN]              第 2 层：[删]-->[FFN]---[残差]
+  第 3 层：[删除整层]                 第 3 层：[Attn]--[删]---[残差]
+  第 4 层：[删除整层]                 第 4 层：[Attn]->[FFN]
+  第 5 层：[Attn]->[FFN]              第 5 层：[删]-->[FFN]---[残差]
+           ^                                   ^
+           |                                   |
+    移除连续块                        移除分散子模块
+    二元层决策                        独立 Attn/FFN 决策
+    无近似                            拟合残差修补缺口
+```
+
+从整体层删除到细粒度子模块手术，核心转变是将 Transformer 视为可独立评估的组件集合，而非垂直堆叠的原子单元。
+
+## 专家评审
+
+**选题眼光**：真缺口。
+
+层级压缩是早期剪枝启发式的遗产，不是有原则的约束。
+
+注意力和 FFN 有不同冗余特征的观察在经验上扎实，理论上不意外——它们执行不同的计算。
+
+非连续性约束纯粹是工程便利，不是由模型行为驱动的。
+
+同时打破这两个约束早该做了。
+
+**方法成熟度**：扎实的工程，不是深刻的洞见。
+
+核心想法——更细的粒度 + 拟合残差——一旦你质疑层抽象就很直接。
+
+执行是称职的：通过校准损失打分重要性、低秩旁路训练、非连续搜索。
+
+但这里没有根本性创新，只是移除人为限制。
+
+基线（ShortGPT、层删除）在概念上更弱，所以增益在某种程度上是预期的。
+
+更强的基线应该是宽度剪枝（移除注意力头或 FFN 神经元），它也在层粒度以下操作——这个比较缺失。
+
+**实验诚意**：在替换方法家族内基线公平。
+
+十个模型，五个稀疏度级别，标准基准（困惑度 + 下游任务）。
+
+结果一致：SubFit 在所有设置下获胜，在激进压缩（30-37.5% 稀疏度）下差距更大。
+
+KV 缓存节省和加速测量值得欢迎但欠发达——只报告了一个稀疏度级别，没有按硬件或批大小分解。
+
+消融研究（连续 vs 非连续、仅 Attn vs 仅 FFN 移除）设计良好，支持声明。
+
+一个警示：没有与量化或混合方法（稀疏性 + 量化）的比较，而它们是实际竞争者。
+
+"基于替换"的框定方便地缩小了范围。
+
+**写作功力**：结构清晰，动机良好。
+
+第 3 节的冗余分析（显示 Attn/FFN 贡献不同）是论文最强的部分——这是问题具象化的地方。
+
+方法部分直接但略显重复。
+
+相关工作低估了宽度剪枝（N：M 稀疏性、头剪枝）作为竞争方法。
+
+实验部分彻底，但可以修剪逐模型结果表格，转而做聚合分析。
+
+结论过度推销贡献（"重新思考粒度"），而核心动作是增量改进。
+
+重写相关工作，将 SubFit 定位为"子模块粒度的结构化剪枝"会澄清贡献。
+
+**判决**：弱接收——扎实的增量贡献，实验验证一致，但概念进步适度，基线比较不完整。
+
+## 要点总结
+
+**对实践者**：如果你在训练后压缩大模型且关心困惑度，SubFit 的两个想法可直接迁移：(1) 分别剖析注意力和 FFN 块——它们有不同的重要性分布，所以均匀层删除是浪费的。
+
+(2) 移除组件时，总是训练一个廉价近似（低秩残差、蒸馏层、量化版本）而非置零。
+
+"删除"和"删除 + 修补"之间的差距很大（本文中 3-5% 准确率），而补丁几乎免费。
+
+**对研究者**：真正的教训是方法论上的：从先前工作继承设计约束（层粒度、连续性）时，检查它们是有原则的还是偶然的。
+
+在剪枝/压缩中，许多约束是早期实现选择的产物，而非根本要求。
+
+这里的实验协议——一次消融一个约束（连续性 vs 粒度）——是解开贡献的正确方式。
+
+为你自己的消融研究偷这个结构。
+
+**对架构设计者**：注意力/FFN 不对称性暗示这些模块应该在架构层面更容易独立交换。
+
+未来设计可能形式化子模块接口（标准化输入/输出维度、干净的残差连接），使训练后手术不那么脆弱。
+
+SubFit 用拟合残差绕过这个问题，但原生支持模块化替换会更干净。
+:::
