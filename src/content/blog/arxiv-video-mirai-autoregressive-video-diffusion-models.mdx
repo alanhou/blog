@@ -1,0 +1,410 @@
+---
+title:
+  en: "Video-Mirai: Teaching Causal Video Models to Think Ahead"
+  zh: "Video-Mirai: 让因果视频模型学会前瞻"
+description:
+  en: "Autoregressive video diffusion models generate frame-by-frame, but standard training only optimizes for the present frame. Video-Mirai adds future supervision to causal representations without changing inference, improving long-term consistency."
+  zh: "自回归视频扩散模型逐帧生成，但标准训练只优化当前帧。Video-Mirai 在不改变推理的情况下为因果表示添加未来监督，提升长期一致性。"
+date: 2025-06-03
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-video-mirai-autoregressive-video-diffusion-models.png"
+---
+
+![Concept animation](/arxiv-visuals/video-mirai-autoregressive-video-diffusion-models/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2606.03971](https://arxiv.org/abs/2606.03971)
+**Authors**: Yonghao Yu, Lang Huang, Runyi Li, Zerun Wang, Toshihiko Yamasaki
+**Categories**: cs.CV
+
+## The Gap
+
+Autoregressive video generation models (like Causal-Forcing and streaming diffusion) predict each segment from past segments only. They maintain a causal state that evolves as new frames arrive. The problem: standard training asks each state to explain only the current segment, not what comes after. A state that perfectly reconstructs frame N might discard information needed for frame N+10 — object identity, motion trajectories, background layout. This is the **representation-level planning gap**. Prior work closed the generation-level planning gap (make outputs consistent) but left representations myopic.
+
+```
+Problem: Causal training horizon mismatch
+   Standard training          Inference reality
+   
+   State_t -> Frame_t         State_t -> Frame_t
+      |                          |
+      v                          v
+   Optimize fit to t         Must support t+1...t+k
+   
+   Loss sees: present only    Model commits: affects future
+   
+Gap: State_t discards info needed for State_{t+k}
+     because loss never asked for it
+
+Method: Add future supervision to states
+   During training:
+   1. Roll out full video causally
+   2. Encode full video non-causally (frozen encoder)
+   3. Distill non-causal features into causal states
+   4. States now contain future-relevant info
+   
+Evidence: 30-sec consistency +3.6 points (subject)
+          +1.7 points (background)
+          
+Conclusion: Representation supervision should see
+            beyond causal generation horizon
+```
+
+## The Increment
+
+**One sentence**: Before Video-Mirai, causal video generators learned representations that fit the present frame; after, they learn representations that support future frames, without changing inference.
+
+### Core Mechanism
+
+Video-Mirai operates in training only. The generator rolls out a video segment-by-segment, causally. After the full rollout completes, a frozen non-causal encoder (a pre-trained vision model) reads the entire generated video and produces rich features that "see" the whole timeline. A lightweight predictor then tries to reproduce these non-causal features from the generator's causal hidden states. The predictor's output is stopped-gradient — it never backprops into the encoder, only into the generator states. This distillation loss runs alongside the standard diffusion loss.
+
+At inference, the encoder and predictor are discarded. The generator runs exactly as before: same architecture, same per-step cost, same KV-cache. The only difference is that its internal states now encode information relevant to future frames, because training forced them to match features computed from the future.
+
+```
+Training loop:
+
+[Past frames] -> Generator (causal)   Standard diffusion loss
+                     |                       |
+                     v                       v
+               Hidden state_t       Predict current frame
+                     |
+                     +---> Predictor -> Predicted features_t
+                                              |
+                                              v
+                                        Match target_t?
+                                              ^
+                                              |
+[Full video] -> Frozen Encoder (non-causal) -+
+                (stopped gradient)
+                
+Target sees future, state is causal -> bridge the gap
+```
+
+Think of it like teaching someone to drive by recording their practice runs. Standard training gives feedback only on steering quality *right now*. Video-Mirai's approach: after they finish the course, an expert watches the dashcam footage and says "at this moment, you should have been tracking that pedestrian and anticipating the turn" — even though the driver could only see the present. The driver's internal checklist (hidden state) gets updated to include "watch for pedestrians" and "prepare for turns," not just "stay in lane." When they drive again (inference), no expert is needed — the checklist now naturally covers future-relevant concerns.
+
+### Key Concepts
+
+- **Causal vs. Non-Causal Encoding**: A causal model processes time-sequentially, frame N's representation can only depend on frames 1...N. A non-causal encoder reads the full video at once — frame N's representation can depend on frames 1...N...T. Non-causal encoders extract richer, global features (object identities that persist across cuts, motion arcs that span seconds), but cannot be used at inference time for autoregressive generation. Video-Mirai uses non-causal features as **teaching targets* for causal states, transferring future-awareness without requiring future input at test time.
+
+- **Representation-Level vs. Generation-Level Planning**: Generation-level planning means making outputs consistent (frame N+1 doesn't contradict frame N). Representation-level planning means the internal state holds information that supports consistent generation steps ahead. You can have perfect generation at step N with a state that cannot support step N+5. Video-Mirai targets the representation level: ensuring the hidden state at time t contains cues needed for times t+k, even if the generator hasn't emitted those frames yet.
+
+- **Distillation with Stopped Gradients**: The frozen encoder provides targets, the predictor bridges causal states to those targets, and gradients flow back only to the generator states (not the encoder). This is knowledge distillation: the student (causal state) learns to mimic the teacher (non-causal feature), but the teacher stays fixed. Stopped gradients prevent the encoder from "dumbing down" to make the student's job easier. The causal state must stretch to match the richer target.
+
+## Framework Shift
+
+```
+Before (Standard Causal Training):
+
+  t-1    t    t+1
+   |     |     |
+   v     v     v
+[Gen]->[Gen]->[Gen]  (causal rollout)
+   |     |     |
+   v     v     v
+[Loss][Loss][Loss]   (each sees only current frame)
+   
+State_t optimized for: fit frame t
+State_t does NOT know: what info frame t+5 needs
+
+
+After (Video-Mirai):
+
+  t-1    t    t+1
+   |     |     |
+   v     v     v
+[Gen]->[Gen]->[Gen]  (causal rollout)
+   |     |     |     
+   v     v     v     
+[Loss][Loss][Loss]   (standard frame loss)
+   +     +     +
+   |     |     |
+   v     v     v
+[Pred][Pred][Pred]   (predict non-causal features)
+   ^     ^     ^
+   |     |     |
+   +-----+-----+---- [Frozen Encoder] <- full video
+   
+State_t optimized for: fit frame t AND match features
+                       that "saw" frames t...T
+State_t now knows: identity, motion, layout for future
+```
+
+[One sentence: From optimizing states to explain the present, to optimizing states to match a non-causal observer's understanding of the full sequence.]
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Autoregressive models have long suffered from drift and inconsistency over long rollouts. Prior fixes (Causal-Forcing, trajectory smoothing) addressed symptoms at the generation level. Identifying the representation bottleneck and attacking it directly is a natural next step. The gap is not manufactured — it's a known pain point in streaming generation.
+
+**Method maturity**: The core insight (use non-causal supervision for causal representations) is elegant and has precedent in video prediction literature. The execution is clean: frozen encoder, stopped gradients, lightweight predictor. However, the design space feels underexplored. Why this specific encoder? Why stop gradients on the encoder but not the predictor? Would a contrastive loss work better than L2 distillation? The ablations answer "does it help?" but not "is this the right way to do it?" The method is mature enough to work, but lacks the comparative exploration that would establish it as the definitive approach.
+
+**Experimental integrity**: Baselines are fair (strong Causal-Forcing model). The 30-second rollout evaluation is commendable — most papers stop at training-length. VBench metrics are standard. But: no user study, no qualitative failure analysis, no comparison to non-causal generators (which would set an upper bound). The consistency improvements are solid but modest (84.9 → 88.5 on subject). The paper claims "foresight" but doesn't probe whether the model actually predicts specific future events or just encodes more robust features. A deeper analysis of what information the states gain would strengthen the claims.
+
+**Writing quality**: The abstract and intro are crisp. The method section is clear but dry — ASCII diagrams and intuitive explanations would help. The results section lists numbers without narrative. The most valuable contribution (representation-level planning gap) is buried in the intro rather than given a standalone section. Rewriting the method section to lead with the conceptual shift (representation horizon vs. generation horizon) and deferring architecture details to an appendix would elevate the paper.
+
+**Verdict**: **weak accept** — Solid idea, clean execution, meaningful results, but lacks depth in exploration and analysis. The gap is real, the method works, but the paper doesn't go far enough to establish this as the standard approach. Worth publishing as a stepping stone; needs follow-ups to mature.
+
+## Takeaways
+
+- **Representation horizon ≠ generation horizon**: Even in causal models, you can supervise representations with non-causal targets during training, then discard those targets at inference. This trick applies beyond video — audio streaming, incremental parsing, online decision-making.
+
+- **Frozen teacher pattern**: When distilling richer features into constrained states, freeze the teacher and force the student to stretch. If both adapt, the student doesn't improve — the teacher meets it halfway. Stopped gradients enforce one-way knowledge transfer.
+
+- **Test beyond training horizon**: The 30-second evaluation (beyond 5-second training clips) is a simple but underused diagnostic. If your model's consistency degrades sharply past the training horizon, the representations are myopic. This applies to any autoregressive model — language, time-series, trajectories.
+
+- **Deferred inference cost**: The paper adds supervision at training time and discards it at inference. This is a free lunch if training budget allows. Look for similar opportunities: expensive oracles, multi-scale aggregation, non-causal context — all can inform training without slowing inference.
+:::
+
+:::zh
+**论文**: [2606.03971](https://arxiv.org/abs/2606.03971)
+**作者**: Yonghao Yu, Lang Huang, Runyi Li, Zerun Wang, Toshihiko Yamasaki
+**分类**: cs.CV
+
+## 缺口
+
+自回归视频生成模型（如 Causal-Forcing 和流式扩散）仅从过去片段预测每个片段。
+
+它们维护一个随新帧到来而演化的因果状态。
+
+问题在于：标准训练只要求每个状态解释当前片段，而不关心之后的内容。
+
+一个能完美重建第 N 帧的状态可能会丢弃第 N+10 帧所需的信息——物体身份、运动轨迹、背景布局。
+
+这就是**表示层面的规划缺口**。
+
+先前工作解决了生成层面的规划缺口（让输出保持一致），但表示层面仍然短视。
+
+```
+问题：因果训练视野不匹配
+   标准训练              推理现实
+   
+   状态_t -> 帧_t        状态_t -> 帧_t
+      |                     |
+      v                     v
+   优化拟合 t             必须支持 t+1...t+k
+   
+   损失只看：当前         模型承诺：影响未来
+   
+缺口：状态_t 丢弃了 状态_{t+k} 需要的信息
+     因为损失从未要求过
+
+方法：为状态添加未来监督
+   训练时：
+   1. 因果地展开完整视频
+   2. 非因果地编码完整视频（冻结编码器）
+   3. 将非因果特征蒸馏到因果状态
+   4. 状态现在包含未来相关信息
+   
+证据：30秒一致性 +3.6 分（主体）
+      +1.7 分（背景）
+          
+结论：表示监督应该看到
+      因果生成视野之外
+```
+
+## 增量
+
+**一句话**: Video-Mirai 之前，因果视频生成器学习拟合当前帧的表示；
+
+之后，它们学习支持未来帧的表示，且不改变推理。
+
+### 核心机制
+
+Video-Mirai 只在训练时运作。
+
+生成器逐片段因果地展开视频。
+
+完整展开后，一个冻结的非因果编码器（预训练视觉模型）读取整个生成视频，产生"看到"完整时间线的丰富特征。
+
+然后，一个轻量级预测器尝试从生成器的因果隐藏状态中复现这些非因果特征。
+
+预测器的输出带停止梯度——它从不回传到编码器，只回传到生成器状态。
+
+这个蒸馏损失与标准扩散损失并行运行。
+
+推理时，编码器和预测器被丢弃。
+
+生成器完全按原样运行：相同架构、相同单步成本、相同 KV 缓存。
+
+唯一的区别是其内部状态现在编码了与未来帧相关的信息，因为训练强制它们匹配从未来计算的特征。
+
+```
+训练循环：
+
+[过去帧] -> 生成器（因果）    标准扩散损失
+                |                  |
+                v                  v
+            隐藏状态_t       预测当前帧
+                |
+                +---> 预测器 -> 预测特征_t
+                                     |
+                                     v
+                               匹配目标_t?
+                                     ^
+                                     |
+[完整视频] -> 冻结编码器（非因果）---+
+               （停止梯度）
+                
+目标看到未来，状态是因果的 -> 弥合差距
+```
+
+把它想象成通过录制练习来教人开车。
+
+标准训练只给出*当下*转向质量的反馈。
+
+Video-Mirai 的方法：在他们完成整个路线后，专家看行车记录仪录像说"在这一刻，你应该盯着那个行人并预判转弯"——即使司机当时只能看到眼前。
+
+司机的内部检查清单（隐藏状态）更新为包含"注意行人"和"准备转弯"，而不只是"保持车道"。
+
+当他们再次驾驶（推理）时，不需要专家——检查清单现在自然地涵盖了与未来相关的关注点。
+
+### 关键概念
+
+- **因果 vs. 非因果编码**: 因果模型按时间顺序处理，第 N 帧的表示只能依赖帧 1...N。
+
+非因果编码器一次性读取完整视频——第 N 帧的表示可以依赖帧 1...N...T。
+
+非因果编码器提取更丰富的全局特征（跨越剪辑持续的物体身份、跨越数秒的运动弧线），但无法在自回归生成的推理时使用。
+
+Video-Mirai 将非因果特征用作因果状态的*教学目标*，在不需要测试时未来输入的情况下传递未来意识。
+
+- **表示层面 vs. 生成层面规划**: 生成层面规划意味着让输出保持一致（第 N+1 帧不与第 N 帧矛盾）。
+
+表示层面规划意味着内部状态持有支持未来几步一致生成的信息。
+
+你可以在步骤 N 有完美的生成，但状态无法支持步骤 N+5。
+
+Video-Mirai 针对表示层面：确保时刻 t 的隐藏状态包含时刻 t+k 所需的线索，即使生成器尚未发出那些帧。
+
+- **带停止梯度的蒸馏**: 冻结编码器提供目标，预测器将因果状态桥接到这些目标，梯度只回流到生成器状态（而非编码器）。
+
+这是知识蒸馏：学生（因果状态）学习模仿老师（非因果特征），但老师保持固定。
+
+停止梯度防止编码器"降低难度"来让学生的工作更容易。
+
+因果状态必须伸展以匹配更丰富的目标。
+
+## 框架转变
+
+```
+之前（标准因果训练）：
+
+  t-1    t    t+1
+   |     |     |
+   v     v     v
+[生成]->[生成]->[生成]  (因果展开)
+   |     |     |
+   v     v     v
+[损失][损失][损失]   (每个只看当前帧)
+   
+状态_t 优化目标：拟合帧 t
+状态_t 不知道：帧 t+5 需要什么信息
+
+
+之后（Video-Mirai）：
+
+  t-1    t    t+1
+   |     |     |
+   v     v     v
+[生成]->[生成]->[生成]  (因果展开)
+   |     |     |     
+   v     v     v     
+[损失][损失][损失]   (标准帧损失)
+   +     +     +
+   |     |     |
+   v     v     v
+[预测][预测][预测]   (预测非因果特征)
+   ^     ^     ^
+   |     |     |
+   +-----+-----+---- [冻结编码器] <- 完整视频
+   
+状态_t 优化目标：拟合帧 t 且匹配"看到"
+                 帧 t...T 的特征
+状态_t 现在知道：未来的身份、运动、布局
+```
+
+[一句话：从优化状态以解释当前，到优化状态以匹配非因果观察者对完整序列的理解。
+
+]
+
+## 专家评审
+
+**选题眼光**: 真实缺口。
+
+自回归模型长期受长展开中的漂移和不一致困扰。
+
+先前的修复（Causal-Forcing、轨迹平滑）在生成层面处理症状。
+
+识别表示瓶颈并直接攻击它是自然的下一步。
+
+缺口不是人造的——这是流式生成中的已知痛点。
+
+**方法成熟度**: 核心洞察（对因果表示使用非因果监督）优雅，且在视频预测文献中有先例。
+
+执行干净：冻结编码器、停止梯度、轻量级预测器。
+
+然而，设计空间感觉探索不足。
+
+为什么是这个特定编码器？为什么在编码器上停止梯度而不是预测器？对比损失会比 L2 蒸馏更好吗？消融回答了"有用吗？
+
+"但没回答"这是正确方式吗？
+
+"方法足够成熟可以工作，但缺乏建立它为最终方法的比较探索。
+
+**实验诚意**: 基线公平（强 Causal-Forcing 模型）。
+
+30 秒展开评估值得称赞——大多数论文止步于训练长度。
+
+VBench 指标是标准的。
+
+但：没有用户研究，没有定性失败分析，没有与非因果生成器比较（这会设定上限）。
+
+一致性改进稳健但适度（84.9 → 88.5 主体）。
+
+论文声称"前瞻"但未探测模型是否真的预测特定未来事件或只是编码更鲁棒的特征。
+
+对状态获得什么信息的更深分析会加强主张。
+
+**写作功力**: 摘要和引言简洁。
+
+方法部分清晰但枯燥——ASCII 图和直观解释会有帮助。
+
+结果部分列出数字而无叙事。
+
+最有价值的贡献（表示层面规划缺口）埋在引言中而非独立章节。
+
+重写方法部分以概念转变（表示视野 vs. 生成视野）开头，将架构细节推迟到附录，会提升论文。
+
+**判决**: **弱接收**——扎实的想法、干净的执行、有意义的结果，但探索和分析缺乏深度。
+
+缺口是真实的，方法有效，但论文未充分确立这是标准方法。
+
+值得作为垫脚石发表；
+
+需要后续工作成熟。
+
+## 要点总结
+
+- **表示视野 ≠ 生成视野**: 即使在因果模型中，你可以在训练时用非因果目标监督表示，然后在推理时丢弃这些目标。
+
+这个技巧超越视频——音频流、增量解析、在线决策。
+
+- **冻结教师模式**: 将更丰富特征蒸馏到受限状态时，冻结教师并强制学生伸展。
+
+如果两者都适应，学生不会改进——教师半路迎合它。
+
+停止梯度强制单向知识传递。
+
+- **超越训练视野测试**: 30 秒评估（超越 5 秒训练片段）是简单但未充分使用的诊断。
+
+如果你的模型一致性在训练视野之外急剧下降，表示短视。
+
+这适用于任何自回归模型——语言、时间序列、轨迹。
+
+- **推迟推理成本**: 论文在训练时添加监督并在推理时丢弃。
+
+如果训练预算允许，这是免费午餐。
+
+寻找类似机会：昂贵的预言机、多尺度聚合、非因果上下文——都可以在不减慢推理的情况下指导训练。
+
+:::
