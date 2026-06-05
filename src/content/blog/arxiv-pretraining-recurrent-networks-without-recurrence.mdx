@@ -1,0 +1,414 @@
+---
+title:
+  en: "Pretraining RNNs Without Unrolling: Supervised Memory Training"
+  zh: "无需展开的 RNN 预训练：监督式记忆训练"
+description:
+  en: "A method that trains recurrent networks by predicting memory transitions instead of backpropagating through time, enabling parallel training and stable long-range learning."
+  zh: "通过预测记忆转换而非时间反向传播来训练循环网络的方法，实现并行训练和稳定的长程学习。"
+date: 2026-06-05
+tags: ["arxiv", "ai", "cs.lg", "cs.ai"]
+image: "/arxiv-visuals/arxiv-pretraining-recurrent-networks-without-recurrence.png"
+---
+
+![Concept animation](/arxiv-visuals/pretraining-recurrent-networks-without-recurrence/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2606.06479](https://arxiv.org/abs/2606.06479)
+**Authors**: Akarsh Kumar, Phillip Isola
+**Categories**: cs.LG, cs.AI
+
+## The Gap
+
+RNNs are sequential by design. To learn what to remember, you backpropagate through time (BPTT): unroll the network step by step, compute gradients from the future back to the past. This creates two problems. First, it's inherently serial—you can't process timesteps in parallel because each depends on the previous hidden state. Second, gradients must traverse long computation chains, causing them to vanish or explode, making it hard to learn dependencies that span hundreds of tokens.
+
+Transformers solved this by abandoning recurrence entirely. They process all tokens in parallel and have direct gradient paths between any two positions. But they pay a quadratic cost in memory and compute. The gap: can we get Transformer-like training efficiency in an RNN architecture?
+
+```
+Problem: BPTT forces sequential training + unstable gradients
+    |
+    v
+Observation: Memory updates are just supervised predictions
+    |
+    v
+Method: Train Transformer to predict "what to remember"
+        Use those predictions as labels for RNN memory updates
+    |
+    v
+Evidence: RNN trains in parallel, O(1) gradient paths, better long-range
+    |
+    v
+Conclusion: Decouple "what" from "how" to unlock RNN scaling
+```
+
+## The Increment
+
+**One sentence**: Before this paper, training RNNs meant unrolling them through time and backpropagating sequentially; after, you can train them by supervised learning on memory transition labels predicted by a separate encoder, enabling time-parallel training with stable gradients.
+
+### Core Mechanism
+
+Supervised Memory Training (SMT) has two stages. Stage 1: Train a Transformer encoder on a predictive state representation objective. The encoder learns to compress the past into a fixed-size memory vector that's sufficient to predict future observations. Think of it as learning a compressed summary of history. Stage 2: Use the Transformer's memory states as training labels. For each transition (memory at time t, input at t+1) → (memory at time t+1), train an RNN to predict that next memory state. The RNN never unrolls during training—each memory update is a single supervised prediction.
+
+The key insight: memory transitions are just input-output pairs. If a Transformer already figured out what information to carry forward, you can teach an RNN to produce the same memory updates without backpropagating through time. The RNN learns the "how" (efficient recurrent computation) while the Transformer provides the "what" (ideal memory content).
+
+```
+Stage 1: Transformer learns "what to remember"
+    
+    x1 -> x2 -> x3 -> x4 -> ...
+     |     |     |     |
+     v     v     v     v
+    [Transformer Encoder]
+     |     |     |     |
+     v     v     v     v
+    m1    m2    m3    m4    (memory states)
+    
+Stage 2: RNN learns to reproduce those memory transitions
+
+    (m1, x2) --[RNN]--> predict m2  (one-step supervised)
+    (m2, x3) --[RNN]--> predict m3  (no unrolling!)
+    (m3, x4) --[RNN]--> predict m4  (parallel batches)
+```
+
+**The structural metaphor**: Think of building a railroad through mountains. The old way (BPTT) is like digging a tunnel from entrance to exit—you must work sequentially, pushing deeper step by step, and if you make a mistake early, it echoes through the entire tunnel. SMT is like sending a surveyor ahead in a helicopter (the Transformer) to mark waypoints showing the optimal path. Then the construction crew (the RNN) builds short segments between waypoints independently. Each segment is a simple task: get from waypoint A to waypoint B. The crew never needs to see the full tunnel—they just match the surveyor's markers. The surveyor handles the "what" (where should the path go?), the crew handles the "how" (how do we efficiently dig each segment?). You can now run multiple crews in parallel, and if one segment fails, it doesn't cascade.
+
+### Key Concepts
+
+- **Predictive state representation**: Instead of remembering everything that happened, you only remember what's needed to predict the future. Imagine you're watching a detective show—you don't memorize every scene, just the clues that help predict the ending. A predictive state is that compressed set of clues. The Transformer learns this: given all past tokens, what's the minimal information needed to continue predicting? It throws away irrelevant details and keeps the predictive essence.
+
+- **Credit assignment without recurrence**: In standard BPTT, to learn that "the cat" at position 5 is relevant to predicting "meowed" at position 105, gradients must flow backward through 100 hidden state updates. Each step multiplies gradients by a matrix, leading to vanishing/exploding problems. SMT sidesteps this: the Transformer figures out that "the cat" matters and encodes it into memory state m5. When training the RNN to predict m105 from m104 and x105, the loss directly compares predicted vs target memory—a single gradient step, no 100-step chain. The hard credit assignment work happened in the Transformer (which has direct attention paths); the RNN just learns to mimic the result.
+
+- **Decoupling memory content from update mechanism**: Traditional RNNs couple these: the recurrence defines both what gets remembered and how memory evolves. SMT splits them. The Transformer (with its parallel attention) is free to use global context to decide memory content without worrying about efficient recurrent updates. The RNN focuses solely on learning a compact update rule that reproduces those memory targets. It's like separating architecture (what rooms do we need?) from construction (how do we build walls?). Each component optimizes for its strength.
+
+## Framework Shift
+
+```
+Before (BPTT):                       After (SMT):
+
+Sequential unrolling                 Two-stage pipeline
+                                     
+x1->h1->h2->h3->...->h100           Stage 1: Transformer
+ |   |   |   |       |                x1,...,x100 => m1,...,m100
+ +---+---+---+--...--+                (parallel encoding)
+      gradient                       
+      path                           Stage 2: RNN learns 
+      (length 100)                     (mt, x_{t+1}) -> m_{t+1}
+                                       (parallel one-step tasks)
+Memory updates determined            
+  by backward pass                   Memory content from Transformer
+  through time                         RNN learns update rule
+                                       Gradient path: O(1)
+```
+
+From sequential dependency to parallel supervision, the core shift is **treating recurrent training as mimicking a non-recurrent teacher's memory states rather than optimizing end-to-end through time**.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. RNN training has been stuck between two bad options: BPTT's sequential bottleneck or truncated BPTT's amnesia. The field moved to Transformers not because attention is fundamentally superior for all tasks, but because RNNs couldn't scale. If you can unlock parallel RNN training, you reopen architectural diversity. The timing is right—model scaling is hitting Transformer memory walls.
+
+**Method maturity**: Clever insight with execution gaps. The core idea (use a teacher model to generate training targets) is clean. But there's a circularity: you need a Transformer to train the RNN, which raises the question "why not just use the Transformer?" The paper argues RNNs offer constant-time inference and better temporal abstraction, but the experimental evidence for this is thin. The method also introduces hyperparameter complexity (how much to pretrain the Transformer? how to balance the two stages?) that's not fully explored.
+
+**Experimental integrity**: Baselines are fair but limited. They compare against BPTT and truncated BPTT on language modeling and pixel sequences. SMT wins, especially on long-range tasks. But there's no comparison with recent efficient Transformer variants (linear attention, state space models) that also aim for RNN-like efficiency. The experiments stop at models around 10-50M parameters—the scaling claims aren't tested at sizes where training parallelism really matters. Also, the Transformer teacher is trained on the same data as the RNN student, which is a bit artificial—in practice, you'd want to know if the RNN can generalize beyond the teacher's training set.
+
+**Writing quality**: The paper front-loads motivation and method clearly. The experimental section feels rushed—results are reported without deep analysis of failure modes or hyperparameter sensitivity. The related work section lumps together several distinct research threads (state space models, distillation, auxiliary objectives) without clearly delineating where SMT sits. Rewriting Section 4 (Experiments) to include ablations on teacher architecture, memory dimensionality, and out-of-distribution transfer would elevate the whole paper.
+
+**Verdict**: Weak accept — The core contribution (decoupling memory content from recurrent updates) is conceptually interesting and the method shows promise, but the evaluation doesn't yet prove the approach scales or generalizes beyond the teacher's capability.
+
+## Takeaways
+
+**Steal the two-stage training pattern**: If you're working with any sequential model, consider training a high-capacity non-recurrent model first to label intermediate states, then use those labels to train a more efficient recurrent model. This applies beyond RNNs—think distilling a Transformer's hidden states into a state space model, or using a large vision model to label internal representations for a smaller recurrent vision processor.
+
+**Predictive state as an intermediate representation**: The idea of learning a memory representation optimized for predicting the future (not reconstructing the past) is transferable. If you're building any system that needs to compress history, ask "what's the minimal information needed to continue?" not "what happened?" This shows up in reinforcement learning (state abstractions), video compression (predictive coding), and even database indexing.
+
+**When to couple vs decouple**: SMT works because it decouples two optimization problems that BPTT tangles together. This is a general design principle—if your training objective mixes two hard problems (here: learning what to remember + learning how to update memory), consider training separate components for each and then combining them. The cost is extra complexity, but the benefit is each component can use the best tools for its job.
+:::
+
+:::zh
+**论文**: [2606.06479](https://arxiv.org/abs/2606.06479)
+**作者**: Akarsh Kumar, Phillip Isola
+**分类**: cs.LG, cs.AI
+
+## 缺口
+
+RNN 在设计上是串行的。
+
+要学会记住什么，你需要时间反向传播（BPTT）：
+
+逐步展开网络，从未来往过去计算梯度。
+
+这造成两个问题。
+
+首先，训练本质上是串行的——你无法并行处理时间步，因为每一步都依赖前一个隐藏状态。
+
+其次，梯度必须穿越长长的计算链，导致梯度消失或爆炸，难以学习跨越数百个 token 的依赖关系。
+
+Transformer 通过完全放弃循环解决了这个问题。
+
+它们并行处理所有 token，任意两个位置之间都有直接的梯度路径。
+
+但代价是平方级的内存和计算开销。
+
+缺口在于：
+
+我们能在 RNN 架构中获得 Transformer 般的训练效率吗？
+
+```
+问题：BPTT 强制串行训练 + 梯度不稳定
+    |
+    v
+观察：记忆更新只是监督预测
+    |
+    v
+方法：训练 Transformer 预测"该记住什么"
+      用这些预测作为 RNN 记忆更新的标签
+    |
+    v
+证据：RNN 并行训练，O(1) 梯度路径，长程能力更好
+    |
+    v
+结论：解耦"记什么"和"怎么记"来释放 RNN 扩展性
+```
+
+## 增量
+
+**一句话**：
+
+这篇论文之前，训练 RNN 意味着在时间上展开它们并串行反向传播；
+
+之后，你可以通过监督学习来训练它们，标签是由独立编码器预测的记忆转换，实现时间并行训练和稳定梯度。
+
+### 核心机制
+
+监督式记忆训练（SMT）有两个阶段。
+
+阶段 1：
+
+在预测状态表示目标上训练一个 Transformer 编码器。
+
+编码器学习将过去压缩成固定大小的记忆向量，这个向量足以预测未来的观测。
+
+可以理解为学习历史的压缩摘要。
+
+阶段 2：
+
+使用 Transformer 的记忆状态作为训练标签。
+
+对每个转换（t 时刻的记忆，t+1 时刻的输入）→（t+1 时刻的记忆），训练 RNN 预测下一个记忆状态。
+
+RNN 在训练期间从不展开——每次记忆更新都是单步监督预测。
+
+关键洞见：
+
+记忆转换只是输入-输出对。
+
+如果 Transformer 已经搞清楚该携带哪些信息向前，你可以教 RNN 产生同样的记忆更新，而不需要时间反向传播。
+
+RNN 学习"怎么记"（高效的循环计算），Transformer 提供"记什么"（理想的记忆内容）。
+
+```
+阶段 1：Transformer 学习"该记住什么"
+    
+    x1 -> x2 -> x3 -> x4 -> ...
+     |     |     |     |
+     v     v     v     v
+    [Transformer 编码器]
+     |     |     |     |
+     v     v     v     v
+    m1    m2    m3    m4    (记忆状态)
+    
+阶段 2：RNN 学习重现这些记忆转换
+
+    (m1, x2) --[RNN]--> 预测 m2  (单步监督)
+    (m2, x3) --[RNN]--> 预测 m3  (无需展开！)
+    (m3, x4) --[RNN]--> 预测 m4  (并行批次)
+```
+
+**核喻**：
+
+想象在山区修铁路。
+
+传统方法（BPTT）就像从入口到出口挖隧道——你必须顺序作业，一步步向深处推进，如果早期犯错，会在整条隧道中回响。
+
+SMT 就像先派测量员坐直升机（Transformer）到前面标记路标，显示最优路径。
+
+然后施工队（RNN）独立建造路标之间的短段。
+
+每一段都是简单任务：
+
+从路标 A 到路标 B。
+
+施工队从不需要看到整条隧道——他们只是匹配测量员的标记。
+
+测量员处理"记什么"（路径该往哪走？
+
+），施工队处理"怎么记"（如何高效挖每一段？
+
+）。
+
+现在你可以并行运行多支施工队，如果某一段失败，不会级联影响。
+
+### 关键概念
+
+- **预测状态表示**：
+
+不是记住发生的所有事情，而是只记住预测未来所需的内容。
+
+想象你在看侦探剧——你不会记住每个场景，只记住帮助预测结局的线索。
+
+预测状态就是这组压缩的线索。
+
+Transformer 学习的就是这个：
+
+给定所有过去的 token，需要哪些最少信息才能继续预测？
+
+它扔掉无关细节，保留预测本质。
+
+- **无循环的信用分配**：
+
+在标准 BPTT 中，要学习位置 5 的"猫"与位置 105 的"叫了"相关，梯度必须向后流经 100 次隐藏状态更新。
+
+每一步都用矩阵乘梯度，导致消失/爆炸问题。
+
+SMT 绕过了这个：
+
+Transformer 弄清楚"猫"很重要，并将其编码进记忆状态 m5。
+
+当训练 RNN 从 m104 和 x105 预测 m105 时，损失直接比较预测与目标记忆——单步梯度，没有 100 步链条。
+
+困难的信用分配工作发生在 Transformer 中（它有直接的注意力路径）；
+
+RNN 只需学习模仿结果。
+
+- **解耦记忆内容与更新机制**：
+
+传统 RNN 将两者耦合：
+
+循环同时定义记住什么和记忆如何演化。
+
+SMT 将它们分开。
+
+Transformer（凭借并行注意力）可以自由使用全局上下文决定记忆内容，无需担心高效的循环更新。
+
+RNN 只专注于学习紧凑的更新规则，重现那些记忆目标。
+
+这就像分离架构（我们需要什么房间？
+
+）和施工（如何建墙？
+
+）。
+
+每个组件都针对其优势优化。
+
+## 框架转变
+
+```
+之前（BPTT）：                      之后（SMT）：
+
+串行展开                            两阶段流水线
+                                     
+x1->h1->h2->h3->...->h100           阶段 1：Transformer
+ |   |   |   |       |                x1,...,x100 => m1,...,m100
+ +---+---+---+--...--+                (并行编码)
+      梯度                       
+      路径                           阶段 2：RNN 学习 
+      (长度 100)                       (mt, x_{t+1}) -> m_{t+1}
+                                       (并行单步任务)
+记忆更新由时间反向传播决定           
+                                    记忆内容来自 Transformer
+                                      RNN 学习更新规则
+                                      梯度路径：O(1)
+```
+
+从串行依赖到并行监督，核心转变是**将循环训练视为模仿非循环教师的记忆状态，而非端到端的时间优化**。
+
+## 专家评审
+
+**选题眼光**：
+
+真实缺口。
+
+RNN 训练一直卡在两个糟糕选项之间：
+
+BPTT 的串行瓶颈或截断 BPTT 的失忆症。
+
+领域转向 Transformer 不是因为注意力机制在所有任务上根本性更优，而是因为 RNN 无法扩展。
+
+如果能解锁并行 RNN 训练，就重新打开了架构多样性。
+
+时机恰当——模型扩展正在撞上 Transformer 的内存墙。
+
+**方法成熟度**：
+
+巧妙洞见但执行有缺口。
+
+核心想法（用教师模型生成训练目标）很清晰。
+
+但存在循环论证：
+
+你需要 Transformer 来训练 RNN，这引出问题"为什么不直接用 Transformer？
+
+" 论文辩称 RNN 提供常数时间推理和更好的时间抽象，但实验证据单薄。
+
+方法还引入了超参数复杂性（Transformer 预训练多久？
+
+如何平衡两阶段？
+
+），未充分探索。
+
+**实验诚意**：
+
+基线公平但有限。
+
+他们在语言建模和像素序列上对比了 BPTT 和截断 BPTT。
+
+SMT 获胜，尤其在长程任务上。
+
+但没有与最近的高效 Transformer 变体（线性注意力、状态空间模型）对比，后者也追求类 RNN 的效率。
+
+实验止步于 10-50M 参数的模型——扩展性主张未在训练并行性真正重要的规模上测试。
+
+此外，Transformer 教师在与 RNN 学生相同的数据上训练，有点人为——实践中你会想知道 RNN 能否泛化到教师训练集之外。
+
+**写作功力**：
+
+论文前面清晰地阐述了动机和方法。
+
+实验部分感觉仓促——报告结果时没有深入分析失败模式或超参数敏感性。
+
+相关工作部分把几个不同的研究线索（状态空间模型、蒸馏、辅助目标）混在一起，没有清楚地划定 SMT 的位置。
+
+重写第 4 节（实验）加入教师架构、记忆维度和分布外迁移的消融实验，能让整篇论文提升一个档次。
+
+**判决**：
+
+弱接收——核心贡献（解耦记忆内容与循环更新）在概念上有趣，方法展现潜力，但评估尚未证明该方法能扩展或泛化到教师能力之外。
+
+## 要点总结
+
+**偷走两阶段训练模式**：
+
+如果你在处理任何序列模型，考虑先训练一个高容量的非循环模型来标注中间状态，然后用这些标签训练更高效的循环模型。
+
+这超越了 RNN——想想把 Transformer 的隐藏状态蒸馏到状态空间模型，或用大型视觉模型为更小的循环视觉处理器标注内部表示。
+
+**预测状态作为中间表示**：
+
+学习一个为预测未来（而非重建过去）优化的记忆表示这一想法是可迁移的。
+
+如果你在构建任何需要压缩历史的系统，问"继续下去需要哪些最少信息？
+
+"而非"发生了什么？
+
+" 这出现在强化学习（状态抽象）、视频压缩（预测编码），甚至数据库索引中。
+
+**何时耦合 vs 解耦**：
+
+SMT 有效是因为它解耦了 BPTT 纠缠在一起的两个优化问题。
+
+这是通用设计原则——如果你的训练目标混合了两个难题（这里是：
+
+学习记什么 + 学习如何更新记忆），考虑为每个训练独立组件然后组合。
+
+代价是额外的复杂性，但好处是每个组件都能用最适合其任务的工具。
+
+:::

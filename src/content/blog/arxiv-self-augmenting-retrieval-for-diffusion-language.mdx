@@ -1,0 +1,346 @@
+---
+title:
+  en: "Self-Augmenting Retrieval for Diffusion Language Models"
+  zh: "扩散语言模型的自增强检索"
+description:
+  en: "SARDI uses discarded low-confidence tokens from diffusion denoising as lookahead signals to guide retrieval, achieving 8× throughput over autoregressive RAG baselines."
+  zh: "SARDI 利用扩散去噪过程中被丢弃的低置信度 token 作为前瞻信号来引导检索，吞吐量比自回归 RAG 基线高出 8 倍。"
+date: 2026-06-05
+tags: ["arxiv", "ai", "cs.cl", "cs.ai", "cs.lg"]
+image: "/arxiv-visuals/self-augmenting-retrieval-for-diffusion-language/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/self-augmenting-retrieval-for-diffusion-language/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2606.06474](https://arxiv.org/abs/2606.06474)
+**Authors**: Paul Jünger, Justin Lovelace, Linxi Zhao, Dongyoung Go, Kilian Q. Weinberger
+**Categories**: cs.CL, cs.AI, cs.LG
+
+## The Gap
+
+Retrieval-augmented generation (RAG) for autoregressive LLMs faces a fundamental ordering problem: you need to retrieve evidence before generating, but you don't know what to retrieve until you've started generating. Current solutions either retrieve once upfront (missing entities that emerge mid-generation) or pause generation to retrieve incrementally (killing throughput). Diffusion language models denoise entire sequences in parallel, but existing RAG approaches treat them like autoregressive models—retrieve once at the start, then denoise. This ignores a key property: diffusion models produce tentative predictions for all positions simultaneously, including low-confidence tokens that never make it into the final output.
+
+```
+Problem: RAG timing mismatch
+   |
+   v
+Observation: Diffusion emits discarded tokens during denoising
+   |
+   v
+Hypothesis: Discarded tokens contain useful entity signals
+   |
+   v
+Method: SARDI uses discarded tokens to trigger mid-denoising retrieval
+   |
+   v
+Evidence: +3-8% accuracy, 8x throughput vs autoregressive RAG
+   |
+   v
+Conclusion: Lookahead from parallel denoising unlocks better RAG
+```
+
+## The Increment
+
+**One sentence**: Before SARDI, diffusion RAG retrieved once then denoised; after SARDI, discarded tokens from early denoising steps guide dynamic retrieval before the output solidifies.
+
+### Core Mechanism
+
+SARDI operates in three stages. First, the diffusion model begins denoising with an initial retrieval based on the question. At each denoising step, the model predicts tokens for all masked positions and commits only the high-confidence ones. Second, SARDI monitors the discarded low-confidence tokens—those below the commitment threshold. These tokens are aggregated across positions and steps, then passed through named entity recognition to extract entities. Third, when new entities appear in the discarded set that weren't in previous retrievals, SARDI triggers a new retrieval query combining the original question with these entities, fetching fresh documents and appending them to the context before the next denoising step.
+
+```
+Denoising trajectory:
+
+Step 0:  [MASK MASK MASK MASK MASK MASK MASK]
+         + Initial retrieval (question only)
+            |
+            v
+Step 1:  [The? MASK born? in? MASK MASK 1985?]
+         Commit: "in"
+         Discard: "The", "born", "1985"  --> Extract entity "1985"
+         --> Trigger retrieval: "question + 1985"
+            |
+            v
+Step 2:  [The MASK born in MASK York 1985]
+         Commit: "The", "in", "York", "1985"
+         Discard: "born"
+         No new entities --> No retrieval
+            |
+            v
+Step 3:  [The athlete born in New York 1985]
+         All tokens committed --> Done
+```
+
+Think of SARDI like a detective interviewing witnesses. A standard interview (autoregressive RAG) asks one witness at the start, then writes the report based on that single account. SARDI's approach is different: the detective sketches multiple theories simultaneously (parallel denoising), and when a witness mentions a name in passing that doesn't quite fit yet (discarded token with low confidence), the detective pauses to call that person in for questioning (entity-triggered retrieval) before finalizing the report. The key insight is that even uncertain guesses reveal what information is missing—the detective doesn't ignore half-formed leads just because they're not confident enough to write down yet.
+
+### Key Concepts
+
+- **Discrete diffusion denoising**: Autoregressive models generate text token by token, left to right. Discrete diffusion models start with all positions masked and iteratively unmask them in parallel. At each step, the model predicts what should go in every masked position, then commits predictions above a confidence threshold while leaving the rest masked for the next round. This parallel unmasking continues until all positions are filled. The process resembles filling in a crossword puzzle where you pencil in confident answers first and leave uncertain ones for later passes.
+
+- **Lookahead signal**: In diffusion models, low-confidence predictions are typically discarded without further use—they're just noise on the path to the final output. SARDI's core insight is that these discarded tokens carry semantic information: even a 30% confident guess at a token often corresponds to a real entity or concept that the model is "considering" but not ready to commit to. By extracting entities from these discarded tokens, SARDI gains visibility into the model's intermediate reasoning before the output crystallizes.
+
+- **Dynamic retrieval**: Traditional RAG retrieves documents once before generation starts. Dynamic RAG retrieves multiple times during generation, triggered by the model's intermediate state. For autoregressive models, this requires pausing after every few tokens to retrieve, which tanks throughput. For diffusion models, SARDI retrieves between denoising steps when new entities appear in discarded tokens—exploiting the fact that diffusion already operates in discrete steps, so retrieval doesn't introduce new serialization.
+
+## Framework Shift
+
+```
+Before (autoregressive RAG):        After (SARDI):
+
+Question                            Question
+   |                                   |
+   v                                   v
+Retrieve(Q) --> Docs                Retrieve(Q) --> Docs
+   |                                   |
+   v                                   v
+Generate token 1                    Denoise step 1 (all positions)
+   |                                   |
+   v                                   +---> Discard "1985", "born"
+Generate token 2                            Extract entity "1985"
+   |                                        Retrieve(Q + "1985") --> Docs
+   v                                        |
+Generate token 3                            v
+   |                                   Denoise step 2 (all positions)
+   v                                       |
+...                                        +---> Discard "athlete"
+   |                                            Extract entity "athlete"
+   v                                            Retrieve(Q + "athlete") --> Docs
+Final output                                    |
+                                                v
+                                           Denoise step 3 (final)
+                                                |
+                                                v
+                                           Final output
+```
+
+From sequential token-by-token generation with upfront retrieval to parallel denoising with entity-driven dynamic retrieval triggered by discarded predictions.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Diffusion language models are emerging as a speed alternative to autoregressive generation (parallel decoding), but RAG for diffusion has been underexplored. The observation that discarded tokens contain entity signals is non-obvious and the timing advantage (retrieval between denoising steps vs mid-token-generation) is architecturally sound.
+
+**Method maturity**: Clever exploitation of existing model internals. SARDI is training-free—no new parameters, no finetuning—just opportunistic use of discarded tokens. The entity extraction step (NER on discarded tokens) is the only engineered component, and it's simple. One concern: the method assumes the diffusion model's confidence threshold is well-calibrated. If the model commits too early or too late, the lookahead signal degrades. The paper doesn't discuss robustness to threshold tuning.
+
+**Experimental integrity**: Five multi-hop QA benchmarks with consistent gains (3-8% over baselines). Baselines include both diffusion models without dynamic retrieval and autoregressive models with dynamic retrieval, which is fair. The throughput comparison (8× faster than autoregressive RAG) is the headline number, but it's partly architectural—diffusion models are inherently faster due to parallelism, not just SARDI. The ablation on when to retrieve (every step vs entity-triggered) shows the entity trigger is doing useful work. No analysis of retrieval cost (latency, API calls), which matters for real deployment.
+
+**Writing quality**: Abstract and introduction are crisp. Method section is clear but could use more failure case analysis—what happens when NER hallucinates entities from noise tokens? The results section front-loads the win but buries the breakdown by dataset. Table 2 (ablations) deserves more discussion. Figure 3 (denoising trajectory) is helpful but small. The related work section conflates autoregressive and diffusion RAG without cleanly separating them first.
+
+**Verdict**: weak accept — Solid idea with clean execution, but the evaluation doesn't isolate SARDI's contribution from diffusion's inherent speed advantage, and the method's sensitivity to hyperparameters (confidence threshold, NER quality) is underexplored.
+
+## Takeaways
+
+If you're building RAG systems, the core transferable idea is: **intermediate model states that don't make it into the final output can still guide retrieval**. This generalizes beyond diffusion. For example, in beam search or speculative decoding, low-probability branches contain semantic signals about what the model is "considering." You could extract entities from pruned beams to trigger retrieval. In chain-of-thought prompting, rejected reasoning paths might reveal missing facts. The broader lesson: model internals leak intent even when confidence is low—don't throw away the signal just because you're not committing to the output.
+
+For diffusion model practitioners: SARDI shows that the parallel nature of diffusion isn't just about speed—it's about surfacing more semantic information per step. If you're designing diffusion-based systems, think about what other signals the unchosen tokens might carry (uncertainty estimation, multi-hop reasoning gaps, counterfactual generation).
+
+For retrieval system designers: entity extraction from noisy text is a practical way to convert fuzzy signals into structured queries. SARDI uses off-the-shelf NER, but you could swap in LLM-based entity linking or even learned query reformulation if you're willing to add parameters.
+:::
+
+:::zh
+**论文**: [2606.06474](https://arxiv.org/abs/2606.06474)
+**作者**: Paul Jünger, Justin Lovelace, Linxi Zhao, Dongyoung Go, Kilian Q. Weinberger
+**分类**: cs.CL, cs.AI, cs.LG
+
+## 缺口
+
+自回归 LLM 的检索增强生成（RAG）面临根本性的时序问题：你需要在生成之前检索证据，但只有开始生成后才知道该检索什么。
+
+现有方案要么在开头检索一次（错过生成过程中浮现的实体），要么在生成中途暂停去检索（吞吐量暴跌）。
+
+扩散语言模型并行地对整个序列去噪，但现有 RAG 方法把它们当自回归模型用——在开头检索一次，然后去噪。
+
+这忽略了一个关键特性：扩散模型同时为所有位置生成试探性预测，包括那些低置信度、永远进不了最终输出的 token。
+
+```
+问题：RAG 时序错配
+   |
+   v
+观察：扩散模型在去噪时会产出被丢弃的 token
+   |
+   v
+假设：被丢弃的 token 含有有用的实体信号
+   |
+   v
+方法：SARDI 用被丢弃的 token 触发去噪中途的检索
+   |
+   v
+证据：准确率 +3-8%，吞吐量是自回归 RAG 的 8 倍
+   |
+   v
+结论：并行去噪的前瞻能力解锁了更好的 RAG
+```
+
+## 增量
+
+**一句话**: SARDI 之前，扩散 RAG 检索一次然后去噪；SARDI 之后，早期去噪步骤中被丢弃的 token 在输出固化之前引导动态检索。
+
+### 核心机制
+
+SARDI 分三个阶段运作。
+
+第一阶段，扩散模型基于问题进行初始检索，然后开始去噪。
+
+在每个去噪步骤中，模型为所有被遮盖的位置预测 token，只保留高置信度的预测。
+
+第二阶段，SARDI 监视那些被丢弃的低置信度 token——那些低于提交阈值的预测。
+
+这些 token 跨位置和步骤聚合，然后送入命名实体识别（NER）提取实体。
+
+第三阶段，当被丢弃的 token 中出现了之前检索中没有的新实体时，SARDI 触发新的检索查询，把原始问题和这些实体组合起来，获取新文档，并在下一个去噪步骤前把它们追加到上下文中。
+
+```
+去噪轨迹：
+
+步骤 0:  [遮盖 遮盖 遮盖 遮盖 遮盖 遮盖 遮盖]
+         + 初始检索（仅问题）
+            |
+            v
+步骤 1:  [这位? 遮盖 出生? 于? 遮盖 遮盖 1985?]
+         提交："于"
+         丢弃："这位"、"出生"、"1985"  --> 提取实体 "1985"
+         --> 触发检索："问题 + 1985"
+            |
+            v
+步骤 2:  [这位 遮盖 出生 于 遮盖 约克 1985]
+         提交："这位"、"于"、"约克"、"1985"
+         丢弃："出生"
+         无新实体 --> 不检索
+            |
+            v
+步骤 3:  [这位 运动员 出生 于 纽约 约克 1985]
+         所有 token 提交完成 --> 结束
+```
+
+把 SARDI 想象成一个询问证人的侦探。
+
+标准询问（自回归 RAG）是开头问一个证人，然后基于那单一的陈述写报告。
+
+SARDI 的方法不同：侦探同时勾勒多个理论（并行去噪），当某个证人顺口提到一个名字但还不太确定（被丢弃的低置信度 token）时，侦探暂停，把那个人叫来问话（实体触发的检索），然后再定稿报告。
+
+关键洞察是：即使不确定的猜测也能揭示缺失的信息——侦探不会仅仅因为线索还不够自信到可以写下来就忽略那些半成形的线索。
+
+### 关键概念
+
+- **离散扩散去噪**: 自回归模型从左到右逐个 token 生成文本。
+
+离散扩散模型从所有位置都被遮盖开始，迭代地并行解除遮盖。
+
+每一步，模型预测每个被遮盖位置应该填什么，然后提交置信度高于阈值的预测，把其余的留到下一轮。
+
+这种并行解除遮盖持续到所有位置都填满。
+
+这个过程类似填纵横字谜：你先用铅笔填上有把握的答案，把不确定的留到后面几轮再填。
+
+- **前瞻信号**: 在扩散模型中，低置信度预测通常被直接丢弃不再使用——它们只是通往最终输出路径上的噪声。
+
+SARDI 的核心洞察是这些被丢弃的 token 携带着语义信息：即使是 30% 置信度的 token 猜测，往往也对应着一个真实的实体或概念，只是模型正在"考虑"但还没准备好提交。
+
+通过从这些被丢弃的 token 中提取实体，SARDI 能在输出结晶之前看到模型的中间推理。
+
+- **动态检索**: 传统 RAG 在生成开始前检索一次文档。
+
+动态 RAG 在生成过程中多次检索，由模型的中间状态触发。
+
+对自回归模型来说，这需要每隔几个 token 就暂停去检索，吞吐量会崩塌。
+
+对扩散模型来说，当被丢弃的 token 中出现新实体时，SARDI 在去噪步骤之间检索——利用了扩散本身就以离散步骤运作的事实，所以检索不会引入新的串行化。
+
+## 框架转变
+
+```
+之前（自回归 RAG）：              之后（SARDI）：
+
+问题                              问题
+   |                                 |
+   v                                 v
+检索(Q) --> 文档                   检索(Q) --> 文档
+   |                                 |
+   v                                 v
+生成 token 1                       去噪步骤 1（所有位置）
+   |                                 |
+   v                                 +---> 丢弃 "1985"、"出生"
+生成 token 2                              提取实体 "1985"
+   |                                      检索(Q + "1985") --> 文档
+   v                                      |
+生成 token 3                              v
+   |                                 去噪步骤 2（所有位置）
+   v                                     |
+...                                      +---> 丢弃 "运动员"
+   |                                          提取实体 "运动员"
+   v                                          检索(Q + "运动员") --> 文档
+最终输出                                      |
+                                              v
+                                         去噪步骤 3（最终）
+                                              |
+                                              v
+                                         最终输出
+```
+
+从逐 token 串行生成加前置检索，到并行去噪加由被丢弃预测触发的实体驱动动态检索。
+
+## 专家评审
+
+**选题眼光**: 真实缺口。
+
+扩散语言模型正在作为自回归生成的速度替代方案崭露头角（并行解码），但扩散的 RAG 研究不足。
+
+被丢弃的 token 包含实体信号这个观察并不显然，时序优势（在去噪步骤之间检索 vs 在 token 生成中途检索）在架构上说得通。
+
+**方法成熟度**: 对现有模型内部的巧妙利用。
+
+SARDI 免训练——没有新参数，不需微调——只是机会主义地使用被丢弃的 token。
+
+实体提取步骤（对被丢弃 token 做 NER）是唯一的工程化组件，而且很简单。
+
+一个担忧：方法假设扩散模型的置信度阈值是良好校准的。
+
+如果模型提交得太早或太晚，前瞻信号会退化。
+
+论文没有讨论对阈值调优的鲁棒性。
+
+**实验诚意**: 五个多跳问答基准上取得一致提升（比基线高 3-8%）。
+
+基线包括不带动态检索的扩散模型和带动态检索的自回归模型，这很公平。
+
+吞吐量对比（比自回归 RAG 快 8 倍）是头条数字，但部分是架构优势——扩散模型因并行性本身就更快，不只是 SARDI 的功劳。
+
+关于何时检索（每步 vs 实体触发）的消融实验表明实体触发确实在做有用的工作。
+
+没有分析检索成本（延迟、API 调用），这对实际部署很重要。
+
+**写作功力**: 摘要和引言简洁明快。
+
+方法部分清晰但可以多些失败案例分析——当 NER 从噪声 token 中幻觉出实体时会发生什么？结果部分把胜利摆在前面，但把按数据集的细分埋在后面。
+
+表 2（消融实验）值得更多讨论。
+
+图 3（去噪轨迹）有帮助但太小。
+
+相关工作部分混淆了自回归和扩散 RAG，没有先把它们清晰分开。
+
+**判决**: 弱接收 — 想法扎实，执行干净，但评估没有把 SARDI 的贡献和扩散的固有速度优势隔离开，方法对超参数（置信度阈值、NER 质量）的敏感性探索不足。
+
+## 要点总结
+
+如果你在构建 RAG 系统，核心可迁移的想法是：**没有进入最终输出的中间模型状态仍然可以引导检索**。
+
+这可以推广到扩散之外。
+
+比如，在束搜索或推测解码中，低概率分支包含了模型"正在考虑"什么的语义信号。
+
+你可以从被剪枝的束中提取实体来触发检索。
+
+在思维链提示中，被拒绝的推理路径可能揭示缺失的事实。
+
+更广泛的教训：即使置信度低，模型内部也会泄露意图——不要仅仅因为你不打算提交输出就把信号扔掉。
+
+对扩散模型实践者：SARDI 表明扩散的并行性不只是关于速度——它能在每一步暴露更多语义信息。
+
+如果你在设计基于扩散的系统，想想那些未被选中的 token 还能携带什么其他信号（不确定性估计、多跳推理缺口、反事实生成）。
+
+对检索系统设计者：从噪声文本中提取实体是把模糊信号转换为结构化查询的实用方法。
+
+SARDI 用现成的 NER，但如果你愿意加参数，可以换成基于 LLM 的实体链接甚至学习到的查询改写。
+
+:::
