@@ -1,0 +1,368 @@
+---
+title:
+  en: "You Only Index Once: Sharing Routing Across Layers for Efficient Long-Context LLMs"
+  zh: "只索引一次：跨层共享路由实现高效长文本推理"
+description:
+  en: "CLSA amortizes token-level routing overhead across decoder layers, achieving 7.6x decoding speedup at 128K context by reusing a single sparse attention index throughout the model."
+  zh: "CLSA 将 token 级路由开销分摊到多个解码层，通过在模型中复用单个稀疏注意力索引，在 128K 上下文时实现 7.6 倍解码加速。"
+date: 2026-06-07
+tags: ["arxiv", "ai", "cs.cl", "cs.ai", "cs.lg"]
+image: "/arxiv-visuals/you-only-index-once-cross-layer/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/you-only-index-once-cross-layer/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2606.06467](https://arxiv.org/abs/2606.06467)
+**Authors**: Yutao Sun, Yanqi Zhang, Li Dong, Jianyong Wang, Furu Wei
+**Categories**: cs.CL, cs.AI, cs.LG
+
+## The Gap
+
+Long-context LLMs face a hard efficiency-quality trade-off in sparse attention. Block sparse methods (like sliding window) give strong speedups but lose important tokens. Token-level sparse methods (top-k selection) maintain quality but remain slow because every layer must scan the full KV cache to pick its top-k tokens. The routing operation itself becomes the bottleneck — you're repeatedly sorting through thousands of tokens just to decide which ones to attend to.
+
+Prior work treats this as unavoidable: finer granularity means more routing cost. YOCO-style architectures share KV cache across layers but still route independently per layer. The gap: routing overhead scales linearly with layer count even when the important tokens don't change much layer-to-layer.
+
+```
+Problem: Token sparse accurate but slow (routing overhead × L layers)
+         |
+         v
+Assumption: Important tokens stable across adjacent layers
+         |
+         v
+Method: Compute top-k index once, reuse across all layers (CLSA)
+         |
+         v
+Evidence: 7.6x decoding speedup, <2% quality drop at 128K context
+         |
+         v
+Conclusion: Routing overhead amortizable without sacrificing selectivity
+```
+
+## The Increment
+
+**One sentence**: Before this paper, token-level sparse attention meant paying full routing cost per layer; after, you route once and reuse the index across layers with minimal quality loss.
+
+### Core Mechanism
+
+CLSA builds on YOCO (You Only Cache Once), which already shares KV cache across decoder layers. The insight: if layers share the same KV cache, why not share the routing decision too? CLSA adds a single indexer module that computes top-k token selection once per forward pass. This indexer outputs a binary mask indicating which tokens to keep. All subsequent decoder layers reuse this mask — no re-sorting, no re-ranking, just direct attention to the pre-selected tokens.
+
+The indexer itself is a small transformer block trained jointly with the main model. During prefill, it sees the full sequence and learns which tokens matter for the task. During decoding, it updates the mask incrementally as new tokens arrive. The key architectural choice: the indexer's parameters are tiny compared to decoder layers (think 1-5% of total parameters), so the overhead of one extra forward pass is negligible compared to L repeated routing operations.
+
+Data flows like this: input → indexer → sparse mask → decoder layer 1 (uses mask) → decoder layer 2 (reuses same mask) → ... → decoder layer L (still same mask) → output. The mask doesn't change between layers. Only when a new token is generated does the indexer recompute.
+
+```
+Standard token sparse (per-layer routing):
+    Input ---+---> Layer 1: route (expensive) + attend
+             |
+             +---> Layer 2: route (expensive) + attend
+             |
+             +---> Layer L: route (expensive) + attend
+
+CLSA (route once, reuse):
+    Input ---> Indexer: route once (cheap module)
+                  |
+                  v
+               [mask]
+                  |
+         +--------+--------+
+         |        |        |
+         v        v        v
+    Layer 1  Layer 2  Layer L
+    attend   attend   attend
+    (reuse)  (reuse)  (reuse)
+```
+
+Think of CLSA as a train station with security screening. In the standard approach (per-layer routing), every train car has its own security checkpoint — passengers get rescanned at each car even though they already passed screening. CLSA consolidates security at the station entrance (indexer). One comprehensive scan determines who boards, and all train cars (decoder layers) trust that decision. The security team (indexer) is small but thorough. The cars (decoders) just check tickets (mask) instead of rescanning luggage. Passengers (tokens) only prove their importance once, then move freely through the train.
+
+### Key Concepts
+
+- **Routing overhead**: In token-level sparse attention, "routing" means scanning all cached tokens to rank them by relevance, then selecting top-k. This involves computing attention scores (or approximations) over the full cache, sorting, and indexing. At 128K context with 32 layers, you're doing this expensive scan 32 times per generated token. CLSA's core bet: most layers would pick similar tokens anyway, so compute it once with a dedicated module and share the result. The indexer learns during training which tokens generalize across layers.
+
+- **Cross-layer KV sharing**: YOCO architecture caches key-value pairs once and shares them across all decoder layers, reducing memory from O(L × N) to O(N) where L is layers and N is sequence length. CLSA extends this: if the cache is shared, the access pattern (which tokens to attend to) can be shared too. This turns routing from a per-layer operation into a per-forward-pass operation.
+
+- **Index stability assumption**: The method assumes that the set of important tokens doesn't vary wildly between adjacent layers. Empirically, this holds — early layers focus on syntax/structure, later layers on semantics, but the overlap is high. When a token is critical for layer 5, it's usually critical for layer 6 too. The indexer learns to pick tokens that are broadly useful rather than layer-specific. The &lt;2% quality drop in experiments validates this assumption.
+
+## Framework Shift
+
+```
+Before (standard token sparse):          After (CLSA):
+
+Input (128K tokens)                      Input (128K tokens)
+         |                                        |
+         v                                        v
+Layer 1: scan 128K, sort, pick k         Indexer: scan 128K, pick k
+         |                                        |
+         v                                        v
+Layer 2: scan 128K, sort, pick k              [mask]
+         |                                   /    |    \
+         v                                  /     |     \
+       ...                          Layer 1   Layer 2   Layer L
+         |                          (use k)   (use k)   (use k)
+         v                                   \     |     /
+Layer L: scan 128K, sort, pick k             \    |    /
+                                                  v
+Cost: L × routing overhead              Cost: 1 × routing overhead
+```
+
+From per-layer independence to centralized routing, the core shift is amortizing the expensive decision across layers by assuming stability in what matters.
+
+## Expert Assessment
+
+**Problem choice**: Real and well-positioned. Long-context inference is the current frontier, and the routing overhead problem is measurable and annoying in production. The gap between block sparse (fast but lossy) and token sparse (accurate but slow) has been complained about since at least 2023. This paper doesn't invent a new problem — it solves an acknowledged one.
+
+**Method maturity**: The insight is clean and the execution is straightforward. The indexer design is minimal — no exotic architectures, just a small transformer block with a learned top-k selector. The risk was that layer-specific token needs would break the sharing assumption, but the experiments show it holds. One could argue for even simpler baselines (e.g., static heuristics like recency + attention entropy), but the learned indexer probably captures task-specific patterns better. The method feels like the obvious next step once YOCO exists, which is a compliment — good ideas often look obvious in hindsight.
+
+**Experimental integrity**: Strong. Baselines include both block sparse (FlashAttention-2 + sliding window) and token sparse (Quest, MInference). The 7.6x decoding speedup is measured at 128K context where the bottleneck is real. Quality is evaluated on diverse benchmarks (RULER, Needle-in-Haystack, reasoning tasks). The quality drop is small (&lt;2%) and honestly reported. One minor concern: the indexer adds parameters and a forward pass, but the cost breakdown shows it's &lt;5% overhead, which is fair. The ablations are thorough — they test different indexer sizes, sparsity ratios, and context lengths.
+
+**Writing quality**: The paper is clear and well-structured. The related work section properly credits YOCO and positions this as an extension. The method description could be tightened — Section 3.2 spends too many words on obvious points about KV sharing. The experimental section is dense but readable. If I were revising, I'd expand the failure case analysis (Section 4.4) — when does index sharing hurt? The paper hints at "heterogeneous layer preferences" but doesn't drill down. A concrete example of a task where per-layer routing wins would strengthen the honest assessment.
+
+**Verdict**: strong accept — Solves a real problem with a simple, effective method and thorough experiments. The speedup is substantial and the quality trade-off is acceptable for most applications.
+
+## Takeaways
+
+- **Amortize expensive decisions**: If multiple components need similar information, compute it once and share. This applies beyond attention — think kernel fusion, cached intermediate representations, or shared preprocessing pipelines. The CLSA pattern: identify a repeated operation, check if the inputs/outputs are stable across repetitions, centralize if yes.
+
+- **Learned routing beats heuristics**: Static rules (recency, position, keyword matching) are tempting for sparse selection, but a small learned module often outperforms them by adapting to task distribution. The indexer here is &lt;5% overhead but captures patterns that sliding windows miss.
+
+- **Validate stability assumptions with ablations**: CLSA bets on cross-layer index stability. The paper validates this with per-layer similarity metrics and quality comparisons. When proposing sharing schemes, measure whether the thing you're sharing actually stays similar — don't just assume.
+
+- **Speedup measurement matters**: Report end-to-end latency, not just FLOPs or theoretical complexity. CLSA wins because routing overhead is wall-clock expensive. If your optimization targets a non-bottleneck, the speedup won't show up in practice.
+:::
+
+:::zh
+**论文**: [2606.06467](https://arxiv.org/abs/2606.06467)
+**作者**: Yutao Sun, Yanqi Zhang, Li Dong, Jianyong Wang, Furu Wei
+**分类**: cs.CL, cs.AI, cs.LG
+
+## 缺口
+
+长文本大模型在稀疏注意力上面临一个硬性的效率-质量权衡。
+
+块稀疏方法（如滑动窗口）提供强劲加速但会丢失重要 token。
+
+Token 级稀疏方法（top-k 选择）保持质量但仍然很慢，因为每一层都必须扫描完整的 KV 缓存来挑选其 top-k token。
+
+路由操作本身成为瓶颈——你在反复对数千个 token 排序，只是为了决定关注哪些 token。
+
+先前工作将此视为不可避免：更细的粒度意味着更高的路由成本。
+
+YOCO 类架构在层间共享 KV 缓存，但每层仍独立路由。
+
+缺口在于：即使重要 token 在层与层之间变化不大，路由开销仍随层数线性扩展。
+
+```
+问题：Token 稀疏准确但慢（路由开销 × L 层）
+      |
+      v
+假设：重要 token 在相邻层间稳定
+      |
+      v
+方法：计算一次 top-k 索引，在所有层复用（CLSA）
+      |
+      v
+证据：7.6 倍解码加速，128K 上下文质量损失 <2%
+      |
+      v
+结论：路由开销可分摊而不牺牲选择性
+```
+
+## 增量
+
+**一句话**：这篇论文之前，token 级稀疏注意力意味着每层支付全额路由成本；
+
+之后，你路由一次并在层间复用索引，质量损失极小。
+
+### 核心机制
+
+CLSA 构建在 YOCO（You Only Cache Once）之上，后者已经在解码层间共享 KV 缓存。
+
+洞察是：如果层共享相同的 KV 缓存，为什么不也共享路由决策？
+
+CLSA 添加一个单独的索引器模块，每次前向传播计算一次 top-k token 选择。
+
+这个索引器输出一个二进制掩码，指示保留哪些 token。
+
+所有后续解码层复用这个掩码——不重新排序，不重新排名，只是直接关注预选的 token。
+
+索引器本身是一个小型 transformer 块，与主模型联合训练。
+
+在预填充阶段，它看到完整序列并学习哪些 token 对任务重要。
+
+在解码阶段，随着新 token 到达，它增量更新掩码。
+
+关键架构选择：索引器参数相比解码层很小（约占总参数的 1-5%），因此一次额外前向传播的开销相比 L 次重复路由操作可忽略不计。
+
+数据流动如下：输入 → 索引器 → 稀疏掩码 → 解码层 1（使用掩码）→ 解码层 2（复用相同掩码）→ ...  → 解码层 L（仍是相同掩码）→ 输出。
+
+掩码在层间不变。
+
+只有当生成新 token 时，索引器才重新计算。
+
+```
+标准 token 稀疏（每层路由）：
+    输入 ---+---> 层 1：路由（昂贵）+ 注意力
+            |
+            +---> 层 2：路由（昂贵）+ 注意力
+            |
+            +---> 层 L：路由（昂贵）+ 注意力
+
+CLSA（路由一次，复用）：
+    输入 ---> 索引器：路由一次（轻量模块）
+                 |
+                 v
+              [掩码]
+                 |
+        +--------+--------+
+        |        |        |
+        v        v        v
+    层 1      层 2      层 L
+    注意力    注意力    注意力
+   （复用）  （复用）  （复用）
+```
+
+把 CLSA 想象成一个带安检的火车站。
+
+在标准方法（每层路由）中，每节车厢都有自己的安检点——乘客在每节车厢都要重新扫描，即使他们已经通过了安检。
+
+CLSA 将安检整合到车站入口（索引器）。
+
+一次全面扫描决定谁上车，所有车厢（解码层）信任这个决定。
+
+安检团队（索引器）规模小但彻底。
+
+车厢（解码器）只是检票（掩码）而不重新扫描行李。
+
+乘客（token）只需证明一次重要性，然后在火车上自由移动。
+
+### 关键概念
+
+- **路由开销**：在 token 级稀疏注意力中，"路由"指扫描所有缓存的 token 以按相关性排名，然后选择 top-k。
+
+这涉及在完整缓存上计算注意力分数（或近似值）、排序和索引。
+
+在 128K 上下文、32 层的情况下，每生成一个 token 就要做 32 次这种昂贵的扫描。
+
+CLSA 的核心押注：大多数层无论如何都会选择相似的 token，因此用一个专用模块计算一次并共享结果。
+
+索引器在训练期间学习哪些 token 能跨层泛化。
+
+- **跨层 KV 共享**：YOCO 架构缓存一次键值对并在所有解码层间共享，将内存从 O(L × N) 减少到 O(N)，其中 L 是层数，N 是序列长度。
+
+CLSA 扩展了这一点：如果缓存是共享的，访问模式（关注哪些 token）也可以共享。
+
+这将路由从每层操作变为每次前向传播操作。
+
+- **索引稳定性假设**：该方法假设重要 token 的集合在相邻层之间不会剧烈变化。
+
+经验上，这成立——早期层关注语法/结构，后期层关注语义，但重叠度很高。
+
+当一个 token 对第 5 层至关重要时，它通常对第 6 层也至关重要。
+
+索引器学习挑选广泛有用的 token，而非特定于层的 token。
+
+实验中 &lt;2% 的质量损失验证了这一假设。
+
+## 框架转变
+
+```
+之前（标准 token 稀疏）：              之后（CLSA）：
+
+输入（128K token）                     输入（128K token）
+        |                                       |
+        v                                       v
+层 1：扫描 128K，排序，选 k           索引器：扫描 128K，选 k
+        |                                       |
+        v                                       v
+层 2：扫描 128K，排序，选 k                 [掩码]
+        |                                  /    |    \
+        v                                 /     |     \
+      ...                          层 1      层 2     层 L
+        |                         （用 k）  （用 k）  （用 k）
+        v                                 \     |     /
+层 L：扫描 128K，排序，选 k                \    |    /
+                                               v
+成本：L × 路由开销                     成本：1 × 路由开销
+```
+
+从每层独立到集中式路由，核心转变是通过假设重要性的稳定性，将昂贵的决策分摊到各层。
+
+## 专家评审
+
+**选题眼光**：真实且定位准确。
+
+长文本推理是当前前沿，路由开销问题在生产中可测量且令人烦恼。
+
+块稀疏（快但有损）与 token 稀疏（准确但慢）之间的差距至少从 2023 年就开始被抱怨。
+
+这篇论文没有发明新问题——它解决了一个公认的问题。
+
+**方法成熟度**：洞察清晰，执行直接。
+
+索引器设计极简——没有奇特架构，只是一个带学习 top-k 选择器的小型 transformer 块。
+
+风险在于层特定的 token 需求可能会破坏共享假设，但实验表明假设成立。
+
+可以论证更简单的基线（如基于近期性 + 注意力熵的静态启发式），但学习型索引器可能更好地捕获任务特定模式。
+
+该方法感觉像是 YOCO 存在后的显而易见的下一步，这是一种赞美——好想法事后看往往显得显而易见。
+
+**实验诚意**：强。
+
+基线包括块稀疏（FlashAttention-2 + 滑动窗口）和 token 稀疏（Quest, MInference）。
+
+7.6 倍解码加速在 128K 上下文测量，此时瓶颈是真实的。
+
+质量在多样基准上评估（RULER, Needle-in-Haystack, 推理任务）。
+
+质量下降很小（&lt;2%）且诚实报告。
+
+一个小问题：索引器增加参数和前向传播，但成本分解显示开销 &lt;5%，这是公平的。
+
+消融实验彻底——测试了不同索引器尺寸、稀疏率和上下文长度。
+
+**写作功力**：论文清晰且结构良好。
+
+相关工作部分恰当地致谢 YOCO 并将此定位为扩展。
+
+方法描述可以更紧凑——第 3.2 节在 KV 共享的明显点上花了太多字。
+
+实验部分密集但可读。
+
+如果我修订，我会扩展失败案例分析（第 4.4 节）——索引共享何时有害？
+
+论文暗示"异构层偏好"但没有深入。
+
+一个每层路由获胜的任务的具体例子会加强诚实评估。
+
+**判决**：强接收 — 用简单有效的方法和彻底的实验解决了真实问题。
+
+加速幅度可观，质量权衡对大多数应用可接受。
+
+## 要点总结
+
+- **分摊昂贵决策**：如果多个组件需要相似信息，计算一次并共享。
+
+这超越了注意力——想想内核融合、缓存的中间表示或共享预处理管道。
+
+CLSA 模式：识别重复操作，检查输入/输出在重复间是否稳定，如果是则集中化。
+
+- **学习型路由胜过启发式**：静态规则（近期性、位置、关键词匹配）对稀疏选择有诱惑力，但小型学习模块通过适应任务分布通常优于它们。
+
+这里的索引器开销 &lt;5% 但捕获了滑动窗口遗漏的模式。
+
+- **用消融实验验证稳定性假设**：CLSA 押注跨层索引稳定性。
+
+论文用每层相似度指标和质量比较验证了这一点。
+
+提出共享方案时，测量你要共享的东西是否真的保持相似——别只是假设。
+
+- **加速测量很重要**：报告端到端延迟，而非仅 FLOPs 或理论复杂度。
+
+CLSA 获胜是因为路由开销在实际时间上很昂贵。
+
+如果你的优化针对非瓶颈，加速不会在实践中显现。
+
+:::

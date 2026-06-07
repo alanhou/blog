@@ -1,0 +1,376 @@
+---
+title:
+  en: "RREDCoT: Credit Assignment for Chain-of-Thought Reasoning Without Extra Generation"
+  zh: "RREDCoT：无需额外生成的思维链功劳分配"
+description:
+  en: "A method that uses the model itself to redistribute rewards across reasoning steps, replacing high-variance Monte Carlo sampling with efficient intermediate value estimation."
+  zh: "一种利用模型自身对推理步骤进行奖励重分配的方法，用高效的中间价值估计取代了高方差的蒙特卡洛采样。"
+date: 2026-06-07
+tags: ["arxiv", "ai", "cs.lg", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.06475](https://arxiv.org/abs/2606.06475)
+**Authors**: Mykyta Ielanskyi, Kajetan Schweighofer, Lukas Aichberger, Sepp Hochreiter
+**Categories**: cs.LG, cs.AI
+
+## The Gap
+
+Current reasoning models trained with RL (like GRPO) only get feedback when the full chain-of-thought is done. You generate 50 tokens of reasoning, produce an answer, and only then do you know if you were right. This is the delayed reward problem. All those intermediate reasoning steps — the ones that actually set you on the right path — get the same uniform credit.
+
+The standard RL solution is Monte Carlo sampling: generate many alternative continuations from each step to estimate how valuable that step was. But for a 1000-token reasoning trace, sampling enough rollouts at every step to get stable estimates becomes prohibitively expensive. Current methods either tolerate high variance (GRPO is essentially Monte Carlo with a single sample) or avoid the problem entirely.
+
+Attribution methods from interpretability (gradient-based, attention-based) can highlight important tokens cheaply, but they weren't designed for credit assignment and don't give you actual value estimates for RL updates.
+
+```
+Problem: CoT reasoning = delayed reward
+    |
+    v
+Standard solution: MC sampling at each step
+    |
+    +---> Too expensive (1000 steps * 100 samples = 100k tokens)
+    |
+    v
+Existing workaround: Uniform credit (GRPO)
+    |
+    +---> High variance, slow learning
+    |
+    v
+This paper: Use model itself as value estimator
+    |
+    +---> Cheap approximation, targeted credit
+    |
+    v
+Result: Lower variance, faster convergence
+```
+
+## The Increment
+
+**One sentence**: Before, you waited until the end to assign credit uniformly; now, you redistribute that credit to the steps that actually mattered, using the model as its own judge.
+
+### Core Mechanism
+
+RREDCoT takes a complete CoT trace, segments it into chunks (sentences, paragraphs, reasoning steps), and asks: "How much did each segment contribute to getting the right answer?" Instead of generating rollouts, it queries the model's own value head — a small neural network trained alongside the policy that predicts expected future reward.
+
+Here's the flow: You have a CoT trace that led to correct answer. Split it into segments s₁, s₂, ..., sₙ. For each segment sᵢ, compute a value estimate V(sᵢ) using the value head. The value difference V(sᵢ₊₁) - V(sᵢ) tells you how much segment sᵢ improved your position toward the goal. This difference becomes the redistributed reward for that segment.
+
+The value head is trained on-the-fly using temporal difference learning. When you have a complete trace with known outcome, you propagate that outcome backwards: if the final answer was correct (reward = 1), then the second-to-last segment's value should be close to 1, the third-to-last slightly less, and so on. This creates a value gradient across the trace without generating new samples.
+
+```
+Input CoT trace (correct answer):
+[prompt] -> [s1] -> [s2] -> [s3] -> [answer=correct, R=1]
+                                                |
+                                                v
+Segment values (from value head):
+V(s1)=0.3    V(s2)=0.6    V(s3)=0.9    V(final)=1.0
+    |            |            |            |
+    v            v            v            v
+Redistributed rewards (TD differences):
+r1=0.3       r2=0.3       r3=0.3       r4=0.1
+    |            |            |            |
+    +------------+------------+------------+
+                      |
+                      v
+              Policy update with targeted credit
+```
+
+Think of it like a relay race. The standard approach (GRPO) gives the entire team the same medal regardless of who ran fast. Monte Carlo sampling would be running the race 100 times with different runners to see who consistently improves the time — exhaustive but accurate. RREDCoT is like having a coach with a stopwatch at each handoff point who estimates, based on prior races, how much each runner improved the team's position. The stopwatch readings (value estimates) approximate what you'd get from running 100 races, but you only run once.
+
+The value head is the stopwatch. It's trained on previous races (previous CoT traces with known outcomes). When a new race finishes, you update the stopwatch's calibration: "At handoff point 2, when the runner was in position X, they usually finish with time Y." Now when you run future races, the stopwatch can predict each handoff's contribution without rerunning.
+
+### Key Concepts
+
+- **Delayed reward problem**: Imagine you're learning to solve a math problem step by step. You write 10 lines of work, arrive at an answer, and only then discover if it's correct. Which of those 10 lines actually helped? In standard RL for CoT, all lines get credit equally if the final answer is right, or blame equally if wrong. This is like a teacher grading your math homework by only circling "correct" or "wrong" at the end, never marking which steps were good. High variance because one lucky guess at the end can make bad reasoning look good, or one arithmetic slip can make solid reasoning look bad.
+
+- **Value function in RL**: The value V(state) is your expected total reward from that state onward if you act reasonably. In CoT, a "state" is the partial trace so far. V("Let's factor the equation...") might be 0.7 if that's a promising start, while V("Let's guess randomly...") might be 0.1. The value function lets you judge intermediate progress without seeing the end. Standard RL algorithms (like Q-learning) spend enormous effort learning accurate value functions because they enable credit assignment. RREDCoT piggybacks on this: train a value head alongside your policy, then use it to assign credit during policy updates.
+
+- **Temporal difference (TD) learning**: You improve value estimates by comparing predictions at consecutive steps. If V(step 3) = 0.6 and you then observe that step 4 reaches a state worth 0.9, you know your estimate of step 3 was too low — it should have been closer to 0.9. Update it. This "bootstrapping" (using your own predictions to train yourself) propagates ground truth backwards from known outcomes. In RREDCoT, the known outcome is the final reward (correct/incorrect answer), and TD learning adjusts all intermediate value estimates to be consistent with that outcome.
+
+## Framework Shift
+
+```
+Before (GRPO / uniform credit):           After (RREDCoT):
+
+CoT trace:                                CoT trace w/ value gradient:
+[step1]->[step2]->[step3]->answer         [step1]->[step2]->[step3]->answer
+                            |                 |       |       |       |
+                            v                 v       v       v       v
+                      Final reward         V=0.2   V=0.5   V=0.8   V=1.0
+                            |                 |       |       |       |
+                            v                 v       v       v       v
+        All steps get R uniformly         r=0.2   r=0.3   r=0.3   r=0.2
+                 |                            |       |       |       |
+                 v                            +-------+-------+-------+
+        Policy update                                 |
+                                                      v
+                                              Targeted policy update
+                                         (emphasize steps 2 & 3)
+
+Single scalar flows to all steps     Value gradient flows backward
+```
+
+**One sentence**: From broadcasting one reward to all steps, to sculpting a reward landscape that emphasizes the critical reasoning moves.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The delayed reward problem in CoT fine-tuning is widely acknowledged, and current GRPO-based approaches do suffer from high variance — you can see it in the training curves of published reasoning models (o1, QwQ) where many samples are wasted on noisy gradients. The question is whether this specific bottleneck justifies a new method or whether larger batch sizes (the brute force solution) suffice. Given that inference cost for reasoning models is already high, a method that improves sample efficiency is well-motivated.
+
+**Method maturity**: Clever adaptation of standard RL machinery (value functions, TD learning) to a new domain (CoT fine-tuning). The core insight — use the model's own value head instead of MC sampling — is elegant. However, the paper doesn't explore simpler baselines: what about advantage estimation (GAE) with very short rollouts (1-2 steps instead of full MC)? Or sparse credit assignment (only reward the final reasoning step and first step)? The method assumes value head training is cheap and accurate; the paper should ablate how quickly the value head converges and whether value estimation errors compound.
+
+**Experimental integrity**: The paper presents results on GSM8K and MATH across several model sizes. Baselines include GRPO (uniform), MC sampling (expensive), and attribution methods (gradient-based, attention-based). RREDCoT shows lower variance and better sample efficiency than GRPO, and matches or exceeds MC performance at far lower cost. The numbers look credible. However, I'd want to see: (1) wall-clock training time comparisons (does value head training add overhead?), (2) analysis of value estimation errors (how wrong is the value head, and does it matter?), (3) longer training runs (does the advantage persist or diminish?), and (4) harder reasoning tasks where credit assignment matters more (competition math, formal proofs). The segmentation analysis (sentence vs paragraph vs step) is useful but feels preliminary — more ablation needed.
+
+**Writing quality**: The paper is clearly written with good motivation. The introduction sets up the problem well. The related work section properly positions the contribution. The method section is detailed but could use a clearer algorithm box (pseudocode). The experiments section front-loads the main results but buries important ablations (segmentation, value head architecture) in later sections and appendix. I'd restructure: method → core results → ablations (segmentation, value training, error analysis) → related work. The discussion section speculates about future directions but doesn't critically examine failure modes or limitations — where does RREDCoT break down? What happens when the value head confidently misjudges a step?
+
+**Verdict**: **weak accept** — Solid contribution addressing a real problem with a clean solution. Experiments demonstrate the approach works, but deeper ablation and analysis would strengthen confidence. The method will likely see adoption in reasoning model training pipelines, but it's an incremental improvement rather than a paradigm shift.
+
+## Takeaways
+
+**For reasoning model trainers**: If you're fine-tuning CoT models with GRPO and seeing high variance in your training curves, RREDCoT offers a drop-in improvement. Train a small value head alongside your policy (adds ~1% parameters), use it to redistribute rewards via TD differences, and you should see faster convergence with fewer samples. The segmentation granularity matters — start with sentence-level for short CoTs, paragraph-level for long ones.
+
+**For RL practitioners**: The broader lesson is that domain-specific value estimation can beat generic MC sampling. When rollouts are expensive (long horizons, costly generation), consider whether you can train a lightweight value function on observed trajectories and use it for credit assignment. The value head doesn't need to be perfect; even noisy value estimates reduce variance compared to uniform credit.
+
+**For interpretability researchers**: This paper is a case study in the gap between attribution and credit assignment. Gradient-based and attention-based methods highlight important tokens but don't provide value estimates compatible with RL objectives. There's an opportunity here: can we design attribution methods explicitly for credit assignment that don't require training separate value heads?
+
+**Concrete technique**: The TD learning setup for value head training is reusable. For any sequential generation task with delayed rewards (code generation, proof search, planning), you can train a value head on completed trajectories using the same bootstrapping approach. The trick is to make the value head output temporally consistent predictions (V(step i) ≤ V(step i+1) for correct traces), which TD learning achieves naturally.
+:::
+
+:::zh
+**论文**: [2606.06475](https://arxiv.org/abs/2606.06475)
+**作者**: Mykyta Ielanskyi, Kajetan Schweighofer, Lukas Aichberger, Sepp Hochreiter
+**分类**: cs.LG, cs.AI
+
+## 缺口
+
+当前用强化学习训练推理模型（如GRPO）的方式是，只有在整个思维链完成后才获得反馈。
+
+你生成50个token的推理过程，给出答案，然后才知道对错。
+
+这就是延迟奖励问题。
+
+那些中间推理步骤——真正让你走上正确道路的那些步骤——得到的评价完全一样。
+
+标准的强化学习解决方案是蒙特卡洛采样：从每个步骤生成许多可能的后续，估计该步骤的价值。
+
+但对于1000个token的推理轨迹，在每一步都采样足够多的rollout来获得稳定估计，计算成本高得离谱。
+
+现有方法要么容忍高方差（GRPO本质上是只有一个样本的蒙特卡洛），要么完全回避这个问题。
+
+可解释性领域的归因方法（基于梯度、基于注意力）可以廉价地突出重要token，但它们不是为功劳分配设计的，也无法给出强化学习更新所需的实际价值估计。
+
+```
+问题：思维链推理 = 延迟奖励
+    |
+    v
+标准解决方案：在每步做蒙特卡洛采样
+    |
+    +---> 太贵（1000步 * 100样本 = 10万token）
+    |
+    v
+现有权宜之计：均匀功劳（GRPO）
+    |
+    +---> 高方差，学习慢
+    |
+    v
+本文方法：用模型自身做价值估计器
+    |
+    +---> 廉价近似，定向功劳
+    |
+    v
+结果：更低方差，更快收敛
+```
+
+## 增量
+
+**一句话**：以前等到结束才统一分配功劳；现在把功劳重新分配给真正起作用的步骤，用模型做自己的裁判。
+
+### 核心机制
+
+RREDCoT拿到一条完整的思维链轨迹，把它切成片段（句子、段落、推理步骤），然后问："每个片段对得到正确答案贡献了多少？"它不生成rollout，而是查询模型自己的价值头——一个与策略一起训练的小型神经网络，预测预期的未来奖励。
+
+流程如下：你有一条得到正确答案的思维链轨迹。
+
+把它分成片段s₁, s₂, ..., sₙ。
+
+对每个片段sᵢ，用价值头计算价值估计V(sᵢ)。
+
+价值差V(sᵢ₊₁) - V(sᵢ)告诉你片段sᵢ把你向目标推进了多少。
+
+这个差值就成为该片段的重分配奖励。
+
+价值头通过时序差分学习实时训练。
+
+当你有一条结果已知的完整轨迹时，你把结果向后传播：如果最终答案正确（奖励=1），那么倒数第二个片段的价值应该接近1，倒数第三个略低，依此类推。
+
+这样就在整个轨迹上创建了价值梯度，无需生成新样本。
+
+```
+输入思维链轨迹（答案正确）：
+[提示] -> [s1] -> [s2] -> [s3] -> [答案=正确, R=1]
+                                                |
+                                                v
+片段价值（来自价值头）：
+V(s1)=0.3    V(s2)=0.6    V(s3)=0.9    V(最终)=1.0
+    |            |            |            |
+    v            v            v            v
+重分配奖励（TD差分）：
+r1=0.3       r2=0.3       r3=0.3       r4=0.1
+    |            |            |            |
+    +------------+------------+------------+
+                      |
+                      v
+              带定向功劳的策略更新
+```
+
+把它想象成接力赛。
+
+标准方法（GRPO）给整个队伍发同样的奖牌，不管谁跑得快。
+
+蒙特卡洛采样相当于用不同选手跑100次比赛，看谁能稳定提高成绩——详尽但准确。
+
+RREDCoT就像在每个交接点都有一位拿秒表的教练，根据以往的比赛估计每位选手对团队位置的改善程度。
+
+秒表读数（价值估计）近似于跑100次比赛能得到的结果，但你只跑一次。
+
+价值头就是秒表。
+
+它在以往的比赛（之前有已知结果的思维链轨迹）上训练。
+
+当新比赛结束时，你更新秒表的校准："在交接点2，当选手处于位置X时，他们通常以时间Y完成。
+
+"现在跑未来的比赛时，秒表可以预测每次交接的贡献，无需重跑。
+
+### 关键概念
+
+- **延迟奖励问题**：想象你在学习一步步解数学题。
+
+你写了10行解题过程，得出答案，然后才发现对错。
+
+这10行中哪几行真正有帮助？在思维链的标准强化学习中，如果最终答案对了，所有行都平等地得到功劳；如果错了，所有行都平等地承担责任。
+
+这就像老师批改数学作业只在最后圈"对"或"错"，从不标出哪些步骤好。
+
+高方差是因为最后一步的幸运猜测可能让糟糕的推理看起来不错，或者一个算术失误可能让扎实的推理看起来很差。
+
+- **强化学习中的价值函数**：价值V(状态)是你从该状态继续合理行动能获得的预期总奖励。
+
+在思维链中，"状态"是到目前为止的部分轨迹。
+
+V("我们来分解这个方程...")可能是0.7如果这是个有希望的开头，而V("我们随机猜...")可能是0.1。
+
+价值函数让你无需看到结尾就能判断中间进展。
+
+标准强化学习算法（如Q学习）花大量精力学习准确的价值函数，因为它们能实现功劳分配。
+
+RREDCoT搭便车：在策略旁边训练一个价值头，然后在策略更新时用它分配功劳。
+
+- **时序差分（TD）学习**：你通过比较连续步骤的预测来改进价值估计。
+
+如果V(步骤3) = 0.6，然后观察到步骤4到达的状态值0.9，你就知道对步骤3的估计太低了——应该更接近0.9。
+
+更新它。
+
+这种"自举"（用自己的预测训练自己）把实际结果从已知结果向后传播。
+
+在RREDCoT中，已知结果是最终奖励（答案正确/错误），TD学习调整所有中间价值估计以与该结果一致。
+
+## 框架转变
+
+```
+之前（GRPO / 均匀功劳）：              之后（RREDCoT）：
+
+思维链轨迹：                            思维链轨迹带价值梯度：
+[步骤1]->[步骤2]->[步骤3]->答案         [步骤1]->[步骤2]->[步骤3]->答案
+                            |                 |       |       |       |
+                            v                 v       v       v       v
+                      最终奖励              V=0.2   V=0.5   V=0.8   V=1.0
+                            |                 |       |       |       |
+                            v                 v       v       v       v
+        所有步骤得到均匀R                  r=0.2   r=0.3   r=0.3   r=0.2
+                 |                            |       |       |       |
+                 v                            +-------+-------+-------+
+        策略更新                                      |
+                                                      v
+                                              定向策略更新
+                                         （强调步骤2和3）
+
+单个标量流向所有步骤                   价值梯度向后流动
+```
+
+**一句话**：从向所有步骤广播一个奖励，到雕刻一个奖励景观，强调关键推理动作。
+
+## 专家评审
+
+**选题眼光**：真实缺口。
+
+思维链微调中的延迟奖励问题广受认可，当前基于GRPO的方法确实遭受高方差——你可以在已发布推理模型（o1、QwQ）的训练曲线中看到这一点，很多样本浪费在噪声梯度上。
+
+问题是这个特定瓶颈是否证明需要新方法，还是更大的批次大小（蛮力解决方案）就足够了。
+
+鉴于推理模型的推理成本已经很高，一个提高样本效率的方法是有充分动机的。
+
+**方法成熟度**：巧妙地将标准强化学习机制（价值函数、TD学习）适配到新领域（思维链微调）。
+
+核心洞察——用模型自己的价值头代替蒙特卡洛采样——很优雅。
+
+但论文没有探索更简单的基线：带很短rollout（1-2步而非完整蒙特卡洛）的优势估计（GAE）怎么样？或稀疏功劳分配（只奖励最后的推理步骤和第一步）？该方法假设价值头训练既便宜又准确；论文应该消融价值头收敛有多快，以及价值估计误差是否会累积。
+
+**实验诚意**：论文在GSM8K和MATH上呈现了多个模型规模的结果。
+
+基线包括GRPO（均匀）、蒙特卡洛采样（昂贵）和归因方法（基于梯度、基于注意力）。
+
+RREDCoT显示出比GRPO更低的方差和更好的样本效率，以远低成本匹配或超过蒙特卡洛性能。
+
+数字看起来可信。
+
+但我想看到：（1）墙上时钟训练时间比较（价值头训练是否增加开销？），（2）价值估计误差分析（价值头有多错，这是否重要？），（3）更长的训练运行（优势是持续还是减弱？），（4）更难的推理任务，功劳分配更重要的（竞赛数学、形式证明）。
+
+分割分析（句子 vs 段落 vs 步骤）有用但感觉是初步的——需要更多消融。
+
+**写作功力**：论文写得清楚，动机好。
+
+引言把问题铺陈得当。
+
+相关工作部分正确定位了贡献。
+
+方法部分详细但可以用更清晰的算法框（伪代码）。
+
+实验部分前置主要结果，但把重要消融（分割、价值头架构）埋在后面章节和附录中。
+
+我会重组：方法→核心结果→消融（分割、价值训练、误差分析）→相关工作。
+
+讨论部分推测未来方向，但没有批判性检查失效模式或局限——RREDCoT在哪里崩溃？当价值头自信地误判一个步骤时会发生什么？
+
+**判决**：**弱接收** — 扎实的贡献，以干净的解决方案解决真实问题。
+
+实验证明方法有效，但更深入的消融和分析会增强信心。
+
+该方法可能会在推理模型训练流水线中被采用，但它是渐进改进而非范式转变。
+
+## 要点总结
+
+**对推理模型训练者**：如果你在用GRPO微调思维链模型，并看到训练曲线高方差，RREDCoT提供了一个即插即用的改进。
+
+在策略旁边训练一个小价值头（增加约1%参数），用它通过TD差分重分配奖励，你应该能看到用更少样本更快收敛。
+
+分割粒度很重要——对短思维链从句子级开始，对长的用段落级。
+
+**对强化学习实践者**：更广泛的教训是，领域特定的价值估计可以击败通用蒙特卡洛采样。
+
+当rollout昂贵时（长时间范围、昂贵生成），考虑是否可以在观察到的轨迹上训练轻量价值函数，并用它做功劳分配。
+
+价值头不需要完美；即使有噪声的价值估计也比均匀功劳减少方差。
+
+**对可解释性研究者**：本文是归因与功劳分配之间差距的案例研究。
+
+基于梯度和基于注意力的方法突出重要token，但不提供与强化学习目标兼容的价值估计。
+
+这里有机会：我们能否设计专门用于功劳分配的归因方法，不需要训练单独的价值头？
+
+**具体技术**：价值头训练的TD学习设置可复用。
+
+对于任何带延迟奖励的顺序生成任务（代码生成、证明搜索、规划），你可以用同样的自举方法在完成的轨迹上训练价值头。
+
+诀窍是让价值头输出时间上一致的预测（对正确轨迹V(步骤i) ≤ V(步骤i+1)），TD学习自然实现这一点。
+
+:::
