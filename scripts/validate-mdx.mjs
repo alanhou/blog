@@ -15,6 +15,113 @@ const ISSUES = {
   }
 };
 
+// Additional runtime checks for raw < that break the MDX/JSX parser even if not matching the above regex.
+// These are things like bit-shift notation (r << d), generic-like <T>, or plain comparisons in prose.
+function findRawAngleBracketIssues(content, filePath) {
+  const errors = [];
+  const lines = content.split('\n');
+  let inFence = false;
+  let fenceMarker = '';
+  let mathDollarParity = 0; // track $...$ and $$...$$ (simple heuristic)
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+
+    // Fenced code
+    if (!inFence) {
+      const fenceMatch = line.match(/^(```+|~~~+)/);
+      if (fenceMatch) {
+        inFence = true;
+        fenceMarker = fenceMatch[1];
+        continue;
+      }
+    } else {
+      if (line.startsWith(fenceMarker) || line.match(new RegExp('^' + fenceMarker[0] + '{' + fenceMarker.length + '}'))) {
+        inFence = false;
+      }
+      continue;
+    }
+
+    // Track inline math $...$ / $$...$$ on this line (very approximate; good enough for validation)
+    // Count unescaped $ that are not doubled oddly. We flip parity for each top-level $.
+    let temp = line.replace(/\\\$/g, ''); // ignore escaped \$
+    const dollars = (temp.match(/\$/g) || []).length;
+    // For each pair we enter/exit math regions. For heuristic we just skip segments between $.
+    // Simpler: scan and when we see a < while "inside math" according to running parity, ignore it.
+
+    let inInlineCode = false;
+    let inMath = false;
+    let j = 0;
+    while (j < line.length) {
+      const ch = line[j];
+
+      if (ch === '`') {
+        inInlineCode = !inInlineCode;
+        j++;
+        continue;
+      }
+      if (inInlineCode) {
+        j++;
+        continue;
+      }
+
+      if (ch === '$') {
+        // toggle math (handles both $ and $$ because we toggle per $)
+        inMath = !inMath;
+        j++;
+        continue;
+      }
+
+      if (ch === '<' && !inMath) {
+        const next = line[j + 1] || '';
+        const prev = line[j - 1] || '';
+
+        // Respect backslash escape (e.g. \< or \<\< written by generators to "escape" for markdown)
+        if (prev === '\\') {
+          j++;
+          continue;
+        }
+
+        // Skip if this looks like a valid opening of a known component used in the site
+        const rest = line.slice(j + 1, j + 30);
+        if (/^(YouTube|img|video|audio|source|picture|iframe|canvas|svg|div|span|code|pre|table|thead|tbody|tr|td|th|ul|ol|li|a |A |strong|em|br |hr |input|button|form|blockquote|details|summary|script|style|link|meta|head|body|html|slot|astro-island|Fragment|React\.Fragment)/i.test(rest)) {
+          j++;
+          continue;
+        }
+        // Skip closing tags </foo>
+        if (next === '/') {
+          j++;
+          continue;
+        }
+
+        // Only flag the patterns proven to reliably break the MDX JSX parser with the exact error
+        // "Unexpected character `<` before name":
+        //   - <<   (the original crash: "r << d" in prose)
+        //   - >>   (symmetric, or diagram arrows that leak out of code)
+        // We are conservative here: many "word < word" and math-in-text still compile thanks to
+        // remark-math + how @astrojs/mdx + the JSX recovery works in paragraphs. Only double-angle
+        // is a guaranteed hard failure when not protected.
+        const isDoubleShift = (next === '<' || next === '>');
+        if (isDoubleShift) {
+          const snippet = line.slice(j, j + 2);
+          errors.push({
+            file: filePath,
+            line: i + 1,
+            column: j + 1,
+            issue: 'RAW_DOUBLE_ANGLE_BRACKET_IN_PROSE',
+            message: 'Raw "<<" or ">>" in prose is parsed as JSX tag start and fails with "Unexpected character `<` before name". Wrap in backticks (e.g. `r << d`) or in $math$.',
+            match: snippet,
+            fix: `\`${snippet}\``
+          });
+          j++; // skip the second one too
+        }
+      }
+      j++;
+    }
+  }
+  return errors;
+}
+
 function findMdxFiles(dir, files = []) {
   const entries = readdirSync(dir);
 
@@ -86,6 +193,9 @@ function validateFile(filePath) {
       });
     }
   }
+
+  // Extra structural checks (raw < etc) that the regex table doesn't cover
+  errors.push(...findRawAngleBracketIssues(content, filePath));
 
   return errors;
 }
