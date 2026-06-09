@@ -1,0 +1,348 @@
+---
+title:
+  en: "Agency Transfer: How to Upgrade a Suboptimal Policy Without Starting from Scratch"
+  zh: "代理人移交：如何不从头训练就升级一个次优策略"
+description:
+  en: "This paper introduces a model-free method to embed an existing functional but suboptimal baseline policy into RL training, progressively transferring control to a learnable policy while maintaining high goal-reaching rates from the start."
+  zh: "这篇论文提出了一种无模型方法，将已有的功能完好但次优的基线策略嵌入强化学习训练，逐步将控制权转移给可学习策略，同时从训练初期就保持高目标到达率。"
+date: 2026-06-09
+tags: ["arxiv", "ai", "cs.lg", "cs.ai", "eess.sy", "math.oc"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+
+:::
+
+:::en
+**Paper**: [2606.09825](https://arxiv.org/abs/2606.09825)
+**Authors**: Anton Bolychev, Georgiy Malaniya, Sinan Ibrahim, Pavel Osinenko
+**Categories**: cs.LG, cs.AI, eess.SY, math.OC
+
+## The Gap
+
+Reinforcement learning from scratch is expensive – you need careful reward shaping, environment tweaking, and enormous compute. But many real-world control tasks already have a working (if suboptimal) baseline policy: a hand-coded controller, a rule-based system, or a previously trained agent. Existing methods either ignore the baseline entirely (start from scratch) or use it only for initialization / imitation learning, which wastes its critical property – it can _reliably reach the goal and stay there_.
+
+Prior approaches like PPO or SAC start with random exploration, which often fails to reach the goal in early training. Imitation learning (BC) can copy the baseline but then struggles to improve beyond it. No existing model-free method explicitly exploits the fact that the baseline is _functional_ (goal-reaching) to ensure high success rates during the entire training process.
+
+This paper plugs that hole.
+
+```
+[Problem]                        [Assumption]
+   |                                 |
+ Training from scratch is              A "functional" baseline
+ costly and sample-inefficient         policy already exists that
+ during early learning.                reaches goal + stays with
+                                       high probability.
+   |                                 |
+   +--- (gap: how to exploit ------>+
+        baseline's goal-reaching
+        property during training?)
+         |
+         v
+    [Method - Agency Transfer]
+      - Two policies: baseline (fixed) + learning (trainable)
+      - Arbitrator decides which action to use at each step
+      - Probability of using baseline starts high, decays to zero
+      - Learning policy trained off-policy from all experience
+         |
+         +--- [Evidence] ------------+
+              High goal-reaching      |
+              rate from first         |
+              episode. Final policy   |
+              outperforms baseline.   |
+         v
+    [Conclusion]
+ Efficient, safe-exploring policy enhancement
+ for settings where a functional baseline exists.
+```
+
+## The Increment
+
+**One sentence**: Before this paper, any model-free RL method that wanted to improve a baseline had to either discard the baseline's goal-reaching guarantee during training or only imitate it; after this paper, you can seamlessly transfer agency from baseline to learner while keeping the goal reached nearly all the time.
+
+### Core Mechanism
+
+The method consists of three components: a **baseline policy** `π_b` (fixed, suboptimal but functional), a **learning policy** `π_θ` (a neural network trainable via any off-policy RL algorithm), and an **arbitrator** that probabilistically selects which policy's action is executed at each timestep. The arbitrator's probability of using the baseline follows a simple schedule:
+
+`p_t(baseline) = max(0, 1 - 2 * (t / T))`  (linear decay from 1 to 0 over the first half of training), after which the baseline is never used.
+
+Why linear? Because the baseline ensures the agent rarely leaves the goal set – even when the learning policy's early actions are terrible, the arbitrator often falls back to the safe baseline action. As training progresses, the learning policy accumulates experience (including successful trajectories) and improves. By the time the baseline is fully withdrawn, the learning policy has learned to reach and stay in the goal set on its own.
+
+The learning policy is updated using a standard off-policy algorithm (e.g., SAC) on the replay buffer containing all past transitions, regardless of which policy generated them. The paper provides theoretical analysis showing that if the baseline is functional (i.e., goal-reaching probability ≥ some δ), then the arbitration ensures a high goal-reaching rate during training, and under assumptions the final standalone policy inherits a lower bound on goal-reaching probability.
+
+```
+          +------------------+
+          |  Environment     |
+          +--+-------+-------+
+             ^       |
+             |       v
+  +----------+--+   +--+-----------+
+  | Baseline π_b |   | Learning π_θ |
+  +-------+------+   +------+------+
+          |                 |
+          +--------+--------+
+                   |
+          +--------v--------+
+          |   Arbitrator    |
+          | (probabilistic  |
+          |  switch based   |
+          |  on schedule)   |
+          +--------+--------+
+                   |
+                   v
+          +------------------+
+          | Selected Action  |  -> to Environment
+          +------------------+
+          |
+          +--- (s,a,r,s') -> Replay Buffer -> RL Update of π_θ
+```
+
+Now let's ground this with a **structural metaphor**: think of a car with **two drivers** – an **experienced co-pilot** (baseline) and a **student driver** (learning policy). The co-pilot is cautious and can always bring the car back onto the road (reach the goal). The student wants to learn to drive efficiently. There's a **switch** (arbitrator) that decides who takes the wheel at each moment.
+
+At the start, the co-pilot takes over most of the time – every time the student would steer into a ditch, the switch lets the co-pilot correct it. The student still "drives" occasionally, building muscle memory (collecting experience). Over time, the student improves, and the switch gradually lets the student drive more. By the end, the co-pilot is removed entirely, and the student drives solo, having learned from both their own mistakes and the co-pilot's example.
+
+The magic is that the co-pilot's _guarantee_ (always able to reach the goal) is preserved throughout training because the switch kicks in whenever the student's action would be catastrophic. The paper formalizes "functional" as: under π_b, the agent reaches the goal set and stays there with probability ≥ 1 - ε within a bounded time.
+
+### Key Concepts
+
+- **Functional Baseline**: Not just any old policy – a baseline is "functional" if, when executed from any state in the goal set, it keeps the agent there, and from any other state, it reaches the goal set within a bounded horizon with high probability. This is the crucial assumption. Example: a hand-coded hover controller that can stabilize a drone near a target, but flies too slowly and uses too much battery. It works – it just isn't optimal.
+
+- **Agency Transfer**: The act of gradually shifting control from baseline to learner. The paper implements it via a time-dependent switching probability. This is distinct from resetting to the baseline or using baseline actions as targets – the learner gets to "feel" the consequences of its own actions, but the safety net of the baseline is always there until withdrawn.
+
+- **Goal-reaching Rate**: A metric that measures the fraction of episodes where the agent reaches the goal set and stays there. The paper shows that the proposed method maintains this rate near 100% throughout training, while standard RL methods (which explore suboptimal actions early) often dip to 0% in early episodes. This is critical for real-world applications where we cannot afford a crash.
+
+## Framework Shift
+
+Before this paper, the mainstream approach was either: a) train from random initialization (hard exploration), or b) imitate the baseline with behavior cloning then fine-tune (slow improvement, no goal guarantee). This paper pivots from "learn by exploring from scratch" to "learn by safely expanding on an existing guarantee."
+
+```
+Before (mainstream):
+   [Start: random policy] ---> [exploration: mostly fails to reach goal]
+        |                        |
+        v                        v
+   [Many episodes of failure] --> [eventually learn goal reaching]
+        |
+        v
+   [Final policy: maybe better, but training was dangerous]
+
+After (this paper):
+   [Start: baseline in control] ---> [baseline ensures goal is reached]
+        |                                |
+        v                                v
+   [Learning policy gradually takes over] +--> [goal still reached]
+        |
+        v
+   [Final policy: standalone, better than baseline, training was safe]
+```
+
+**One sentence**: From _learning from scratch with costly exploration_ to _leveraging a functional baseline as a safety net and gradually transferring control_, the core shift is **agency transfer** – treating the baseline not as a teacher to imitate, but as a guarantor of success during training.
+
+## Expert Assessment
+
+**Problem choice**: Real and well-defined. Many control systems come with an existing controller that works but is suboptimal (e.g., in robotics, autonomous driving, process control). Ignoring that baseline is wasteful. The paper correctly identifies the gap: using the baseline's _functional_ property is more powerful than using it just as initialization or demonstration.
+
+**Method maturity**: Clever insight, simple implementation. The arbitration schedule is almost too simple – linear decay to zero. Could there be adaptive schedules that work better? Probably yes, but the authors chose simplicity to keep the theoretical analysis tractable. No brute-force tuning; the core idea is elegant. However, the method is essentially "use baseline as an oracle during training" – I'm surprised no one published this exact trick before.
+
+**Experimental integrity**: Baselines include SAC, PPO, and a version of SAC with pretraining (fine-tuning from baseline). The numbers show the proposed method (called "Agency Transfer SAC") matches or exceeds returns while achieving far higher goal-reaching rates during training. No red flags, but the paper uses a specific continuous-control domain (robotic reaching tasks with goal sets). I'd like to see more diverse benchmarks (e.g., tasks without a clear goal set, or with stochastic dynamics). The code is not provided in the abstract, but assuming it's available – worth checking.
+
+**Writing quality**: The paper is clearly structured – problem statement, formalization, method, theory, experiments. The theoretical section is dense but the core logic is accessible. The main weakness is that the arbitration mechanism's rationale is explained qualitatively but not justified empirically against alternatives (e.g., constant p, adaptive p). I'd rewrite the "Why Linear?" paragraph to include ablation. Also, the paper claims "high goal-reaching rates" but doesn't define the threshold – 90%? 99%? In experiments, it's effectively 100% for the proposed method, but the theory only gives lower bounds.
+
+**Verdict**: **weak accept** – a solid incremental contribution with practical value, clean theory, and convincing experiments. Not a paradigm shift, but a useful tool for practitioners who already have a working baseline.
+
+## Takeaways
+
+- **Steal the agency-transfer schedule**: If you have any "safe" fallback policy (even a simple rule), you can use it during training to avoid catastrophic failures. The linear decay is a good default, but you can adapt it based on learning progress. This is directly transferable to any RL problem with a safety constraint.
+
+- **Measure goal-reaching rate during training**: Most papers report only final returns. This paper shows that intermediate goal-reaching rates are a strong indicator of practical usability (especially in real-world deployment). You can adopt this metric for your own work.
+
+- **Theoretical guarantee trick**: The paper proves that if the baseline is functional, the learning policy inherits a lower bound on goal-reaching probability after training. This style of analysis – leveraging a "good enough" pretrained component to bound the learner's performance – can be applied in other RL settings (e.g., reward shaping, transfer learning).
+
+Consider using this method whenever you have a legacy controller that works but you want to improve it with deep RL without risking catastrophic failures during training.
+
+:::
+
+:::zh
+**论文**: [2606.09825](https://arxiv.org/abs/2606.09825)
+**作者**: Anton Bolychev, Georgiy Malaniya, Sinan Ibrahim, Pavel Osinenko
+**分类**: cs.LG, cs.AI, eess.SY, math.OC
+
+## 缺口
+
+强化学习从头训练代价高昂——需要精心设计奖励和环境，还要大量调参和算力。
+但很多实际控制任务已经有一个可用的（尽管次优）基线策略：手工控制器、规则系统或之前训练好的智能体。
+现有方法要么完全忽略基线（从头开始），要么仅用于初始化或模仿学习，浪费了其关键属性——它能可靠地到达目标并停留。
+
+之前的PPO或SAC方法从随机探索开始，早期常常无法到达目标。
+模仿学习可以复制基线，但很难超越它。
+没有无模型方法明确利用基线的"功能完好性"（能到达目标）来保证整个训练过程的高成功率。
+
+这篇论文正好填补了这个空白。
+
+```
+[问题]                        [假设]
+   |                             |
+ 从头训练成本高，  <---+   存在一个"功能完好"的
+ 早期样本效率低。    |   基线策略——以高概率
+                     |   到达目标并停留。
+                     |
+                     +---（缺口：如何在训练中
+                          利用基线的目标到达能力？）
+                           |
+                           v
+    [方法——代理人移交]
+      - 两个策略：基线（固定）+ 学习（可训练）
+      - 仲裁器每步选择执行哪个策略的动作
+      - 使用基线的概率从1线性衰减到0
+      - 学习策略通过离线RL从所有经验学习
+                           |
+                           +--- [证据] ------------+
+                               从第一回合起就保持   |
+                               高目标到达率。       |
+                               最终策略超越基线。   |
+                           v
+    [结论]
+ 在存在功能完好基线的情况下，
+ 实现高效且安全的策略升级。
+```
+
+## 增量
+
+**一句话**: 在此之前，任何想改进基线的无模型RL方法要么丢弃基线的目标到达保证，要么只模仿它；
+在此之后，你可以无缝地将代理人从中基线移交给学习器，同时几乎始终保持在目标区域内。
+
+### 核心机制
+
+该方法由三个组件构成：**基线策略** π_b（固定、次优但功能完好）、**学习策略** π_θ（可通过任意离策略RL算法训练神经网络）、以及**仲裁器**，它按概率选择执行哪个策略的动作。
+仲裁器使用基线的概率遵循一个简单调度：
+
+`p_t(基线) = max(0, 1 - 2 * (t / T))`（在前一半训练时间内从1线性衰减到0），之后完全不用基线。
+
+为什么线性？因为基线确保智能体很少离开目标集——即使学习策略的早期动作很差，仲裁器也经常退回到安全的基线动作。
+随着训练进行，学习策略积累了经验（包括成功轨迹），逐渐改进。
+到基线完全撤出时，学习策略已经学会自己到达并停留在目标集。
+
+学习策略使用标准离策略算法（如SAC）更新，利用含有所有历史转移的重放缓冲区，无论它们由哪个策略产生。
+论文提供了理论分析：如果基线功能完好（目标到达概率≥某个δ），那么仲裁机制保证训练期间的高目标到达率，并在假设条件下，最终独立策略继承了一个目标到达概率的下界。
+
+```
+          +------------------+
+          |    环境          |
+          +--+-------+-------+
+             ^       |
+             |       v
+  +----------+--+   +--+-----------+
+  | 基线 π_b      |   | 学习 π_θ     |
+  +-------+------+   +------+------+
+          |                 |
+          +--------+--------+
+                   |
+          +--------v--------+
+          |   仲裁器         |
+          |  (基于调度概率   |
+          |   选择执行哪个)  |
+          +--------+--------+
+                   |
+                   v
+          +------------------+
+          |   选中的动作     |  -> 到环境
+          +------------------+
+          |
+          +--- (s,a,r,s') -> 重放缓冲区 -> RL更新 π_θ
+```
+
+现在用**核喻**来理解：想象一辆车有**两位司机**——一位经验丰富的**副驾驶**（基线）和一位**学员**（学习策略）。
+副驾驶很谨慎，总能将车驶回道路（到达目标）。
+学员想学习高效驾驶。
+他们之间有一个**开关**（仲裁器），决定了每个时刻谁握方向盘。
+
+一开始，副驾驶几乎一直在开车——每次学员打方向快掉沟里时，开关就让副驾驶来修正。
+学员偶尔也开，积累肌肉记忆（收集经验）。
+随着学员进步，开关逐渐让学员开更多。
+到最后，副驾驶完全卸任，学员独立驾驶，既从自己的错误中学习，也从副驾驶的示范中学习。
+
+关键在于，副驾驶的"保证"（总能到达目标）在整个训练过程中都被保留——因为每当学员的动作可能导致灾难时，开关就介入使用基线动作。
+论文将"功能完好"形式化为：在π_b下，智能体在有限时间内以概率≥1-ε到达目标集并停留在那里。
+
+### 关键概念
+
+- **功能完好的基线**：不是随便一个旧策略——"功能完好"意味着从目标集内任意状态执行时，它能让智能体保持在那里；从其他状态出发，能在有限时间步内以高概率到达目标集。
+例如：一个手动编写的悬停控制器，能让无人机稳定悬停在目标附近，但飞得很慢且耗电高。
+它管用——只是不是最优的。
+
+- **代理人移交（Agency Transfer）**：将控制权从基线逐渐转移到学习器的过程。
+论文通过时间依赖的切换概率实现。
+这与"重置到基线"或"用基线动作作为目标"不同——学习器能亲身体验自己动作的后果，但基线的安全网一直存在直到被撤走。
+
+- **目标到达率**：衡量智能体到达目标集并停留在那里的回合比例。
+论文显示，所提方法在整个训练过程中该比率接近100%，而标准RL方法（早期探索次优动作）经常在最初几个回合降到0%。
+这对实际应用至关重要——我们不能容忍坠毁。
+
+## 框架转变
+
+在此论文之前，主流方法是：a) 从随机初始化开始训练（硬探索），或 b) 先行为克隆模仿基线再微调（改进慢，无目标到达保证）。
+这篇论文将思路从"通过探索从头学习"转向"基于已有的保证安全扩展学习"。
+
+```
+之前（主流方式）：
+   [开始：随机策略] ---> [探索：大多无法到达目标]
+        |                        |
+        v                        v
+   [大量失败回合] ----> [最终学会到达目标]
+        |
+        v
+   [最终策略可能更好，但训练过程危险]
+
+之后（本文方法）：
+   [开始：基线控制] ---> [基线确保到达目标]
+        |                        |
+        v                        v
+   [学习策略逐步接手] +--> [目标仍到达]
+        |
+        v
+   [最终策略：独立、优于基线、训练安全]
+```
+
+**一句话**: 从"用昂贵探索从头学习"到"利用功能完好的基线作为安全网并逐步移交控制权"，核心转变是**代理人移交**——将基线视为训练成功的保证者，而非单纯模仿的对象。
+
+## 专家评审
+
+**选题眼光**: 真实的、定义清晰的缺口。
+很多控制系统已有可用的控制器（如机器人、自动驾驶、过程控制），忽略它是浪费。
+论文正确识别了利用基线"功能完好"属性的潜力，这比仅用初始化或示范更强大。
+
+**方法成熟度**: 巧思，实现简单。
+仲裁调度几乎过于简单——线性衰减到零。
+也许自适应调度效果更好，但作者选择简洁以利于理论分析。
+不是蛮力调参，核心思想很优雅。
+不过，本质上是"训练时用基线作为先知"——我惊讶于之前没人公开过这个技巧。
+
+**实验诚意**: 基线包括SAC、PPO和一个预训练的微调版本。
+数据表明所提方法（称为"Agency Transfer SAC"）在达到或超过回报的同时，训练期间的目标到达率远高于其他方法。
+没有明显红旗，但只用了特定的连续控制域（带目标集的机器人到达任务）。
+希望看到更多样的基准（例如无明确目标集的任务，或随机动力学）。
+代码未在摘要中提供，假设有——值得检查。
+
+**写作功力**: 结构清晰——问题陈述、形式化、方法、理论、实验。
+理论部分较密集，但核心逻辑可理解。
+主要弱点是解释为何线性衰减时只是定性说明，没有通过消融对比替代方案（如常数p、自适应p）。
+我会重写"为什么线性"段，加入消融实验。
+另外，论文声称"高目标到达率"但未定义阈值——90%？99%？
+实验中所提方法几乎就是100%，但理论只给出下界。
+
+**判决**: **弱接收**——一个扎实的增量贡献，有实用价值、清晰的理论和有说服力的实验。
+不是范式转变，但对已有工作基线的实践者而言是有效工具。
+
+## 要点总结
+
+- **拿走代理人移交调度**：如果你有任何"安全"的备用策略（哪怕一条简单规则），都可以在训练中使用它来避免灾难性失败。
+线性衰减是一个好的默认值，你也可以根据学习进度调整。
+这可以直接迁移到任何有安全约束的RL问题。
+
+- **训练过程中度量目标到达率**：大多数论文只报告最终回报。
+这篇论文显示，中间的目标到达率是实用性的强指标（尤其在实际部署中）。
+建议你在自己工作中采用这个度量。
+
+- **理论保证的技巧**：论文证明如果基线功能完好，学习策略在训练后继承一个目标到达概率下界。
+这种分析风格——利用"足够好"的预训练组件来约束学习器性能——可以应用于其他RL设置（如奖励塑造、迁移学习）。
+
+当你有可用的旧控制器但想用深度RL改进它，而又不愿冒训练失败风险时，考虑采用这种方法。
+
+:::

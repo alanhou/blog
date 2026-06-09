@@ -1,0 +1,325 @@
+---
+title:
+  en: "Latent Spatial Memory for Video World Models"
+  zh: "视频世界模型的潜在空间记忆"
+description:
+  en: "This paper introduces Mirage, a framework that stores 3D scene information directly in the diffusion latent space, avoiding costly pixel-space round trips and achieving 10.57× faster video generation with 55× less memory."
+  zh: "本文提出Mirage框架，将3D场景信息直接存储在扩散潜在空间，避免昂贵的像素空间往返，实现10.57倍更快的视频生成和55倍内存节省。"
+date: 2026-06-09
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/latent-spatial-memory-for-video-world/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/latent-spatial-memory-for-video-world/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2606.09828](https://arxiv.org/abs/2606.09828)  
+**Authors**: Weijie Wang, Haoyu Zhao, Yifan Yang, Feng Chen, Zeyu Zhang, Yefei He, Zicheng Duan, Donny Y. Chen, Yuqing Yang, Bohan Zhuang  
+**Categories**: cs.CV
+
+## The Gap
+
+Existing video world models (e.g., 3D-VLA, WorldDreamer) maintain 3D spatial consistency by building an explicit point cloud memory in RGB space. Each new frame requires rendering the cloud, then encoding the rendered RGB image through a VAE into the diffusion latent space. This round trip is both computationally expensive (rendering + VAE encode for every frame) and inherently lossy — the VAE encoding discards fine-grained details that were present in the latent representation of earlier frames. The core assumption has been that 3D memory must live in pixel space to preserve geometric fidelity. This paper challenges that assumption.
+
+```
++--------------------------------------------------------+
+| Problem: explicit point cloud memory in RGB space      |
+| causes repeated rendering + VAE encoding overhead      |
++--------------------------------------------------------+
+                             |
+                             v
++--------------------------------------------------------+
+| Assumption: geometry can be represented directly in    |
+| the diffusion latent space without pixel round trip   |
++--------------------------------------------------------+
+                             |
+                             v
++--------------------------------------------------------+
+| Method: Mirage - latent spatial memory built via       |
+| depth-guided back-projection of latent tokens into 3D |
++--------------------------------------------------------+
+                             |
+                             v
++--------------------------------------------------------+
+| Evidence: 10.57x faster generation, 55x memory cut,   |
+| SOTA WorldScore on RealEstate10K                       |
++--------------------------------------------------------+
+                             |
+                             v
++--------------------------------------------------------+
+| Conclusion: latent-space 3D cache is both efficient   |
+| and accurate for video world models                    |
++--------------------------------------------------------+
+```
+
+## The Increment
+
+**One sentence**: Before this paper, 3D memory for video world models lived in pixel space and required repeated rendering/encoding; after, it lives in the latent space of a diffusion model, eliminating the round trip entirely.
+
+### Core Mechanism
+
+Mirage operates in two phases: **memory construction** and **memory query**. During construction, each input frame is passed through a VAE encoder to obtain latent features. A monocular depth estimator (trained jointly) provides per-pixel depth for those latent tokens. The depth values are used to back-project each latent token into a 3D point cloud — but the token itself stays in the latent representation, not as an RGB pixel. This 3D cloud of latent tokens becomes the persistent memory.
+
+During query (for a novel viewpoint), the desired camera pose is used to synthesize the view directly in latent space. Each output latent pixel corresponds to a 3D ray. By using the inverse of the construction process, Mirage warps the stored latent tokens onto the new view’s coordinate grid, effectively composing the target latent feature map from the cache. No rendering to RGB and no re-encoding are needed. The resulting latent map is then fed into the diffusion denoiser to produce the final frame.
+
+```
++-----+       +-----+      +-------------+      +-------------------+
+| In  | ----> | VAE | ---->| Depth Est.  | ---->| Back-project to  |
+|Frame|       |Enc. |      | (monocular) |      | 3D latent cloud  |
++-----+       +-----+      +-------------+      +-------------------+
+                                                         |
+                                                         v
+                                              +-------------------+
+                                              | Latent Spatial    |
+                                              | Memory (3D cache) |
+                                              +-------------------+
+                                                         |
+                                                         v
+                     Query: +---------+     +--------------------------+
+                     novel  | Camera  |---->| Warp stored latents to  |
+                     view   | Pose    |     | new view's grid (latent)|
+                            +---------+     +--------------------------+
+                                                         |
+                                                         v
+                                              +-------------------+
+                                              | Diffusion         |
+                                              | Denoiser -> Frame |
+                                              +-------------------+
+```
+
+**Structural metaphor**: Think of a **factory warehouse** where every incoming item (latent token) is labeled with its shelf coordinates (3D location via depth) and placed directly into bins without being unpacked (no RGB rendering). When a new order arrives (novel view), the warehouse robot reads the shelf map for each bin on the order sheet and reaches directly to pull the item from the bin, keeping it in its original packaging (latent space). No unpacking and repacking (no pixel-round trip). The warehouse is the memory; the robot is the warping operation; the order sheet is the camera pose.
+
+### Key Concepts
+
+- **Latent Space**: A compressed representation learned by a VAE that captures semantic information in a smaller, more structured space than pixels. In diffusion models, denoising operates on these latents, not raw pixels. By staying in this space, we avoid the repeated compression-and-decompression that loses details. **Example*: Think of storing a photo as a high-level sketch vs. storing it as a raw 8K image; the sketch (latent) keeps the important structure while being faster to manipulate.
+
+- **Depth-Guided Back-Projection**: Given a latent token at pixel (u,v) with estimated depth d, we unproject it to a 3D point via the camera intrinsics. Each token becomes a point with its feature vector. This lifts the 2D latent map into a 3D point cloud that can be warped to new views. **Example*: Like taking a flat map of a city and, using mountain heights (depth), turning each map square into a 3D building; you can then look at the city from any angle.
+
+- **Latent Warping (Inverse Projection)**: To query the memory from a new viewpoint, we project each output latent pixel’s 3D ray onto the stored point cloud and bilinearly interpolate the nearest stored latent tokens. This produces a latent map for the new view without ever rendering an image. **Example*: Instead of demolishing a building and rebuilding it to see its back, you rotate the existing 3D model in your mind and paint the back side using the stored front textures.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
++------------------+                +------------------+
+| Input frame (RGB)|                | Input frame (RGB)|
++--------+---------+                +--------+---------+
+         | VAE encode                      | VAE encode
+         v                                 v
++--------+---------+                +--------+---------+
+| Latent token map |                | Latent token map |
++--------+---------+                +--------+---------+
+         |                                 |
+         | (render point cloud             | (back-project
+         |  to RGB, then VAE               |  tokens to 3D
+         |  re-encode)                     |  directly)
+         v                                 v
++--------+---------+                +--------+---------+
+| Explicit 3D cloud |               | Latent 3D cache  |
+| (RGB memory)      |               | (features only)  |
++--------+---------+                +--------+---------+
+         |                                 |
+         | render + VAE encode             | warp + direct
+         | (expensive, lossy)              | latent output
+         v                                 v
++--------+---------+                +--------+---------+
+| New view latents   |               | New view latents  |
+| (after round trip) |               | (no round trip)  |
++--------------------+                +------------------+
+```
+
+**One sentence**: From explicit point cloud memory in RGB space with repeated rendering/encoding to latent spatial memory with direct 3D caching in the diffusion latent space—the core shift is eliminating the pixel-space round trip.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. As video world models push toward real-time simulators, the explicit point cloud pipeline is an obvious bottleneck. The field needs this kind of architectural rethinking. It’s timely and well-motivated.
+
+**Method maturity**: Elegant insight, not brute force. The trick of treating latent tokens as 3D points via depth is simple once you see it, but prior work didn’t connect the dots. The main risk is depth estimation quality, which the paper handles via joint training. Some alternative approaches (e.g., using 3D feature grids) exist but are heavier; this is lighter.
+
+**Experimental integrity**: Baselines are fair (3D-VLA, etc.) and include both quality and speed/memory metrics. The 10.57× speedup and 55× memory reduction are striking, though they rely on a particular depth estimator. Missing: ablation of depth accuracy vs. quality, and comparison on long-horizon consistency. No red flags, but I’d like to see more ablation on the warping implementation.
+
+**Writing quality**: Abstract and intro are crisp. The method section feels a bit dense—readers new to latent warping may struggle. A diagram showing the actual tensor shapes and warp equations would help. The experimental section is thorough but could use a summary table of ablation results.
+
+**Verdict**: **Strong accept** — this paper opens a new path for efficient 3D-aware video generation with clear benefits and solid evidence.
+
+## Takeaways
+
+1. **Latent-space 3D caching** can be applied to any generative model with a latent encoder-decoder, not just diffusion video world models. If you’re doing novel view synthesis or scene editing, consider keeping your feature cache in the latent space rather than image space.  
+2. **Depth as a bridge** between 2D latent tokens and 3D structure is cheap and effective. Monocular depth estimation is improving rapidly; this paper shows how to integrate it into a generative pipeline without extra rendering costs.  
+3. **Memory/compute tradeoff** – storing tokens (feature vectors) vs. storing pixels is a general principle: features are far more compact. The 55× memory reduction is a concrete number practitioners can aim for in similar systems.
+:::
+
+:::zh
+**论文**: [2606.09828](https://arxiv.org/abs/2606.09828)  
+**作者**: Weijie Wang, Haoyu Zhao, Yifan Yang, Feng Chen, Zeyu Zhang, Yefei He, Zicheng Duan, Donny Y. Chen, Yuqing Yang, Bohan Zhuang  
+**分类**: cs.CV
+
+## 缺口
+
+现有的视频世界模型（例如3D-VLA、WorldDreamer）通过在RGB空间中构建显式点云记忆来维持3D空间一致性。
+每生成一个新帧都需要渲染点云，
+再将渲染后的RGB图像通过VAE编码到扩散模型的潜在空间。
+这一往返过程既计算开销大（每帧都要渲染+VAE编码），
+又本质上有损——
+VAE编码会丢弃之前帧潜在表示中的精细细节。
+此前的核心假设是：为了保持几何保真度，
+3D记忆必须存在于像素空间。
+这篇论文挑战了这一假设。
+
+```
++---------------------------------------------------------------+
+| 问题: 在RGB空间中使用显式点云记忆，导致重复渲染+VAE编码的开销    |
++---------------------------------------------------------------+
+                              |
+                              v
++---------------------------------------------------------------+
+| 假设: 几何信息可以直接在扩散潜在空间中表示，无需像素级往返      |
++---------------------------------------------------------------+
+                              |
+                              v
++---------------------------------------------------------------+
+| 方法: Mirage - 通过深度引导反向投影将潜在令牌提升到3D，         |
+| 构建潜在空间记忆                                                |
++---------------------------------------------------------------+
+                              |
+                              v
++---------------------------------------------------------------+
+| 证据: 生成速度提升10.57倍，内存减少55倍，在RealEstate10K上       |
+| 取得WorldScore SOTA                                           |
++---------------------------------------------------------------+
+                              |
+                              v
++---------------------------------------------------------------+
+| 结论: 潜在空间3D缓存对视频世界模型既高效又准确                    |
++---------------------------------------------------------------+
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，视频世界模型的3D记忆存在于像素空间，需要重复渲染和编码；之后，它存在于扩散模型的潜在空间，彻底消除了往返过程。
+
+### 核心机制
+
+Mirage运行分为两个阶段：**记忆构建**和**记忆查询**。
+在构建阶段，每一帧输入通过VAE编码器得到潜在特征。
+一个单目深度估计器（联合训练）为每个潜在令牌提供逐像素深度。
+深度值用于将每个潜在令牌反向投影为3D点云——
+但令牌本身保持潜在表示形式，而非RGB像素。
+这个潜在令牌3D点云成为持久记忆。
+
+在查询阶段（针对新视角），利用目标相机位姿直接在潜在空间中合成该视图。
+每个输出潜在像素对应一条3D射线。
+通过使用构建过程的逆过程，Mirage将存储的潜在令牌扭曲到新视图的坐标网格上，
+实际上是从缓存中组合出目标潜在特征图。
+不需要渲染成RGB，也不需要重新编码。
+得到的潜在图随后送入扩散去噪器生成最终帧。
+
+```
++-----+       +-----+      +-------------+      +-------------------+
+|输入  | ----> | VAE |---->| 深度估计    |---->| 反向投影到       |
+|帧    |       |编码 |      | (单目)      |     | 3D潜在点云       |
++-----+       +-----+      +-------------+      +-------------------+
+                                                         |
+                                                         v
+                                              +-------------------+
+                                              | 潜在空间记忆      |
+                                              | (3D缓存)         |
+                                              +-------------------+
+                                                         |
+                                                         v
+                     查询: +---------+     +--------------------------+
+                     新视角 | 相机    |---->| 将存储的潜在令牌扭曲   |
+                            | 位姿    |     | 到新视图的网格(潜在) |
+                            +---------+     +--------------------------+
+                                                         |
+                                                         v
+                                              +-------------------+
+                                              | 扩散去噪器       |
+                                              | -> 输出帧        |
+                                              +-------------------+
+```
+
+**结构性比喻**: 想象一个**工厂仓库**：
+每件入库物品（潜在令牌）都被贴上了货架坐标（通过深度得到的3D位置），
+直接放入货箱，且不做拆包（不进行RGB渲染）。
+当新订单（新视角）到来时，仓库机器读取每个订单上的货架映射，
+直接伸手从货箱中取出物品，保持原包装（潜在空间）。
+没有拆包和重新打包（没有像素往返）。
+仓库就是记忆，机器是扭曲操作，订单是相机位姿。
+
+### 关键概念
+
+- **潜在空间**: VAE学习到的压缩表示，
+  比像素更小、更有结构化地捕捉语义信息。
+  在扩散模型中，去噪操作在潜在空间中进行，而非原始像素。
+  通过停留在这个空间，我们避免了重复压缩与解压缩带来的细节丢失。
+  *例子*：将一张照片存储为高层次的速写 vs. 存储为原始8K图像；
+  速写（潜在）保留了重要结构，同时更易于操作。
+
+- **深度引导反向投影**: 给定位于像素(u,v)的潜在令牌及其估计深度d，
+  通过相机内参将其反投影为3D点。
+  每个令牌成为一个带有特征向量的点。
+  这会将2D潜在图提升为3D点云，从而可以扭曲到新视角。
+  *例子*：好比拿一张城市平面图，利用山脉高度（深度）将每个方格变成3D建筑；
+  然后你可以从任意角度观察这座城市。
+
+- **潜在扭曲（逆投影）**: 要从新视角查询记忆，
+  我们将每个输出潜在像素的3D射线投影到存储的点云上，
+  并双线性插值最近的存储潜在令牌。
+  这直接为新视角生成了潜在图，无需渲染图像。
+  *例子*：不必为了看一栋楼的背面而将其拆掉重建；
+  你只需在脑海中旋转现有的3D模型，
+  用存储的正面纹理“画出”背面。
+
+## 框架转变
+
+```
+之前（主流方法）:                    之后（本文方法）:
++------------------+                +------------------+
+| 输入帧 (RGB)     |                | 输入帧 (RGB)     |
++--------+---------+                +--------+---------+
+         | VAE编码                        | VAE编码
+         v                                 v
++--------+---------+                +--------+---------+
+| 潜在令牌图        |                | 潜在令牌图        |
++--------+---------+                +--------+---------+
+         |                                 |
+         | (渲染点云为RGB，                | (直接将令牌
+         |  再VAE重编码)                   |  反向投影到3D)
+         v                                 v
++--------+---------+                +--------+---------+
+| 显式3D点云       |               | 潜在3D缓存       |
+| (RGB记忆)        |               | (仅特征)          |
++--------+---------+                +--------+---------+
+         |                                 |
+         | 渲染 + VAE编码                  | 扭曲 + 直接
+         | (昂贵,有损)                     | 输出潜在图
+         v                                 v
++--------+---------+                +--------+---------+
+| 新视角潜在图      |               | 新视角潜在图      |
+| (经过往返后)     |               | (无往返)          |
++--------------------+                +------------------+
+```
+
+**一句话**: 从RGB空间中的显式点云记忆（需反复渲染/编码）到扩散潜在空间中的直接3D缓存——核心转变是消除了像素级往返。
+
+## 专家评审
+
+**选题眼光**: 真正的缺口。当视频世界模型向实时模拟器推进时，显式点云流水线明显是瓶颈。这种架构性反思正是领域所需。时机恰当，动机充分。
+
+**方法成熟度**: 巧妙的洞察，而非蛮力。将潜在令牌通过深度作为3D点来处理，这个技巧一旦点破就很简单，但此前的工作没有将这些点联系起来。主要风险是深度估计质量，论文通过联合训练解决了这一问题。存在其他替代方法（如使用3D特征网格）但更重；本文方法更轻量。
+
+**实验诚意**: 基线合理（3D-VLA等），同时覆盖了质量和速度/内存指标。10.57倍加速和55倍内存减少令人印象深刻，尽管它们依赖于特定的深度估计器。缺少：深度精度对质量的消融，以及长序列一致性对比。没有红旗，但我希望看到更多关于扭曲实现的消融。
+
+**写作功力**: 摘要和引言清晰简洁。方法部分稍显密集——不熟悉潜在扭曲的读者可能会吃力。加入展示实际张量形状和扭曲方程的图示会有帮助。实验部分全面，但可加入一个消融结果汇总表。
+
+**判决**: **强接收**——这篇论文为高效3D感知视频生成开辟了新路径，效益明确，证据扎实。
+
+## 要点总结
+
+1. **潜在空间3D缓存**可以应用于任何具有潜在编码器-解码器的生成模型，不仅限于扩散视频世界模型。如果你在做新视角合成或场景编辑，考虑将特征缓存保留在潜在空间而非图像空间。
+2. **深度作为桥梁**连接2D潜在令牌和3D结构，廉价且有效。单目深度估计正在快速进步；本文展示了如何将其集成到生成流水线中而不增加渲染成本。
+3. **内存/计算权衡**——存储令牌（特征向量） vs. 存储像素是一个通用原则：特征更为紧凑。55倍内存减少是一个具体数字，实践者在类似系统中可以以此为目标。
+:::
