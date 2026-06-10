@@ -1,0 +1,237 @@
+---
+title:
+  en: "ReasonAlloc: Hierarchical Decoding-Time KV Cache Budget Allocation for Reasoning Models"
+  zh: "ReasonAlloc：推理模型中解码阶段KV缓存预算的分层分配方法"
+description:
+  en: "A training-free framework that allocates KV cache budgets hierarchically during long chain-of-thought decoding, capturing layer-wise reasoning patterns and head-wise utility to outperform uniform budgeting, especially under tight memory constraints."
+  zh: "一种免训练框架，在长链思维解码过程中对KV缓存预算进行分层分配，捕捉层级的推理波形和头级的实时效用，在低预算下显著优于均匀分配方法。"
+date: 2026-06-10
+tags: ["arxiv", "ai", "cs.ai"]
+image: "/arxiv-visuals/reasonalloc-hierarchical-decoding-time-kv-cache/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/reasonalloc-hierarchical-decoding-time-kv-cache/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2606.11164](https://arxiv.org/abs/2606.11164)  
+**Authors**: Wenhao Liu, Hao Shi, Yunhe Li, Weizhi Fei, Xiangyuan Wang, Mengzhe Ruan, Hanxu Hou, Peisong Wang, Linqi Song, Shuang Qiu  
+**Categories**: cs.AI
+
+## The Gap
+
+Long chain-of-thought (CoT) trajectories in LLM reasoning inflate the KV cache to hundreds of thousands of tokens, creating a severe inference bottleneck. Existing decoding-time compression methods (e.g., R-KV, SnapKV) apply uniform token eviction across all layers and heads—they assume every attention unit needs the same budget. Meanwhile, non-uniform budget allocation has been explored only for the static prefill phase (e.g., Pyramid-RKV), imposing a fixed, monotonically decreasing budget that does not adapt to the stepwise context demands of autoregressive reasoning.
+
+The gap is clear: **no prior work treats decoding-time KV compression as a dynamic, hierarchical allocation problem** that separately accounts for architecture-driven layer profiles and real-time head utility. ReasonAlloc fills this gap by combining an offline layer-wise preallocation (which discovers a pattern called the "Reasoning Wave") with an online head-wise reallocation during decoding.
+
+```
+Problem: long CoT => huge KV cache => inference bottleneck
+    |
+    v
+Assumption (prior): uniform budget across all layers/heads is optimal
+    |
+    v  (contradiction)
+Observation: reasoning models show non-uniform attention demand
+    |
+    v
+Method: hierarchical allocation
+    + offline (layer-wise) -- uses architecture pattern
+    + online  (head-wise)  -- uses real-time utility
+    |
+    v
+Evidence: higher accuracy on MATH-500, AIME 2024
+    especially at small budgets (128-512 tokens)
+    |
+    v
+Conclusion: plug-and-play, training-free, negligible overhead
+```
+
+## The Increment
+
+**One sentence**: Before ReasonAlloc, decoding-time KV compression assumed a flat budget across all layers and heads; after ReasonAlloc, budgets are **hierarchically* allocated—first by layer (offline, guided by the Reasoning Wave) and then by head (online, guided by real-time utility)—yielding a significant accuracy boost under tight cache limits.
+
+### Core Mechanism
+
+ReasonAlloc consists of two complementary stages. The first is an **offline layer-wise preallocation**. By profiling a few reasoning trajectories from the model, the authors discover a repeatable pattern: attention demand peaks in middle layers and drops at the extremes—the "Reasoning Wave." Using this pattern, each layer is assigned a base budget proportional to its historical importance, before any decoding begins.
+
+The second stage runs **online during every decoding step**. For each head in each layer, a utility score is computed (e.g., based on attention entropy or gradient magnitude). Budget is then redistributed from low-utility heads to high-utility ones within the same layer, while respecting each layer's preallocated total. The final per-head budget is fed into any token-eviction policy (R-KV, SnapKV, etc.) to decide which KV pairs to keep.
+
+```
++-------------------+      offline profile      +-------------------+
+|  model layers     | ---------------------->    |  layer budgets    |
+|  (L1, L2, ..., Ln)|     (Reasoning Wave)      |  B_L1, B_L2, ...  |
++-------------------+                           +-------------------+
+                                                         |
+                                                         v
++-------------------+     online step t            +-------------------+
+|  head utilities   | ---------------------->      |  head budgets     |
+|  for each head    |  (entropy / grad)            |  B_{L_i, H_j}    |
++-------------------+                              +-------------------+
+                                                         |
+                                                         v
+                                              +--------------------------+
+                                              |  token eviction policy  |
+                                              |  (e.g., R-KV, SnapKV)  |
+                                              +--------------------------+
+```
+
+**Structural Metaphor**: Think of a university's annual budget. The central administration (offline layer-wise preallocation) looks at historical enrollment data across departments (the Reasoning Wave) and allocates a base budget to each department accordingly. But once the semester starts, each department's dean (online head-wise reallocation) monitors real-time classroom occupancy (head utility) and shifts money from empty rooms to overcrowded ones. The total department budget stays fixed, but the internal distribution adapts. This two-level hierarchy captures both long-term architectural patterns and short-term spikes in demand—exactly what autoregressive reasoning needs.
+
+### Key Concepts
+
+- **Reasoning Wave**: A stable pattern in reasoning LLMs where mid-layers exhibit higher attention entropy and thus require more KV cache slots, while early and late layers need fewer. Discovered by profiling a few CoT examples offline. This is not a theoretical property but an empirical regularity that holds across different models and tasks.
+
+- **Head Utility**: A real-time score for each attention head during decoding. The authors use a lightweight proxy—normalized attention entropy—which correlates with how much that head contributes to generating the next token. Low-entropy heads (highly focused) are deemed more useful and get extra budget; high-entropy heads (diffuse) lose budget. This is updated every step at negligible cost.
+
+- **Token-Eviction Policy**: Any existing method that drops old KV pairs when the budget is exceeded. ReasonAlloc is agnostic: it simply controls the per-head budget caps. The paper shows consistent improvements over three popular policies (R-KV, SnapKV, and a custom static baseline Pyramid-RKV).
+
+## Framework Shift
+
+```
+Before (mainstream):                            After (this paper):
+   uniform budget across layers                    hierarchical budget
+   + uniform across heads                          + layer budgets follow Reasoning Wave
+                                                   + head budgets adapt per step
+   L1: [xxxx]                                      L1: [xxxx]
+   L2: [xxxx]                                      L2: [xxxxxx]    (more budget)
+   L3: [xxxx]                                      L3: [xxxx]
+   ...                                             ...
+   Ln: [xxxx]                                      Ln: [xx]         (less budget)
+
+   All heads get equal chunk per layer.           Heads get dynamic chunk per layer.
+```
+
+**One sentence**: From flat uniform allocation to a **two-level dynamic allocation** guided by offline architectural profiling and online head utility.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The inference bottleneck from long reasoning is a pressing practical issue. Prior uniform approaches are clearly suboptimal, and the prefill-only non-uniform methods miss the dynamics of autoregressive decoding. The problem sits at the intersection of compression and reasoning—hot area.
+
+**Method maturity**: Clever but not radical. The insight of profiling the Reasoning Wave is solid engineering. The online head reallocation is a standard "attention is all you need," but the combination with offline preallocation is novel. Could there be simpler approaches? Possibly a learned static head importance per layer (like head pruning) without online reallocation, but the paper shows online help. Overall, the method is mature: it's training-free, lightweight, and plug-and-play.
+
+**Experimental integrity**: Fair baseline selection—R-KV, SnapKV, and a bespoke static baseline Pyramid-RKV. The gains are largest at small budgets (128-512), which is where the problem bites hardest. Ablations show the contribution of each component. However, the paper only tests on a few models (DeepSeek-R1-Distill variants and AceReason-14B) and two math benchmarks. Would have been stronger to include code-generation or long-document reasoning. The "Reasoning Wave" is only shown for those models; generalizability remains unproven.
+
+**Writing quality**: Clear structure but the abstract and introduction oversell novelty ("recasts..." feels grandiose). The method description is precise but the diagrams could be more informative. The metaphor is effective. The weakest section is the related work, which is too brief—it lumps existing methods into broad camps without highlighting subtle differences. A rewrite of the related work with a comparison table would elevate the paper.
+
+**Verdict**: **weak accept** — a practical, well-executed engineering contribution that fills an obvious gap, but the novelty is incremental and the evaluation scope is limited.
+
+## Takeaways
+
+- **Profile then adapt**: For any dynamic resource allocation problem (e.g., model parallelism, speculative decoding, sparsity), leveraging offline profiling of stable patterns (like the Reasoning Wave) combined with online reallocation is a transferable template.
+
+- **Head utility is cheap**: Attention entropy or gradient norms can be computed as a byproduct of the forward pass; the paper shows that a simple entropy-based utility works well. Practitioners can try this in their own eviction or pruning strategies.
+
+- **Don't assume uniformity**: Many LLM inference frameworks treat all layers and heads the same. ReasonAlloc demonstrates that even a coarse layer-wise differentiation (the Reasoning Wave) yields practical gains, and the online head reallocation further boosts performance. A lesson in questioning default uniformity.
+:::
+
+:::zh
+**论文**: [2606.11164](https://arxiv.org/abs/2606.11164)  
+**作者**: Wenhao Liu, Hao Shi, Yunhe Li, Weizhi Fei, Xiangyuan Wang, Mengzhe Ruan, Hanxu Hou, Peisong Wang, Linqi Song, Shuang Qiu  
+**分类**: cs.AI
+
+## 缺口
+
+长链思维（CoT）轨迹导致大语言模型推理时KV缓存急剧膨胀，成为严重瓶颈。现有解码阶段压缩方法（如R-KV、SnapKV）对所有层和注意力头进行均匀的token驱逐——它们假设每个注意力单元需要相同的预算。与此同时，非均匀预算分配仅被用于静态预填充阶段（如Pyramid-RKV），采取固定的单调递减预算，无法适应自回归推理的逐步上下文需求。
+
+这个缺口很清晰：**没有工作将解码阶段的KV压缩视为一个动态的分层分配问题**，分别考虑架构驱动的层级特征和实时的注意力头效用。ReasonAlloc通过结合离线层级预分配（发现一个名为"推理波形"的规律）和在线注意力头级实时再分配，填补了这一空白。
+
+```
+问题：长CoT => 庞大KV缓存 => 推理瓶颈
+    |
+    v
+假设（先前工作）：所有层/头的均匀预算是最优的
+    |
+    v  （矛盾）
+观察：推理模型呈现出非均匀的注意力需求
+    |
+    v
+方法：分层分配
+    + 离线（层级）——利用架构模式
+    + 在线（头级）——利用实时效用
+    |
+    v
+证据：在MATH-500、AIME 2024上准确率更高
+    尤其在低预算下（128-512 tokens）
+    |
+    v
+结论：即插即用、免训练、开销可忽略
+```
+
+## 增量
+
+**一句话**: 在ReasonAlloc之前，解码阶段的KV压缩假设所有层和头预算相同；之后，预算被**分层*分配——首先按层（离线，由推理波形指导），再按注意力头（在线，由实时效用指导）——在严格缓存限制下显著提升准确率。
+
+### 核心机制
+
+ReasonAlloc包含两个互补阶段。第一阶段是**离线层级预分配**。通过对模型运行少量推理轨迹进行剖析，作者发现一个可重复的规律：注意力需求在中间层达到峰值，在两端下降——他们称之为"推理波形"。利用这一规律，在解码开始前，每一层被分配一个与其历史重要性成正比的基准预算。
+
+第二阶段在**每个解码步骤在线运行**。对于每一层的每个注意力头，计算一个效用分数（例如基于注意力熵或梯度大小）。然后，预算从低效用头重新分配到高效用头（在同一层内），同时保持该层的总预算不变。最终每个头的预算被送入任意的token驱逐策略（R-KV、SnapKV等），以决定保留哪些KV对。
+
+```
++-------------------+      离线剖析       +-------------------+
+|  模型各层          | ------------------>    |  层预算           |
+|  L1, L2, ..., Ln  |   (推理波形)          |  B_L1, B_L2, ... |
++-------------------+                     +-------------------+
+                                                   |
+                                                   v
++-------------------+    在线步骤 t         +-------------------+
+|  各头效用         | ------------------>    |  头预算           |
+|  熵/梯度          |                      |  B_{L_i, H_j}    |
++-------------------+                     +-------------------+
+                                                   |
+                                                   v
+                                          +-------------------+
+                                          | token驱逐策略    |
+                                          | R-KV / SnapKV等 |
+                                          +-------------------+
+```
+
+**结构性比喻**：想象一所大学的年度预算分配。校方（离线层级预分配）根据历年各系的选课人数（推理波形）来分配基础预算。但学期开始后，各系主任（在线头级再分配）监控实时教室占用率（头效用），将空教室的经费转移到拥挤的教室。系的总预算不变，但内部分配动态调整。这种两级层次结构同时捕获了长期架构模式和短期需求波动，正是自回归推理所需。
+
+### 关键概念
+
+- **推理波形**：推理大模型中的一个稳定规律——中间层呈现更高的注意力熵，因此需要更多KV缓存槽位，而早期和晚期层需求较少。通过离线运行少量CoT示例发现。这不是理论性质，而是跨模型和任务的经验规律。
+
+- **头效用**：解码时每个注意力头的实时分数。作者使用一个轻量级代理指标——归一化注意力熵，它与该头对生成下一个令牌的贡献程度相关。低熵头（高度聚焦）被认为更有用，获得额外预算；高熵头（注意力分散）失去预算。每个步骤更新，开销可忽略。
+
+- **Token驱逐策略**：任何在预算超限时丢弃旧KV对的方法。ReasonAlloc与之无关——它仅控制每个头的预算上限。论文展示了对三个流行策略（R-KV、SnapKV和一个自定义静态基线Pyramid-RKV）的一致改进。
+
+## 框架转变
+
+```
+之前（主流方法）：                       之后（本文方法）：
+   均匀预算跨所有层                       分层预算
+    + 均匀跨所有头                         + 层预算遵循推理波形
+                                           + 头预算每步自适应
+   L1: [xxxx]                             L1: [xxxx]
+   L2: [xxxx]                             L2: [xxxxxx]  (更多预算)
+   L3: [xxxx]                             L3: [xxxx]
+   ...                                    ...
+   Ln: [xxxx]                             Ln: [xx]      (更少预算)
+
+   所有头每层拿到相同大小。               每层内头拿到动态大小。
+```
+
+**一句话**：从扁平均匀分配到**由离线架构剖析和在线头效用引导的两级动态分配**。
+
+## 专家评审
+
+**选题眼光**：真缺口。长链推理导致的推理瓶颈是紧迫的实际问题。先前的均匀方法显然次优，而仅用于预填充的非均匀方法忽略了自回归解码的动态性。该问题处于压缩和推理的交汇热点。
+
+**方法成熟度**：巧劲而非蛮力。剖析推理波形的洞察是扎实的工程。在线头再分配是标准的"注意力即一切"，但结合离线预分配具有新意。是否有更简单的方法？可能有用静态学习的头重要性（如头剪枝）而无需在线调整，但论文显示在线有帮助。总体而言，方法成熟：免训练、轻量、即插即用。
+
+**实验诚意**：基线选择公平——R-KV、SnapKV和定制的静态基线Pyramid-RKV。增益在低预算（128-512）下最大，而这正是问题最严重之处。消融实验展示了各组件的贡献。然而，论文仅测试了少数模型（DeepSeek-R1-Distill变体和AceReason-14B）和两个数学基准。如果能包括代码生成或长文本推理会更有说服力。"推理波形"仅在这些模型上展示，泛化性未证明。
+
+**写作功力**：结构清晰，但摘要和引言过度推销（"重新定义…"略显浮夸）。方法描述精确，但图表可以更丰富。比喻有效。最弱的是相关工作部分，过于简短，将现有方法笼统归类，未突出细微差异。重写相关工作并加入对比表会提升论文档次。
+
+**判决**：**弱接收**——一个实用且执行良好的工程贡献，填补了一个明显的缺口，但创新增量有限，评估范围也偏小。
+
+## 要点总结
+
+- **先剖析后适应**：对于任何动态资源分配问题（如模型并行、推测解码、稀疏化），利用离线剖析稳定模式（如推理波形）结合在线再分配，是一种可迁移的模板。
+
+- **头效用计算廉价**：注意力熵或梯度范数可以在前向传播中作为副产品获得；论文展示了简单的熵基效用效果不错。实践者可以在自己的驱逐或剪枝策略中尝试。
+
+- **不要默认均匀**：许多LLM推理框架对所有层和头一视同仁。ReasonAlloc表明，即使是粗糙的层级区分（推理波形）也能带来实际收益，而在线头再分配进一步提升性能。这是一个质疑默认均匀性的教训。
+:::
