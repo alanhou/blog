@@ -23,7 +23,7 @@ function findRawAngleBracketIssues(content, filePath) {
   const lines = content.split('\n');
   let inFence = false;
   let fenceMarker = '';
-  let mathDollarParity = 0; // track $...$ and $$...$$ (simple heuristic)
+  let inDisplayMath = false;
 
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i];
@@ -41,6 +41,12 @@ function findRawAngleBracketIssues(content, filePath) {
         inFence = false;
       }
       continue;
+    }
+
+    // Track display math $$ ... $$ (cross-line rough toggle for skipping angle checks in LaTeX math source)
+    const dmCount = (line.match(/\$\$/g) || []).length;
+    if (dmCount % 2 === 1) {
+      inDisplayMath = !inDisplayMath;
     }
 
     // Track inline math $...$ / $$...$$ on this line (very approximate; good enough for validation)
@@ -73,7 +79,7 @@ function findRawAngleBracketIssues(content, filePath) {
         continue;
       }
 
-      if (ch === '<' && !inMath) {
+      if (ch === '<' && !inMath && !inDisplayMath) {
         const next = line[j + 1] || '';
         const prev = line[j - 1] || '';
 
@@ -98,10 +104,11 @@ function findRawAngleBracketIssues(content, filePath) {
         // Only flag the patterns proven to reliably break the MDX JSX parser with the exact error
         // "Unexpected character `<` before name":
         //   - <<   (the original crash: "r << d" in prose)
-        //   - >>   (symmetric, or diagram arrows that leak out of code)
-        // We are conservative here: many "word < word" and math-in-text still compile thanks to
-        // remark-math + how @astrojs/mdx + the JSX recovery works in paragraphs. Only double-angle
-        // is a guaranteed hard failure when not protected.
+        //   - >>   (symmetric)
+        //   - <=   (and < followed by space or -) because after the < the JSX tag parser
+        //          sees "=" / " " / "-" instead of a valid name-start char (letter/$/_).
+        //          These appear in comparisons ("x < 5", "score <= 100", "health < 30%")
+        //          and arrows in text. Wrap them in backticks.
         const isDoubleShift = (next === '<' || next === '>');
         if (isDoubleShift) {
           const snippet = line.slice(j, j + 2);
@@ -115,6 +122,23 @@ function findRawAngleBracketIssues(content, filePath) {
             fix: `\`${snippet}\``
           });
           j++; // skip the second one too
+        }
+
+        // Catch the cases that actually broke the build: <= , "x < 5", "<-- arrows" etc. in prose.
+        if (!isDoubleShift && (next === '=' || next === ' ' || next === '-')) {
+          const snippet = line.slice(j, j + 2);
+          errors.push({
+            file: filePath,
+            line: i + 1,
+            column: j + 1,
+            issue: 'RAW_ANGLE_BRACKET_IN_PROSE',
+            message: 'Raw "<" (comparison <= / < 30% or arrow <--) in prose is parsed as JSX tag start and fails with "Unexpected character `=` (or other) before name". Wrap the operator/expression in backticks, e.g. `<= 500`, `health < 30%`, or use $math$.',
+            match: snippet,
+            fix: `\`${snippet}\``
+          });
+          if (next !== ' ') {
+            j++; // advance past the second char for <= or <-
+          }
         }
       }
       j++;
