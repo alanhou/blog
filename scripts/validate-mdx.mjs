@@ -6,6 +6,7 @@
 
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join, extname } from 'path';
+import matter from 'gray-matter';
 
 const ISSUES = {
   UNESCAPED_ANGLE_BRACKETS: {
@@ -167,6 +168,22 @@ function validateFile(filePath) {
   const content = readFileSync(filePath, 'utf-8');
   const lines = content.split('\n');
   const errors = [];
+
+  // Frontmatter YAML parse check (catches missing closing ---, bad colons, multiline key issues etc.)
+  // This mirrors exactly what Astro's content collections + gray-matter do during `astro sync`/`build`.
+  try {
+    matter(content);
+  } catch (e) {
+    errors.push({
+      file: filePath,
+      line: 1,
+      column: 1,
+      issue: 'INVALID_FRONTMATTER',
+      message: `Frontmatter YAML parse failed: ${e.message || e}`,
+      match: '--- ... ---',
+      fix: null
+    });
+  }
 
   for (const [issueKey, issue] of Object.entries(ISSUES)) {
     const matches = [...content.matchAll(issue.pattern)];
