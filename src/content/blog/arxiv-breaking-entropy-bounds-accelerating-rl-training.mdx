@@ -1,0 +1,275 @@
+---
+title:
+  en: "Breaking Entropy Bounds: Accelerating RL Training via MTP with Rejection Sampling"
+  zh: "打破熵界：利用多令牌预测与拒绝采样加速强化学习训练"
+description:
+  en: "This paper reveals that MTP acceptance rates in RL training are bounded by entropy fluctuations, and proposes probabilistic rejection sampling plus a TV loss to break the bound, achieving up to 1.8x end-to-end acceleration."
+  zh: "本文揭示了强化学习中多令牌预测接受率受熵波动的限制，并提出概率拒绝采样与全变差损失来打破该界限，实现最高1.8倍端到端加速。"
+date: 2026-06-11
+tags: ["arxiv", "ai", "cs.lg", "cs.cl"]
+image: "/arxiv-visuals/breaking-entropy-bounds-accelerating-rl-training/HeroScene.png"
+
+:::en
+**Paper**: [2606.12370](https://arxiv.org/abs/2606.12370)  
+**Authors**: Yucheng Li, Huiqiang Jiang, Yang Xu, Jianxin Yang, Yi Zhang, Yizhong Cao, Yuhao Shen, Fan Zhou, Rui Men, Jianwei Zhang  
+**Categories**: cs.LG, cs.CL
+
+## The Gap
+
+Existing work uses Multi-Token Prediction (MTP) to accelerate RL rollouts via speculative decoding: a draft model predicts K tokens, and the target model validates them. This works well during pretraining, but during post-training RL, the acceptance rate collapses (often below 50%), killing the speedup. Prior attempts treat this as a training stability issue or simply avoid MTP in RL. The paper pinpoints the root cause: the acceptance rate is bounded by the model's entropy—as entropy rises during RL (new tasks, reward shaping), the agreement between the draft and target drops linearly. This is an information-theoretic barrier, not just an engineering bug.
+
+```
+[Problem: MTP acceptance rate drops in RL]
+       |
+       v
+[Assumption: Entropy fluctuation causes this]
+       |
+       v
+[Method: Rejection sampling + TV loss + offline MTP training]
+       |
+       v
+[Evidence: ~95% acceptance rate, 1.8x end-to-end acceleration across 3 tasks]
+       |
+       v
+[Conclusion: The entropy bound can be broken by changing the sampling strategy and training objective]
+```
+
+## The Increment
+
+**One sentence**: Before this paper, MTP acceptance rates collapsed in RL, making speculative decoding impractical; after this paper, by switching to probabilistic rejection sampling and directly optimizing acceptance via TV loss, the rate stays high (95%) and the wall-clock acceleration is real (1.8x).
+
+### Core Mechanism
+
+The method, called Bebop, has three components that work together.
+
+First, replace the standard **greedy top-1 draft sampling** with **probabilistic rejection sampling**. Instead of generating the most likely draft token, the draft model samples from its full distribution, and the target model accepts or rejects based on a ratio of probabilities. This accounts for the fact that during RL, the target's distribution becomes more uniform (higher entropy), so greedy drafts disagree more often. Probabilistic sampling aligns the two distributions better by design.
+
+Second, the **training objective** for the MTP head is changed from cross-entropy or KL divergence to an **end-to-end Total Variation (TV) loss**. The KL divergence penalizes mismatched probabilities in expectation but does not directly maximize the expected number of accepted tokens under the rejection sampling procedure. The TV loss directly maximizes the acceptance rate because, for a given draft distribution p and target q, the optimal rejection rate is proportional to the TV distance \(TV(p,q)\). By minimizing TV, Bebop achieves ~10% higher acceptance.
+
+Third, the paper shows that **online training** of the MTP head during RL is unnecessary. A single **pre-RL** training session with the TV loss and rejection sampling produces an MTP head that maintains a constant acceptance rate throughout the entire RL training. This eliminates the cost of updating the draft model during RL, a major practical hurdle.
+
+```
+[ASCII diagram of method internals]
+
+                RL rollout loop:
+                    |
+   +---
+
+![Hero diagram](/arxiv-visuals/breaking-entropy-bounds-accelerating-rl-training/HeroScene.png)
+
+-------------v------------------------------+
+   |    Pre-RL: train MTP head with TV loss       |
+   |        + rejection sampling in data gen      |
+   +----------------+-----------------------------+
+                    |
+                    v (fixed MTP head, no further update)
+   +----------------v------------------------------+
+   | During RL:                                    |
+   |  (a) Draft model (MTP head) samples tokens    |
+   |      probabilistically from its distribution  |
+   |  (b) Target model (RL policy) accepts/rejects |
+   |      via rejection sampling                   |
+   |  (c) Accepted tokens executed, skipped steps  |
+   +----------------+-----------------------------+
+                    |
+                    v
+              Rollout speedup (1.8x)
+```
+
+**Structural metaphor**: Think of the RL rollout as a **live theater improvisation** where the main actor (the RL policy) must deliver lines, but each line takes time to think. A **script prompter** (the MTP head) whispers multiple future lines at once. In the old way, the prompter always suggests the most likely next line (greedy). But during a challenging scene (high entropy RL task), the actor often deviates, making the prompts useless. Bebop changes the prompter to occasionally **give alternative suggestions** (probabilistic sampling), and trains the prompter **specifically for this back-and-forth** (TV loss). Crucially, the prompter rehearses **before the show starts** (pre-RL training) and never changes again, because its skill transfers perfectly to any scene in the play. The actor now accepts most prompts, finishing lines much faster.
+
+### Key Concepts
+
+- **Multi-Token Prediction (MTP)**: Instead of predicting only the next token, the model predicts the next K tokens in one forward pass. These are usually handled by a lightweight "draft head" appended to the model. During generation, the draft provides a block of tokens that can be validated in parallel (speculative decoding), saving K-1 sequential steps if the block is accepted. The challenge is that the draft must be close to the target's output, otherwise the rejection rate kills the benefit.
+
+- **Rejection Sampling (in speculative decoding)**: Given a draft token from distribution p and the target's distribution q, the token is accepted with probability min(1, q(x)/p(x)). If accepted, we move to the next draft token; if rejected, we sample from a corrected distribution (q - p)+. This mechanism ensures the final output distribution matches q exactly, regardless of p's quality. The expected number of accepted tokens per step is related to the similarity between p and q. The paper's insight is that during RL, q's entropy increases, making greedy p far from q, but probabilistic p (sampling from p itself) remains closer.
+
+- **Total Variation (TV) Loss**: TV distance between two distributions p and q is sup_A |p(A) - q(A)|, or equivalently 1/2 sum_x |p(x) - q(x)|. It directly measures the probability that optimal rejection sampling would reject a sample from p. The paper proposes to train the draft head by minimizing TV(p||q) on the RL-specific data distribution, which is equivalent to maximizing the expected acceptance rate. This is a direct optimization, unlike cross-entropy or KL which are surrogates.
+
+## Framework Shift
+
+```
+Before (mainstream approach):                After (this paper):
+                                              (Pre-RL phase)
+   [MTP head trained with CE/KL]              [MTP head trained with TV loss]
+          |                                             |
+          v                                             v
+   (During RL: rollout)                      (During RL: rollout)
+   [Draft head = greedy top-1]               [Draft head = probabilistic sample]
+   [Target accepts/rejects]                  [Target accepts/rejects via rejection sampling]
+          |                                             |
+          v                                             v
+   Acceptance rate drops (40-60%)            Acceptance rate stays ~95%
+   Speedup: 1.0x - 1.2x                      Speedup: up to 1.8x
+```
+
+One sentence: From **greedy draft + CE training** to **probabilistic draft + end-to-end TV training** plus **offline pre-RL training**, the core shift is recognizing that the conventional training objective and sampling strategy fundamentally limit acceptance during RL, and that these can be replaced with a principled alignment method.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. RL training for LLMs is expensive, and rollout is the bottleneck. Prior work on speculative decoding implicitly avoided the post-training setting because "everyone knows" acceptance rates drop. This paper formalizes that intuition and solves it. It sits at the intersection of RL for LLMs and efficient generation—both hot areas.
+
+**Method maturity**: Clever insight, not brute force. The key realization (entropy bound) is elegant and backed by a clear negative linear relationship. The proposed fixes (rejection sampling, TV loss) are principled and light-touch. However, the offline training trick is partly empirical luck; it might not hold for all tasks or model scales. The method is mature enough for deployment.
+
+**Experimental integrity**: Baselines are fair—they compare against no-MTP, MTP with CE, MTP with KL, and a naive online update. The speedup measurements account for the overhead of rejection sampling. The paper tests three tasks (math, code, agent) and three model families. Biggest red flag: the TV loss is reported to give ~10% acceptance improvement over KL, but the variance and statistical significance are not fully discussed. Also, the offline training claim needs more ablation: what if RL data distribution drifts heavily? Still, the evidence is strong enough.
+
+**Writing quality**: The paper is well-structured, with clear problem statement and logical flow. The "entropy bound" section is the highlight. Where it cuts corners: the ablation of TV loss vs. other alternatives (e.g., Jensen-Shannon) is missing. The "related work" section is thin—readers benefit from a longer discussion on speculative decoding in non-stationary settings. If the authors added a 2-page appendix on failure cases (e.g., tasks where offline MTP fails), the paper would be significantly stronger.
+
+**Verdict**: **weak accept** — The paper solves a real engineering problem with a sound theoretical insight and produces convincing results. It deserves attention from anyone building RL pipelines for LLMs, though the offline training claim warrants caution in production.
+
+## Takeaways
+
+1. **If you use speculative decoding in RL, switch from greedy to probabilistic draft sampling.** It costs nothing (the distribution is already computed) and makes acceptance robust to entropy changes.
+2. **Optimize your draft head with a loss that directly targets your acceptance metric.** CE/KL are fine for pretraining but suboptimal for rejection sampling. The TV loss is a drop-in replacement that yields consistent gains.
+3. **Do not bother updating the draft head online during RL.** Train it once on pre-RL data using the TV loss, then freeze it. This eliminates a major source of complexity and instability.
+4. **Monitor entropy of the RL policy during training.** If it rises, your speculative decoding will degrade. The paper's linear model can even predict the acceptance rate drop and schedule MTP head refreshes (though they show it's unnecessary here).
+
+:::zh
+**论文**: [2606.12370](https://arxiv.org/abs/2606.12370)  
+**作者**: Yucheng Li, Huiqiang Jiang, Yang Xu, Jianxin Yang, Yi Zhang, Yizhong Cao, Yuhao Shen, Fan Zhou, Rui Men, Jianwei Zhang  
+**分类**: cs.LG, cs.CL
+
+## 缺口
+
+现有工作采用多令牌预测（MTP）来加速强化学习的推演阶段：草稿模型预测 K 个 token，目标模型验证它们。
+这在预训练阶段效果不错，但在强化学习后训练中，接受率急剧下降（常低于 50%），加速效果消失。
+此前的研究要么认为这是训练稳定性问题，要么干脆在强化学习中避开 MTP。
+这篇论文找到了根本原因：接受率受模型熵的约束——强化学习期间熵上升（新任务、奖励塑形），草稿和目标的分歧线性增加。
+这不仅是工程 bug，而是信息论层面的障碍。
+
+```
+[问题: 强化学习中 MTP 接受率下降]
+       |
+       v
+[假设: 熵波动是罪魁祸首]
+       |
+       v
+[方法: 拒绝采样 + 全变差损失 + 离线 MTP 训练]
+       |
+       v
+[证据: 约 95% 接受率，三个任务上 1.8 倍加速]
+       |
+       v
+[结论: 改变采样策略和训练目标可以打破熵界]
+```
+
+## 增量
+
+**一句话**: 在此之前，MTP 在接受率在强化学习中崩塌，投机解码不可行；
+在此之后，通过概率拒绝采样和直接优化接受率的全变差损失，接受率保持高位（95%）并实现 1.8 倍真实加速。
+
+### 核心机制
+
+Bebop 方法由三部分组成。
+
+第一，将标准的**贪婪 top-1 草稿采样**替换为**概率拒绝采样**。
+草稿模型不再输出最可能的 token，而是从完整分布中采样；目标模型根据概率比值决定接受或拒绝。
+这样做的原因是：强化学习中目标分布变得均匀（熵增加），贪婪草稿分歧更大，而概率采样天然地使两个分布更对齐。
+
+第二，MTP 头的训练目标从交叉熵或 KL 散度改为**端到端全变差（TV）损失**。
+KL 散度在期望上惩罚概率不匹配，但不会直接最大化拒绝采样下期望接受的 token 数。
+TV 损失直接最大化接受率，因为给定草稿分布 p 和目标 q，最优接受率与 TV 距离成正比。
+最小化 TV 使得接受率提升约 10%。
+
+第三，论文证明强化学习期间**不需要在线更新 MTP 头**。
+在强化学习前用 TV 损失和拒绝采样训练一次，得到的 MTP 头在整个强化学习过程中保持恒定的接受率。
+这省去了强化学习期间更新草稿模型的成本，这是实际部署中的主要障碍。
+
+```
+[方法内部 ASCII 图]
+
+                  强化学习推演循环:
+                      |
+   +------------------v----------------------------+
+   |  预训练阶段: 用 TV 损失训练 MTP 头           |
+   |   + 用拒绝采样生成训练数据                    |
+   +------------------+---------------------------+
+                      |
+                      v (MTP 头固定，不再更新)
+   +------------------v---------------------------+
+   |  强化学习阶段:                               |
+   |  (a) MTP 头从分布中概率采样草稿 token        |
+   |  (b) 目标模型用拒绝采样接受/拒绝             |
+   |  (c) 接受的 token 直接执行，跳过顺序步骤     |
+   +------------------+---------------------------+
+                      |
+                      v
+                 推演加速 (1.8 倍)
+```
+
+**核喻**: 想象强化学习推演是一台**即兴剧场**：主角（强化学习策略）必须念出台词，但每句台词需要思考时间。
+一个**提词器**（MTP 头）一次低语多句未来台词。
+旧方式中，提词器总是给出最可能的下一句（贪婪模式）。
+但在高难度的场景（高熵强化学习任务）下，主角常常偏离剧本，提示基本没用。
+Bebop 让提词器偶尔**给出备选方案**（概率采样），并专门为这种**一问一答**训练提词器（TV 损失）。
+关键在于，提词器在**演出开始前就排练好**（强化学习前训练），之后不再改变，因为在任何场景下它的技能都通用。
+现在主角接受大部分提示，台词念得快多了。
+
+### 关键概念
+
+- **多令牌预测（MTP）**: 模型不仅预测下一个 token，还同时预测后面 K 个 token。
+通常通过一个轻量的“草稿头”附加到模型上实现。
+生成时，草稿头输出一个 token 块，可以并行验证（投机解码），如果块被接受则节省 K-1 个顺序步骤。
+挑战在于草稿必须接近目标输出，否则拒绝率会抵消收益。
+
+- **拒绝采样（在投机解码中）**: 给定来自分布 p 的草稿 token 和目标分布 q，接受概率为 min(1, q(x)/p(x))。
+如果接受则继续下一个草稿 token；如果拒绝则从修正分布中重新采样。
+这个机制保证最终输出分布严格符合 q，无论 p 的质量如何。
+每次步骤期望接受的 token 数与 p 和 q 的相似度相关。
+论文的洞察是：强化学习中 q 的熵增加，使得贪婪 p 离 q 很远，但概率 p（从 p 本身采样）仍然较近。
+
+- **全变差（TV）损失**: 两个分布 p 和 q 的 TV 距离定义为 sup_A |p(A) - q(A)|，或者等价地 1/2 sum_x |p(x) - q(x)|。
+它直接衡量了最优拒绝采样中从 p 采样的 token 被拒绝的概率。
+论文提出在强化学习的数据分布上通过最小化 TV(p||q) 来训练草稿头，这等价于最大化期望接受率。
+这是直接优化，不像交叉熵或 KL 那样是替代目标。
+
+## 框架转变
+
+```
+之前（主流方法）:                          之后（本文方法）:
+                                            （预训练阶段）
+   [MTP 头用 CE/KL 训练]                    [MTP 头用 TV 损失训练]
+          |                                            |
+          v                                            v
+   （强化学习推演中）                        （强化学习推演中）
+   [草稿头 = 贪婪 top-1]                    [草稿头 = 概率采样]
+   [目标接受/拒绝]                          [目标通过拒绝采样接受/拒绝]
+          |                                            |
+          v                                            v
+   接受率下降 (40-60%)                      接受率保持约 95%
+   加速: 1.0x - 1.2x                        加速: 最高 1.8x
+```
+
+一句话：从**贪婪草稿 + CE 训练**到**概率草稿 + 端到端 TV 训练**加**离线预训练**，
+核心转变是认识到传统训练目标和采样策略在强化学习中从根本上限制了接受率，并且可以用一种原理上更合适的方法取代。
+
+## 专家评审
+
+**选题眼光**: 真缺口。强化学习训练大型语言模型成本高昂，推演是瓶颈。
+此前投机解码的工作有意避开后训练阶段，因为“大家都知道”接受率会下降。
+本文直观地证明了这一点并解决了问题。它处于大模型强化学习和高效生成的交叉点，热度很高。
+
+**方法成熟度**: 巧劲，不是蛮力。关键洞察（熵界）优雅且由清晰的线性关系支持。
+提出的修复（拒绝采样、TV 损失）有原理且轻量。不过离线训练技巧部分靠经验运气，
+可能不适用于所有任务或模型规模。方法成熟度足以用于部署。
+
+**实验诚意**: 基线公平——对比了无 MTP、CE-MTP、KL-MTP 和朴素在线更新方案。
+加速测量考虑了拒绝采样的开销。论文测试了三个任务（数学、代码、智能体）和三个模型族。
+最大风险点：TV 损失相比 KL 获得约 10% 的接受率提升，但方差和统计显著性讨论不全。
+另外离线训练主张需要更多消融：如果强化学习数据分布严重漂移会怎样？不过证据足够有力。
+
+**写作功力**: 结构良好，问题陈述和逻辑流程清晰。“熵界”部分是亮点。
+偷懒之处：TV 损失与其他候选（如 Jensen-Shannon）的消融缺失。
+“相关工作”部分单薄——若增加 2 页附录讨论离线 MTP 失败案例，论文会更有分量。
+
+**判决**: **弱接收** —— 该论文用一个扎实的理论洞察解决了一个真实的工程问题，并给出了令人信服的结果。
+任何构建大模型强化学习流水线的人都值得关注，尽管离线训练主张在生产中需要谨慎。
+
+## 要点总结
+
+1. **如果你在强化学习中使用投机解码，把贪婪草稿采样换成概率草稿采样。** 这几乎零成本（分布已经算好），且使接受率对熵变化鲁棒。
+2. **用直接优化接受率的损失来训练草稿头。** CE/KL 在预训练时不错，但对拒绝采样是次优的。TV 损失即插即用，带来持续增益。
+3. **不要在强化学习期间在线更新草稿头。** 用 TV 损失在强化学习前训练一次，然后冻结它。这消除了一个主要的复杂性和不稳定性来源。
+4. **监控强化学习策略的熵。** 如果它上升，投机解码会退化。论文的线性模型甚至可以预测接受率下降并安排草稿头刷新（尽管他们证明这里不需要）。
+
+:::

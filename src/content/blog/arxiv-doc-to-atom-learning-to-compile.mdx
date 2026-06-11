@@ -1,0 +1,264 @@
+---
+title:
+  en: "Doc-to-Atom: Learning to Compile and Compose Memory Atoms"
+  zh: "Doc-to-Atom：学习编译和组合记忆原子"
+description:
+  en: "A compositional parametric memory framework that decomposes documents into typed knowledge atoms, each compiled into a micro-LoRA adapter, enabling query-specific adapter assembly with lower memory cost and better reasoning on long documents."
+  zh: "一种组合式参数化记忆框架，将文档分解为类型化的知识原子，每个原子编译成微LoRA适配器，实现按查询组装适配器，降低内存成本并提升长文档推理能力。"
+date: 2026-06-11
+tags: ["arxiv", "ai", "cs.cl", "cs.ir"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.12400](https://arxiv.org/abs/2606.12400)
+**Authors**: Xingjian Diao, Wenbo Li, Yashas Malur Saidutta, Avinash Amballa, Lazar Valkov, Srinivas Chappidi
+**Categories**: cs.CL, cs.IR
+
+## The Gap
+
+Current context distillation methods like Doc-to-LoRA generate a single LoRA adapter per document, amortizing compression into one forward pass. While efficient, this monolithic adapter treats all queries identically: it internalizes the entire document without distinguishing which parts are relevant to a given question. This causes irrelevant-query interference (the adapter's parameters are polluted by unrelated content) and limits compositional recall (facts are entangled in one weight matrix, making multi-hop reasoning difficult). Moreover, scaling to very long documents forces a single adapter to encode too much, degrading performance.
+
+The paper identifies a specific boundary: parametric memory for long-document QA is bottlenecked by the lack of decomposition and query-conditional composition. The logical flow:
+
+```
+Problem: Long-input attention is quadratic cost
+  |
+  v
+Assumption: Compressing context into model params can avoid quadratic cost
+  |
+  v
+Prior method: Doc-to-LoRA (single adapter per doc) is simple but suffers interference and poor recall
+  |
+  v
+Hypothesis: Decomposing doc into typed atoms + composing query-specific adapter improves both
+  |
+  v
+Method: Doc2Atom - compile atoms to micro-LoRAs with provenance keys, route queries to relevant atoms
+  |
+  v
+Evidence: Outperforms Doc-to-LoRA on 6 QA benchmarks with lower memory cost
+  |
+  v
+Conclusion: Compositional parametric memory is viable and superior to monolithic adaptation
+```
+
+## The Increment
+
+**One sentence**: Before Doc2Atom, parametric memory for documents meant a single, entangled adapter; after Doc2Atom, we can decompose a document into independent, query-addressable memory atoms that are compiled and composed dynamically, achieving better recall and efficiency.
+
+### Core Mechanism
+
+Doc2Atom works in two phases: compilation and inference.
+
+**Compilation phase**: Given a document D, a base LLM (frozen) processes it through a compressor module that outputs a sequence of "atoms." Each atom is a triple: (type, content embedding, provenance key). The types are semantic categories (e.g., entity, relation, numeric fact, temporal fact) learned automatically. For each atom, a tiny micro-LoRA adapter is generated via a learned projection from the content embedding. Simultaneously, a provenance key (a vector summary) is produced for retrieval.
+
+**Inference phase**: A query comes in. A lightweight router network computes attention between the query representation and all provenance keys, selecting a subset of relevant atoms (e.g., top-k). The corresponding micro-LoRA adapters are linearly combined (summed or averaged) into a single query-specific LoRA adapter. This adapter is then injected into the frozen base LLM, which processes the query and generates the answer.
+
+The entire system is trained end-to-end with a multi-objective distillation loss: (1) reconstruction loss compressing the document into atoms, (2) retrieval loss making provenance keys match relevant queries, and (3) generation loss for final answer quality.
+
+```
+[ASCII diagram of method internals]
+
+Compilation Phase:
+Document D
+    |
+    v
+[Compressor] --> Atom List: { (type, embedding, key), ... }
+    |                    |
+    v                    v
+[Micro-LoRA Gen]    [Provenance Key Gen]
+    |                    |
+    v                    v
+Micro-LoRA set       Key set
+    \                    /
+     \                  /
+Inference Phase:
+Query Q ----> [Router]
+                   |
+                   v
+          [Attention: Q x Keys] --> selected keys (top-k)
+                   |
+                   v
+          [Composer: sum selected micro-LoRA weights]
+                   |
+                   v
+          Query-specific LoRA adapter --> [Frozen LLM] --> Answer
+```
+
+**Structural metaphor: A modular reference library.**
+
+Imagine a large reference library where each book (document) is initially treated as one monolithic tome. A researcher (query) would have to scan the entire book, even if only a specific chapter is relevant, causing interference from unrelated chapters and making it hard to combine facts across different books. Doc2Atom's insight is to break each book into individual "knowledge cards" (atoms), each containing a single fact, with a subject label (type) and a classification number (provenance key). When a researcher arrives with a question, a card catalog (router) quickly points to the relevant cards. The librarian then takes those cards and assembles a custom booklet (query-specific LoRA) containing only the needed facts. The researcher uses this booklet instead of the entire books. This avoids irrelevant content, enables combining facts from multiple books easily, and scales to huge libraries because each card is independent.
+
+### Key Concepts
+
+- **Knowledge Atom**: A minimal, self-contained unit of factual knowledge extracted from a document. Each atom is typed (e.g., "Person-BirthYear", "Company-Location") and has a learned embedding that captures its content. Atoms are the currency of memory. Think of them as factoid triplets, but derived end-to-end without manual annotation.
+
+- **Micro-LoRA Adapter**: A tiny adapter (e.g., rank 1 or 2) generated from a single atom. Unlike a full LoRA for the whole document, a micro-LoRA is so small that it only modifies a few weight dimensions in the base model. But combined, a set of micro-LoRAs can steer the model to recall specific facts without interfering with others. The key is that micro-LoRAs are additive and composable by simple sum.
+
+- **Query Router with Provenance Keys**: The router is a lightweight neural module that maps a query to attention weights over provenance keys (vectors representing each atom). The provenance keys are learned to be discriminative: atoms that help answer similar queries have similar keys. The router selects top-k keys, effectively performing a sparse retrieval from the parametric memory pool. This ensures that only relevant facts are incorporated.
+
+## Framework Shift
+
+```
+Before (Doc-to-LoRA monolithic approach):        After (Doc2Atom compositional approach):
+
+ Document                                          Document
+    |                                                 |
+    v                                                 v
+[Compressor] --> one LoRA adapter                 [Atomizer] --> many micro-LoRAs + keys
+    |                                                 |
+    v                                                 v
+Frozen LLM uses same adapter for ALL queries     Frozen LLM uses query-specific composed adapter
+    |                                                 |
+    v                                                 v
+Answer (interference from irrelevant parts)      Answer (only relevant atoms contribute)
+```
+
+One sentence: From a one-size-fits-all parametric adapter to a modular, query-addressable memory bank, the core shift is **decomposition and dynamic composition** — treating parametric memory not as a monolithic blob but as a collection of independent facts that can be retrieved and assembled.
+
+## Expert Assessment
+
+**Problem choice**: The gap is real. The quadratic cost of attention is a well-known bottleneck, and parametric memory approaches like Doc-to-LoRA are promising but indeed suffer from interference in multi-topic documents. This paper targets a genuine limitation with a principled decomposition. It sits at the intersection of efficient inference and memory augmentation, a hot area.
+
+**Method maturity**: The idea is clever — using micro-LoRAs as modular memory and training them end-to-end with a router. But it borrows heavily from retrieval-augmented generation (RAG) concepts (dense retrieval over documents) and applies them to parametric memory. The novelty is in the marriage of micro-LoRA composition with learned provenance keys. The complexity is moderate; the main challenge is training stability (multi-objective optimization) which they seem to handle. A simpler alternative might be to use a mixture-of-experts style routing over adapter banks, but that would be less efficient.
+
+**Experimental integrity**: Baselines are reasonable (Doc-to-LoRA, full-context, etc.). Results on 6 QA benchmarks show clear improvement, but I would have liked to see ablation studies on the importance of typing, number of atoms, and router mechanism. The memory cost is reported lower — good. However, I notice that all benchmarks are extractive or short-form QA; multi-step reasoning (e.g., HotpotQA) would be stronger evidence for compositional recall. The paper claims multi-step but only uses simple QA sets like SQuAD, TriviaQA. That's a gap in evidence. Also, no evaluation on very long docs (e.g., 100k tokens) — they mention scalability but test on moderate length. So, numbers are solid but scope is limited.
+
+**Writing quality**: Generally clear. The method section is well-structured. The weakest part is the related work — it's a bit thin and doesn't position deeply against retrieval-based methods (which also do composition). If they rewrote the discussion to compare more explicitly with RAG (retrieval over external databases vs parametric atoms), the paper would gain context. The abstract promises "compositional recall" but the experiments don't clearly isolate that ability.
+
+**Verdict**: weak accept — a solid incremental step that fixes a real issue in parametric memory, but the evidence for multi-step compositional reasoning is weaker than claimed, and the novelty is more in engineering than conceptual breakthrough.
+
+## Takeaways
+
+- **Use micro-adapters as modular memory units**: Instead of one LoRA per task or document, consider extreme decomposition. This idea could transfer to continual learning (each new fact = a micro-adapter) or multi-task learning (composing adapters per instance).
+
+- **Learned provenance keys for retrieval within a parametric memory**: This is a general technique: any parametric memory (e.g., hypernetworks, adapters) can be equipped with a key-query routing mechanism for conditional use.
+
+- **Multi-objective distillation for end-to-end training of memory components**: The combination of reconstruction, retrieval, and generation losses is a recipe that can be reused in other memory-augmented models.
+:::
+
+:::zh
+**论文**: [2606.12400](https://arxiv.org/abs/2606.12400)
+**作者**: Xingjian Diao, Wenbo Li, Yashas Malur Saidutta, Avinash Amballa, Lazar Valkov, Srinivas Chappidi
+**分类**: cs.CL, cs.IR
+
+## 缺口
+
+当前上下文蒸馏方法（如Doc-to-LoRA）为每篇文档生成单个LoRA适配器，将压缩分摊到一次前向传播中。
+这虽然高效，但该整体适配器对所有查询一视同仁：它内化了整篇文档，而不区分哪些部分与给定问题相关。
+这导致了无关查询干扰（适配器参数被无关内容污染），并限制了组合回忆（事实纠缠在单个权重矩阵中，多跳推理困难）。
+此外，扩展到非常长的文档时，单个适配器需要编码过多信息，性能下降。
+
+本文确定了一个具体边界：长文档问答的参数化记忆受困于缺乏分解和查询条件组合。
+
+逻辑流程如下：
+
+```
+问题：长输入注意力的二次成本
+  |
+  v
+假设：将上下文压缩到模型参数中可以避免二次成本
+  |
+  v
+先前方法：Doc-to-LoRA（每文档单适配器）简单但受干扰并回忆差
+  |
+  v
+本假设：将文档分解为类型化原子+组合查询特定适配器可同时改善
+  |
+  v
+方法：Doc2Atom - 将原子编译为微LoRA及来源键，路由查询至相关原子
+  |
+  v
+证据：在6个QA基准上优于Doc-to-LoRA且内存成本更低
+  |
+  v
+结论：组合参数化记忆可行且优于整体适配
+```
+
+## 增量
+
+**一句话**: Doc2Atom出现前，文档参数化记忆意味着单个纠缠适配器；Doc2Atom后，我们可以将文档分解为独立、可查询寻址的记忆原子，动态编译和组合，实现更好的回忆和效率。
+
+### 核心机制
+
+Doc2Atom分为编译和推理两个阶段。
+
+**编译阶段**：给定文档D，冻结的基础LLM通过一个压缩器模块输出一组"原子"。
+每个原子是一个三元组：(类型、内容嵌入、来源键)。
+类型是语义类别（例如实体、关系、数字事实、时间事实），自动学习。
+对于每个原子，通过学习投影从内容嵌入生成一个微小的微LoRA适配器。
+同时生成一个用于检索的概要向量（来源键）。
+
+**推理阶段**：输入查询Q。
+轻量级路由网络计算查询表示与所有来源键之间的注意力，选择一组相关原子（如top-k）。
+对应的微LoRA适配器被线性组合（求和或平均）为一个查询特定的LoRA适配器。
+然后将该适配器注入冻结的基础LLM，处理查询并生成答案。
+
+整个系统通过多目标蒸馏损失进行端到端训练：(1) 重构损失将文档压缩为原子，(2) 检索损失使来源键与相关查询匹配，(3) 生成损失用于最终答案质量。
+
+```
+[方法内部的ASCII图]
+
+编译阶段：
+文档D
+    |
+    v
+[压缩器] --> 原子列表：{ (类型, 嵌入, 键), ... }
+    |                    |
+    v                    v
+[微LoRA生成器]    [来源键生成]
+    |                    |
+    v                    v
+微LoRA集合        键集合
+    \                    /
+     \                  /
+推理阶段：
+查询Q ----> [路由]
+                   |
+                   v
+          [注意力: Q x 键] --> 选中键 (top-k)
+                   |
+                   v
+          [组合器: 求和选中微LoRA权重]
+                   |
+                   v
+          查询特定LoRA适配器 --> [冻结LLM] --> 答案
+```
+
+**结构性比喻：模块化参考图书馆**
+
+想象一个大型参考图书馆，每本书（文档）一开始被当作一个整体大部头。
+研究者（查询）必须通读整本书，即使只需要某一章，导致无关章节干扰且难以跨书组合信息。
+Doc2Atom的洞察是将每本书拆成单独的"知识卡片"（原子），每张卡片包含一个事实，带有主题标签（类型）和分类编号（来源键）。
+当研究者带着问题到来时，卡片目录（路由）快速指向相关卡片。
+然后图书管理员取出这些卡片，组装成一本定制小册子（查询特定LoRA），只包含所需事实。
+研究者使用这本小册子代替整书。
+这避免了无关内容，可以轻松组合多本书的信息，并且因为卡片各自独立，能扩展到巨大图书馆。
+
+### 关键概念
+
+- **知识原子**：从文档中提取的最小自包含事实单元。每个原子有类型（如"人物-出生年份"、"公司-地点"）和学习到的内容嵌入。原子是记忆的货币。可以理解为事实三元组，但无需人工标注，来自端到端学习。
+
+- **微LoRA适配器**：从单个原子生成的微小适配器（如秩1或2）。与文档整体LoRA不同，微LoRA极小，只修改基础模型中的少数权重维度。但组合起来，一组微LoRA可以引导模型回忆特定事实而不干扰其他事实。关键是微LoRA是可加的，通过简单求和即可组合。
+
+- **带来源键的查询路由**：路由是一个轻量级神经模块，将查询映射到来源键（表示每个原子的向量）上的注意力权重。来源键经过学习，具有辨别力：有助于回答相似查询的原子拥有相似的键。路由选择top-k键，相当于对参数化记忆池执行稀疏检索。这确保只纳入相关事实。
+
+## 框架转变
+
+```
+之前（Doc-to-LoRA整体方法）：        之后（Doc2Atom组合方法）：
+
+ 文档                                   文档
+   |                                       |
+   v                                       v
+[压缩器] --> 一个LoRA适配器          [原子化器] --> 多个微LoRA + 键
+   |                                       |
+   v                                       v
+冻结LLM对所有查询使用相同适配器      冻结LLM使用查询特定组合适配器
+   |                                       |
+   v                                       v
+答案（受无关部分干扰）              答案（仅相关原子贡献）
+```
+
+一句话：从一刀切的参数化适配器到模块化、可查询寻址的记忆库，核心转变是**分解与动态组合**——将参数化记忆视为独立事实的集合而非整体大块，可以检索和组装。
