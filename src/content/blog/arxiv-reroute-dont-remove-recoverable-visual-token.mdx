@@ -1,0 +1,283 @@
+---
+title:
+  en: "Reroute, Don't Remove: Recoverable Visual Token Routing for Vision-Language Models"
+  zh: "重路由，不删除：面向视觉语言模型的可恢复视觉令牌路由"
+description:
+  en: "Identifies the fragility of permanent token removal in VLM decoders and proposes a training-free plug-in that defers low-importance tokens to later layers, improving grounding without extra compute."
+  zh: "指出现有视觉标记缩减方法永久丢弃低重要标记的脆弱性，提出无需训练的插件将低分标记推迟到后续层，在不增加计算的情况下改善视觉定位。"
+date: 2026-06-11
+tags: ["arxiv", "ai", "cs.cv", "cs.ai"]
+image: "/arxiv-visuals/reroute-dont-remove-recoverable-visual-token/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/reroute-dont-remove-recoverable-visual-token/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2606.12412](https://arxiv.org/abs/2606.12412)
+**Authors**: Cheng-Yu Yang, Shao-Yuan Lo, Yu-Lun Liu
+**Categories**: cs.CV, cs.AI
+
+## The Gap
+
+Multi-modal LLMs project images into hundreds of visual tokens, making decoder inference expensive.  
+Existing reduction methods (FastV, PDrop, Nüwa) all follow a **rank-and-remove** paradigm: compute an importance score (e.g. attention weight), keep the top-k tokens, and **permanently discard** the rest.  
+
+The paper exposes a hidden assumption: token importance is assumed to be static across decoder layers.  
+In reality, importance **changes dynamically**: a token that looks irrelevant in early layers may become critical for spatial grounding in later layers.  
+Permanent removal therefore irreversibly loses information that could have been useful later.
+
+```
+[ Problem: Rank-and-remove discards low tokens forever ]
+        |
+        | (Gap: token importance varies across depth)
+        v
+[ Assumption: low-scored tokens are always useless ]
+        |
+        | (This is fragile, especially for grounding tasks)
+        v
+[ Method: Replace removal with deferred routing ]
+        |
+        | (Deferred tokens re-enter candidate pool next stage)
+        v
+[ Evidence: Reroute improves grounding on LLaVA/Qwen   ]
+[ under aggressive pruning, same compute budget       ]
+        |
+        v
+[ Conclusion: token reduction should be recoverable routing ]
+```
+
+## The Increment
+
+**One sentence**: Before Reroute, token reduction meant irrevocable deletion; after Reroute, it becomes a multi-stage routing process where tokens can be deferred and re-evaluated.
+
+### Core Mechanism
+
+Reroute is a **training-free plug-in** that sits on top of any existing token-reduction method that uses stage-wise decisions (e.g. every few transformer layers). At each routing stage, the method:
+
+1. **Scores** all tokens in the current candidate pool using the same attention-score rule as the base method (e.g. average attention weight).
+2. **Selects** a subset of high-score tokens to pass through the current decoder block (processing as usual).
+3. **Defers** the remaining low-score tokens — they **bypass** the block entirely (no attention, no KV-cache update), but are **preserved** and merged back into the candidate pool at the next routing stage.
+4. At the next stage, the pool now consists of: previously selected tokens (still active), previously deferred tokens (re-entering), and possibly new tokens if the base method re-introduces some.
+
+This cycle repeats for each routing stage. The critical insight is that a token rejected early has a **second chance** later. Because the base method's stage schedule and scoring rule are reused, the theoretical TFLOPs and KV-cache budget are **unchanged** — the same number of tokens pass through at each stage; only the identity changes.
+
+```
+[ ASCII internals: stage-by-stage routing ]
+
+Stage n:
+   Candidate Pool (C) -----> Attention Score Ranking
+                              |
+          +-------------------+-------------------+
+          |                                       |
+     High-score tokens                      Low-score tokens
+     (pass through block)                   (bypass block)
+          |                                       |
+          v                                       v
+     Stage n output (processed)          Deferred pool (stored)
+          |                                       |
+          +-------------------+-------------------+
+                              |
+                         n+1: merge with stage output
+                              v
+                    New Candidate Pool (C')
+                    (previous deferred + previous output)
+```
+
+Imagine a **restaurant with a multi-round seating policy**.  
+- The head chef (scoring rule) rates each customer (token) based on current appetite (attention score).  
+- In each seating round (decoder stage), only high-rated customers are allowed to eat (pass through the block).  
+- Low-rated customers are sent to a **waiting lounge** (deferred pool) — they don't eat yet, but they stay warm.  
+- When the next seating round begins, the chef reconsiders **everyone**: customers who just ate (still at their table) and waiting customers who are now hungrier.  
+- This gives previously rejected customers a chance to be seated later if their appetite grows.  
+- The restaurant never kicks anyone out permanently; it just delays service.  
+- The kitchen capacity (TFLOPs) stays the same because exactly the same number of diners are served per round; only the guests change.
+
+### Key Concepts
+
+- **Token importance dynamics**: In standard VLMs, a visual token's relevance to the current text query is not fixed across decoder layers. Early layers may focus on coarse layout; later layers need fine details for phrases like "the cup on the left". A token that appears noisy early may become uniquely informative later.  
+  *Concrete example*: In an image with three cups, the "left cup" region produces tokens. In early decoder layers, attention is spread across all cups. By layer 20, only the left cup's tokens are attended to. Under a rank-and-remove method that prunes at layer 5, the left-cup tokens might be discarded because they were mid-ranked early. Reroute keeps them alive.
+
+- **Deferred routing**: The core operation is not "delete" but "delay". Rather than making a one-shot decision, the method postpones the decision to a later stage, reusing the same scoring mechanism. This is possible because the decoder has multiple stages (layers), and you can choose to skip a token's processing at one layer without erasing its representation.  
+  *Mechanism*: The deferred token is simply not passed through the attention and MLP of the current block. Its hidden state remains unchanged. When re-entering the pool, it gets a fresh chance at the next scoring.
+
+- **Budget-preserving reuse**: The base method already has a fixed per-stage token budget (e.g., keep 50% of tokens every 4 layers). Reroute does not change that budget; it only changes **which* tokens occupy those slots. Therefore, the compute and memory footprint (KV-cache, FLOPs) are identical to the base method. The only overhead is a tiny routing decision (score ranking per stage, which the base method already does). The gain comes from better token selection across time.
+
+## Framework Shift
+
+```
+Before (rank-and-remove):            After (Reroute):
+
+[Stage 1]                            [Stage 1]
+   Score all tokens                     Score all tokens
+   Keep top-k -> pass                  Keep top-k -> pass
+   Discard rest (delete)               Defer rest (store)
+         |                                  |
+[Stage 2]                            [Stage 2]
+   New tokens only (maybe             Pool = stage1 passed +
+   from image cropping etc.)          stage1 deferred + new
+   Score, keep, discard               Score, keep top-k -> pass
+         |                            Defer rest -> store
+         |                                  |
+[Later stages]                       [Later stages]
+   No chance for discarded            Deferred tokens can be
+   tokens to re-enter                 selected at any later stage
+```
+
+**From irreversible removal to recoverable routing** — the core shift is that tokens are not permanently deleted; they are given multiple opportunities across decoder depth.
+
+## Expert Assessment
+
+**Problem choice**: Real and timely. Token reduction is a hot topic for efficient VLM inference, and the fragility of static importance has been occasionally noted but never directly addressed. The gap is genuine.  
+
+**Method maturity**: Clever and light-touch. Reroute is a small algorithmic tweak (change "remove" to "defer") that logically plugs any existing stage-wise pruning method. It is not brute-force but an elegant reuse of existing infrastructure. One could argue that a simpler approach would be to use a more fine-grained scoring (e.g., per-head per-layer scores) — but that would change the budget. Reroute's beauty is that it achieves improvement without altering compute assumptions.  
+
+**Experimental integrity**: The paper tests on two backbones (LLaVA-1.5, Qwen) and three base methods (FastV, PDrop, Nüwa). The key metric is grounding accuracy (e.g., referring expression segmentation) under aggressive reduction ratios (e.g., 80-90% tokens removed). The improvements are consistent but modest (a few points). A concern: they do not show how Reroute affects **in-distribution* VQA performance under mild reduction — they should, because the base methods already degrade gracefully; Reroute might hurt slightly when reduction is mild. No red flags, but the paper would be stronger with more ablation on the choice of scoring rule and stage frequency.  
+
+**Writing quality**: Clear and well-structured. The abstract and introduction set up the problem precisely. The method section is well-illustrated. The weakness is the experimental section — the results are spread across many tables without a clear summary figure. A single "grounding gain vs. token budget" plot would instantly convey the benefit.  
+
+**Verdict**: **weak accept** — a clean, simple idea with solid evidence. It is worth attention if you work on efficient multi-modal LLMs or token compression.
+
+## Takeaways
+
+For practitioners building real-time VLM applications:
+
+1. **Drop-in upgrade for existing pruning pipelines**: If you already use FastV, PDrop, or any stage-wise token pruning, replace the "remove" step with "defer and re-enter". Implementation is trivial (store a separate tensor for deferred tokens, concatenate at next stage). No retraining is needed.
+2. **Works best under aggressive compression**: The advantage is largest when you are forced to keep very few tokens per stage (e.g., 10-20%). For mild compression (50%+), moving tokens between stages may not help much.
+3. **General principle for sequential compression**: The idea of "deferral rather than deletion" may transfer to other sequential models (e.g., long-document encoding, video frame selection) where early decisions are uncertain. Any pipeline that makes discrete decisions per stage can benefit from a re-evaluation window.
+:::
+
+:::zh
+**论文**: [2606.12412](https://arxiv.org/abs/2606.12412)
+**作者**: Cheng-Yu Yang, Shao-Yuan Lo, Yu-Lun Liu
+**分类**: cs.CV, cs.AI
+
+## 缺口
+
+多模态大模型将图像投射成数百个视觉标记，导致解码器推理成本高昂。  
+现有的缩减方法（FastV、PDrop、Nüwa）都遵循**排名并移除**范式：计算重要性分数（如注意力权重），保留top-k标记，**永久丢弃**其余标记。  
+
+本文揭示了该范式的一个隐含假设：假设标记的重要性在各解码器层之间是静态的。  
+实际上，重要性是**动态变化**的：在早期层看起来不重要的标记，可能在后续层对空间定位变得至关重要。  
+永久移除因此不可逆地丢失了本可有用的信息。
+
+```
+[ 问题: 排名并移除永久丢弃低分标记 ]
+        |
+        | (缺口: 标记重要性随解码深度变化)
+        v
+[ 假设: 低分标记永远无用 ]
+        |
+        | (这一假设在定位任务中很脆弱)
+        v
+[ 方法: 用延迟路由替代移除 ]
+        |
+        | (延迟的标记在下一阶段重新进入候选池)
+        v
+[ 证据: 在LLaVA/Qwen上改善了定位能力 ]
+[ 激进缩减下，计算预算不变           ]
+        |
+        v
+[ 结论: 标记缩减应视为可恢复路由而非不可逆剪枝 ]
+```
+
+## 增量
+
+**一句话**: 在Reroute之前，标记缩减意味着不可撤销的删除；之后，它变成多阶段路由过程，标记可以被推迟并重新评估。
+
+### 核心机制
+
+Reroute是一个**无需训练的插件**，可附加在任何采用阶段决策的现有标记缩减方法之上（例如每隔若干Transformer层做一次决策）。在每个路由阶段，方法执行：
+
+1. **评分**：使用基础方法相同的注意力分数规则（如平均注意力权重）对当前候选池中的所有标记评分。
+2. **选择**：挑选高分标记子集，使其通过当前解码器块（正常处理）。
+3. **延迟**：剩余的低分标记**跳过**该块（无注意力计算，不更新KV缓存），但**保留**起来，在下一路由阶段与已通过标记合并回候选池。
+4. 下一阶段，候选池由上次已通过的标记、上次延迟的标记（重新进入）以及可能的新标记组成。
+
+该循环在每个路由阶段重复。关键洞见是：早期被拒绝的标记在**后期有第二次机会**。因为复用了基础方法的阶段计划和评分规则，理论TFLOPs和KV缓存预算**不变**——每个阶段通过相同数量的标记，只是身份变化。
+
+```
+[ ASCII 内部结构：逐阶段路由 ]
+
+阶段 n:
+   候选池 (C) -----> 注意力分数排名
+                     |
+       +-------------+-------------+
+       |                           |
+    高分标记                     低分标记
+    (通过块处理)                 (跳过块)
+       |                           |
+       v                           v
+   阶段 n 输出 (已处理)       延迟池 (存储)
+       |                           |
+       +-------------+-------------+
+                     |
+                阶段 n+1: 与阶段输出合并
+                     v
+               新候选池 (C')
+               (之前延迟的 + 之前通过的)
+```
+
+想象一个**分多轮入座的餐厅**。  
+- 主厨（评分规则）根据当前胃口（注意力分数）给每位顾客（标记）打分。  
+- 每一轮入座（解码器阶段），只有高分的顾客可以吃饭（通过块）。  
+- 低分顾客被送到**等候区**（延迟池）——他们暂时不吃，但保持状态。  
+- 下一轮入座开始前，主厨重新考虑**所有人**：刚吃完的顾客（还在桌上）和等候区里现在更饿的顾客。  
+- 这样，之前被拒绝的顾客有机会在后来的轮次入座，只要他们的胃口变大。  
+- 餐厅从不永久赶人，只是推迟服务。  
+- 厨房容量（TFLOPs）不变，因为每轮服务的人数固定；改变的只是客人。
+
+### 关键概念
+
+- **标记重要性动态变化**：在标准VLM中，一个视觉标记对当前文本查询的相关性在不同解码器层并非固定。早期层可能关注粗粒度布局，后期层需要细粒度细节来理解"左边的杯子"这样的短语。早期看起来有噪音的标记可能在后期变成唯一的信息源。  
+  *具体例子*：一张图里有三个杯子，"左边杯子"区域产生若干标记。早期解码器层注意力分散在所有杯子上。到第20层，只有左边杯子的标记被关注。如果一个排名并移除方法在第5层就剪枝，左边杯子的标记可能因为早期排名中等而被丢弃。Reroute让它们存活。
+
+- **延迟路由**：核心操作不是"删除"而是"延迟"。方法不是做一次性决策，而是将决策推迟到更晚的阶段，复用相同的评分机制。这之所以可行，是因为解码器有多个阶段（层），你可以选择跳过某标记在某层的处理而不擦除其表示。  
+  *机制*：延迟标记不经过当前块的注意力和MLP，其隐藏状态保持不变。重新进入候选池时，它在下一轮评分中获得新机会。
+
+- **预算保持重用**：基础方法本身已有固定的每阶段标记预算（例如每4层保留50%的标记）。Reroute不改变该预算，只改变哪些标记占据这些槽位。因此计算开销和内存占用（KV缓存、FLOPs）与基础方法完全相同。唯一的额外开销是微小的路由决策（每阶段评分排序，基础方法已经做了）。收益来自更好的跨时间标记选择。
+
+## 框架转变
+
+```
+之前（排名并移除）：             之后（Reroute）：
+
+[阶段1]                           [阶段1]
+  评分所有标记                      评分所有标记
+  保留top-k -> 通过                 保留top-k -> 通过
+  丢弃其余（删除）                 推迟其余（存储）
+        |                                |
+[阶段2]                           [阶段2]
+  只有新标记（可能来自             池 = 阶段1通过 +
+  图像裁剪等）                     阶段1推迟 + 新标记
+  评分，保留，丢弃                 评分，保留top-k -> 通过
+        |                          推迟其余 -> 存储
+        |                                |
+[后续阶段]                        [后续阶段]
+  被丢弃的标记无机会               推迟的标记可在任意
+  重新进入                        后续阶段被选中
+```
+
+**从不可逆移除到可恢复路由**——核心转变是标记不会被永久删除，而是在解码深度内获得多次机会。
+
+## 专家评审
+
+**选题眼光**: 真实且及时。标记缩减是高效VLM推理的热点问题，静态重要性的脆弱性曾被零星提及，但从未被直接处理。这个缺口是真缺口。
+
+**方法成熟度**: 巧妙且轻量。Reroute是一个小的算法调整（将"移除"改为"延迟"），逻辑上可插入任何现有阶段剪枝方法。不是蛮力，而是优雅地复用现有基础设施。有人可能会说更简单的方法是使用更精细的评分（如每个头每层的分数）——但那会改变预算。Reroute的美妙之处在于不改变计算假设就能取得改善。
+
+**实验诚意**: 论文在两个骨干（LLaVA-1.5, Qwen）和三种基础方法（FastV, PDrop, Nüwa）上测试。关键指标是定位准确率（如指代表达分割）在激进缩减比率下（如移除80-90%标记）。改善一致但适度（几个百分点）。一个担忧：他们没有展示在温和缩减下Reroute对分布内VQA性能的影响——基础方法本身在温和缩减下下降很小，Reroute可能微有伤害。无红旗，但如果有更多关于评分规则选择和阶段频率的消融会更强。
+
+**写作功力**: 清晰且结构良好。摘要和引言精确设定了问题。方法部分图示充分。弱点是实验部分——结果分散在多个表格中，没有清晰的总结图。一个"定位增益 vs 标记预算"的折线图可以立刻传达收益。
+
+**判决**: **弱接收** —— 干净、简单的想法，证据扎实。如果你正在研究高效多模态大模型或标记压缩，值得关注。
+
+## 要点总结
+
+对于构建实时VLM应用的实践者：
+
+1. **即插即用升级现有剪枝管线**：如果你已经在使用FastV、PDrop或任何阶段标记剪枝，将"移除"步骤替换为"延迟并重新进入"。实现很简单（存储一个单独的延迟标记张量，在下一阶段拼接）。无需重新训练。
+2. **在激进压缩下效果最佳**：当你被迫每阶段只保留很少标记（如10-20%）时，优势最明显。对于温和压缩（保留50%以上），在阶段之间移动标记可能帮助不大。
+3. **序列压缩的通用原则**："延迟而非删除"的思想可能迁移到其他序列模型（如长文档编码、视频帧选择），其中早期决策不确定。任何在每个阶段做离散决策的管线都可以受益于重新评估窗口。
+:::
