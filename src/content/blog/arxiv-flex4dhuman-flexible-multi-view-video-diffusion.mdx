@@ -1,0 +1,289 @@
+---title:
+  en: "Flex4DHuman: Flexible Multi-view Video Diffusion for 4D Human Reconstruction"
+  zh: "Flex4DHuman: 灵活的多视角视频扩散实现4D人体重建"
+description:
+  en: "This paper introduces a multi-view video diffusion model that generates dense multi-view videos from monocular or sparse multi-view inputs without explicit geometry priors, enabling 4D dynamic human reconstruction from casual monocular videos."
+  zh: "本文提出一种多视角视频扩散模型，仅凭单目或稀疏视角输入即可生成密集多视角视频，无需显式几何先验，从而从随手拍视频实现4D动态人体重建。"
+date: 2026-06-12
+tags: ["arxiv", "ai", "cs.cv", "cs.gr"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.13655](https://arxiv.org/abs/2606.13655)
+**Authors**: Jen-Hao Cheng, Yipeng Wang, Hao Zhang, Gengshan Yang, Jenq-Neng Hwang
+**Categories**: cs.CV, cs.GR
+
+## The Gap
+
+Existing 4D human reconstruction methods fall into two camps. The first relies on multi-view camera rigs synchronized in time (e.g., DNA-Rendering, ActorsHQ) – expensive, static setups that don't scale. The second works from monocular video but depends on explicit geometry priors: SMPL body models, depth maps, normal maps, or skeleton poses. These priors are brittle under occlusion, loose clothing, animal subjects, or rapid motion; they also require separate pre-trained estimators that accumulate errors.
+
+Flex4DHuman removes these priors entirely. It asks: can we directly generate multi-view videos from a single moving camera without ever recovering a skeleton or depth map? The answer is yes, using a video diffusion model conditioned only on relative camera poses. The logical chain:
+
+```
+[Problem: 4D from monocular video -- heavy priors, poor generalization]
+        |
+        v
+[Assumption: No geometry priors needed -- just relative camera poses]
+        |
+        v
+[Method: Multi-view video diffusion with 5-axis positional encoding]
+        |
+        v
+[Evidence: SOTA on DNA-Rendering & ActorsHQ + zero-shot to animals]
+        |
+        v
+[Conclusion: Practical scalable 4D from casual monocular videos]
+```
+
+## The Increment
+
+**One sentence**: Before Flex4DHuman, 4D human reconstruction from monocular video required explicit geometry priors (SMPL, depth, normals) and multi-view capture setups; after Flex4DHuman, you can generate dense multi-view videos directly from a single static-camera video using only relative camera pose conditioning, then lift them to 4D Gaussians.
+
+### Core Mechanism
+
+Flex4DHuman is built on Wan 2.1 1.3B, a pretrained text-to-video diffusion model. The backbone is kept, but the positional encoding is extended: a standard spatio-temporal RoPE covers the (x, y) spatial grid and the time step; Flex4DHuman adds two extra axes – a view index (which camera viewpoint does this frame belong to?) and a continuous relative camera pose (SE(3) transformation from reference to target view). This five-axis positional encoding is the only way camera information enters the model; no explicit geometry is injected.
+
+The training follows a three-stage curriculum: (1) pose following – the model learns to generate a single target view conditioned on a reference view and their relative pose; (2) flexible reference-to-target view generation – it learns to handle arbitrary reference-to-target pairs; (3) temporal rollout – it learns to generate a full multi-view video sequence by attending to clean historical target-view tokens from earlier time steps. Additionally, multi-view captions are added during training to enable text-controlled generation at test time (e.g., "man in red shirt doing jumping jacks").
+
+Once multi-view videos are generated, an off-the-shelf 4D Gaussian Splatting pipeline (similar to 4DGS) fits 4D Gaussians to the rendered frames, producing a dynamic 3D representation.
+
+```
+[Input: Monocular video frames + target camera poses (relative)]
+        |
+        v
++-------------------------------------------+
+| Wan 2.1 1.3B backbone                     |
+| 5-axis positional encoding:               |
+|   (x, y, t, view_idx, SE(3) rel_pose)    |
+| No geometry priors used                   |
++-------------------------------------------+
+        |
+        v
+[Output: Dense multi-view video frames (N viewpoints x T frames)]
+        |
+        v
+[4D Gaussian Splatting] -> Dynamic 4D Gaussians (representation)
+```
+
+Let me give you a load-bearing metaphor. Think of Flex4DHuman as a **film director who only watched one camera's footage** but needs to direct a multi-camera shoot. Normal directors use body doubles, rigging plans, and skeleton charts (geometry priors). This director instead imagines: "If the second camera were three feet to my right and pointing left, what would it see?" He doesn't need to know where the actor's elbow is in 3D; he only needs the relative pose between cameras. The five-axis positional encoding is like giving each camera crew member a unique ID and a spatial relation note. The three-stage curriculum is how the assistant learns: first to mimic a single other camera, then to switch between any camera pair, then to sustain the illusion over a long scene (temporal rollout). The multi-view captions are like the script – you can shout "red shirt" and the director will shape the generation accordingly.
+
+### Key Concepts
+
+- **Relative camera pose conditioning**: Instead of providing absolute world coordinates, Flex4DHuman encodes the relative SE(3) transformation from a reference view to the target view. This makes the model view-relationship-aware, not world-aware. For example, "camera B is 2m to the right of camera A, rotated 30° left." The model learns to hallucinate what camera B sees given camera A's image. This is far easier to generalize because it doesn't require a consistent global coordinate system across scenes.
+
+- **5-axis positional encoding (5D RoPE)**: The original spatio-temporal RoPE encodes positions in a 3D grid (x, y, t). Flex4DHuman adds two dimensions: a discrete view index (integer) and a continuous 6D relative camera pose (3D rotation + 3D translation). The view index helps the model distinguish between different output viewpoints; the continuous SE(3) encodes the geometric relationship between views. All five axes are mixed into the attention mechanism via rotary embeddings. Without these, the model would treat all target views identically, unable to enforce geometric consistency.
+
+- **Three-stage curriculum learning**: Training a multi-view video diffusion model from scratch is unstable. The curriculum decomposes the problem: Stage 1 (pose following) – given one reference frame, generate one target frame with a known relative pose. Stage 2 (flexible reference-target) – randomize which view is reference vs target (so the model handles asymmetric conditioning). Stage 3 (temporal rollout) – extend to full sequences by feeding earlier generated target-view tokens (cleaned) as context for future frames. This stepwise learning avoids catastrophic forgetting and stabilizes long-horizon generation.
+
+## Framework Shift
+
+The shift is from **geometry-first** to **view-first**.
+
+```
+Before (mainstream approach):        After (this paper):
+Monocular video                      Monocular video
+    |                                    |
+    v                                    v
+[Estimate geometry priors]           [Flex4DHuman diffusion]
+(SMPL, depth, normal)                (no geometry priors)
+    |                                    |
+    v                                    v
+[Back-project to 3D + render]        [Dense multi-view video]
+(implicit multi-view)                (explicit generated)
+    |                                    |
+    v                                    v
+[Refine 4D shape]                    [4D Gaussian Splatting]
+```
+
+One sentence: From "estimate geometry from monocular video then reconstruct 4D" to "generate virtual multi-views from monocular video then fit 4D Gaussians" – the core shift is replacing brittle geometric inference with learned multi-view video generation.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. Casual 4D capture (e.g., filming a person with a phone camera) is the holy grail for VR/AR and gaming. Prior methods either require multi-camera studios or heavy geometric priors that fail on deformable, clothed, or animal subjects. Flex4DHuman attacks the right bottleneck – removing the need for SfM/body models.
+
+**Method maturity**: Clever insight – use relative camera pose as the only conditioning, and push geometry to the final Gaussian fitting stage. The reliance on a large pretrained model (Wan 2.1 1.3B) is pragmatic but also a "brute force" shortcut: the intellectual contribution is the 5-axis RoPE and curriculum training, not the base architecture. Simpler approaches like fine-tuning a smaller model on relative pose conditioning might have been explored but likely underperform.
+
+**Experimental integrity**: Baselines are fair (compared against prior multi-view generation and 4D reconstruction methods on DNA-Rendering and ActorsHQ). The zero-shot animal generalization is impressive. However, all evaluation is on datasets with ground-truth multi-view; no real-world monocular video results are shown (the paper claims "monocular static-camera videos" but experiments use dataset videos that are essentially multi-view). Also, ablation of the three-stage curriculum is missing – how much does each stage contribute? A minor red flag: the 4D Gaussian Splatting stage is off-the-shelf; the reconstruction quality might depend heavily on its quality.
+
+**Writing quality**: Well-structured, but the experimental section is dense and lacks clear visual comparisons of the generated multi-view frames (only tables of metrics). A figure showing generated vs. ground-truth multi-view for a challenging case (e.g., loose clothing) would dramatically improve the paper.
+
+**Verdict**: weak accept – The paper makes a practical step forward in 4D content creation, but the novelty is incremental (extending RoPE + curriculum) and there's a risk the community will replicate it with smaller, cheaper models.
+
+## Takeaways
+
+- **5-axis positional encoding recipe**: If you work on multi-view generation, you can directly borrow the idea of adding view index and relative SE(3) to RoPE. This is a generalizable trick for any model that needs to condition on camera relationships.
+
+- **Curriculum for video diffusion**: The three-stage training (pose following -> flexible reference-target -> temporal rollout) is a template for breaking down complex spatio-temporal generation tasks. You can apply it to novel view synthesis from video, multi-object tracking, or even 4D scene generation.
+
+- **Offloading geometry to the end**: The design philosophy of "generate views first, reconstruct geometry later" using a diffusion model is portable. Instead of trying to estimate 3D in latent space, let the video diffusion handle viewpoint diversity, then use a classical 3D fitting algorithm (here Gaussian splatting) to lift to 4D. This separation of concerns simplifies each stage.
+:::
+
+:::zh
+**论文**: [2606.13655](https://arxiv.org/abs/2606.13655)
+**作者**: Jen-Hao Cheng, Yipeng Wang, Hao Zhang, Gengshan Yang, Jenq-Neng Hwang
+**分类**: cs.CV, cs.GR
+
+## 缺口
+
+现有4D人体重建方法分两大流派。
+第一种依赖多相机同步阵列（如DNA-Rendering、ActorsHQ），设备昂贵且静态，难以扩展。
+第二种从单目视频出发，但必须使用显式几何先验：SMPL人体模型、深度图、法线图或骨骼姿态。
+这些先验在遮挡、宽松衣物、动物对象或快速运动时易失效，
+且需要独立预训练，误差累积严重。
+
+Flex4DHuman彻底去掉了这些先验。
+它问：能否只靠相对相机姿态，直接从单目视频生成多视角视频，而不恢复任何骨架或深度？
+答案是肯定的，采用仅以相对相机位姿为条件的视频扩散模型。
+逻辑链条如下：
+
+```
+[问题: 从单目视频到4D，需要强先验，泛化差]
+        |
+        v
+[假设: 不需要几何先验，仅需相对相机姿态]
+        |
+        v
+[方法: 多视角视频扩散 + 五轴位置编码]
+        |
+        v
+[证据: DNA-Rendering和ActorsHQ上SOTA，零样本泛化到动物]
+        |
+        v
+[结论: 从随手拍视频实现可扩展的4D内容创建]
+```
+
+## 增量
+
+**一句话**: 在此之前，从单目视频做4D人体重建需要显式几何先验（SMPL、深度、法线）和多视角设备；
+在此之后，只需单目静态相机视频，通过相对相机姿态条件直接生成密集多视角视频，
+再用4D高斯溅射即可得到4D表示。
+
+### 核心机制
+
+Flex4DHuman基于Wan 2.1 1.3B预训练文本到视频扩散模型。
+模型主干不变，但位置编码被扩展：
+标准时空RoPE覆盖空间(x,y)网格和时间步t；
+Flex4DHuman增加了两个额外的轴——视图索引（这个帧属于哪个相机视角？）
+和连续相对相机姿态（参考视图到目标视图的SE(3)变换）。
+这五轴位置编码是相机信息进入模型的唯一通道，没有任何显式几何注入。
+
+训练采用三阶段课程：
+(1) 姿态跟随——模型学习在给定参考视图和相对姿态的条件下生成一个目标视图；
+(2) 灵活的参考-目标视图生成——学会处理任意参考-目标配对；
+(3) 时间展开——通过关注前一步生成的清洁目标视图token，生成长序列的多视角视频。
+此外，训练时加入多视角字幕，测试时实现文本控制（例如“穿红衬衫做跳跃动作的男人”）。
+
+生成多视角视频后，使用现成的4D高斯溅射管线将视频帧拟合为动态4D高斯表示。
+
+```
+[输入: 单目视频帧 + 目标相机相对姿态]
+        |
+        v
++-------------------------------------------+
+| Wan 2.1 1.3B 主干                         |
+| 五轴位置编码:                              |
+|   (x, y, t, 视图索引, SE(3) 相对姿态)      |
+| 不使用任何几何先验                          |
++-------------------------------------------+
+        |
+        v
+[输出: 密集多视角视频帧 (N个视角 x T帧)]
+        |
+        v
+[4D高斯溅射] -> 动态4D高斯表示
+```
+
+我打个核喻来消化。
+把Flex4DHuman想象成一位**只看了单机位视频的导演**，现在要指挥多机位拍摄。
+普通导演需要替身演员、布线图和骨骼模型（几何先验）。
+这位导演却直接想象：“如果二号摄影机在我右侧三英尺处向左偏转，它会看到什么？”
+他不需要知道演员肘关节的三维位置，只需要知道摄影机之间的相对姿态。
+五轴位置编码好比发给每个摄影组成员一张带有身份和空间关系说明的纸条。
+三阶段课程是助手的训练过程：先学会模仿一个单机位，再学会任意机位对切换，最后能在长时间场景中维持幻觉（时间展开）。
+多视角字幕就像剧本——你喊一句“红衬衫”，导演就会据此调整生成内容。
+
+### 关键概念
+
+- **相对相机姿态条件**：不提供绝对世界坐标，而是编码参考视图到目标视图的相对SE(3)变换。
+模型学会的是视角间的关系，而非世界信息。
+例如“B相机在A相机右侧2米，向左旋转30度”。
+模型根据A相机的画面，想象B相机会看到什么。
+这比全局坐标更易泛化，因为不需要跨场景一致的世界坐标系。
+
+- **五轴位置编码（5D RoPE）**：原始时空RoPE编码三维网格(x,y,t)。
+Flex4DHuman增加两个维度：离散视图索引（整数）和连续6D相对相机姿态（3D旋转+3D平移）。
+视图索引帮助模型区分不同输出视角；
+连续SE(3)编码视角间的几何关系。
+全部五轴通过旋转嵌入混入注意力机制。
+如果没有这些，模型会把所有目标视角等同对待，无法保证几何一致性。
+
+- **三阶段课程学习**：直接训练多视角视频扩散模型不稳定。
+课程分解任务：
+阶段1（姿态跟随）——给定一帧参考帧，生成一帧已知相对姿态的目标帧；
+阶段2（灵活参考-目标）——随机化哪个视图是参考、哪个是目标（使模型适应非对称条件）；
+阶段3（时间展开）——扩展到完整序列，将前一步生成的清洁目标视图token作为上下文。
+这种渐进式学习避免了灾难性遗忘，稳定了长程生成。
+
+## 框架转变
+
+核心转变：从**几何优先**到**视角优先**。
+
+```
+之前（主流方法）：                之后（本文方法）：
+单目视频                         单目视频
+    |                                |
+    v                                v
+[估计几何先验]                    [Flex4DHuman扩散]
+(SMPL, 深度, 法线)                (无几何先验)
+    |                                |
+    v                                v
+[反投影到3D + 渲染]               [密集多视角视频]
+(隐式多视角)                      (显式生成)
+    |                                |
+    v                                v
+[优化4D形状]                      [4D高斯溅射]
+```
+
+一句话：从“从单目视频估计几何再重建4D”到“从单目视频生成虚拟多视角再拟合4D高斯”，
+核心转变是用学习式的多视角视频生成替代脆弱的几何推理。
+
+## 专家评审
+
+**选题眼光**: 这是真实缺口。
+随手拍4D捕捉（例如用手机拍人）是VR/AR和游戏领域的圣杯。
+以往方法要么需要多相机演播室，要么依赖容易失效的人体模型。
+Flex4DHuman砍对了节点——移除SfM/人体模型的需求。
+
+**方法成熟度**: 巧劲——仅用相对相机姿态作为唯一条件，把几何推到最后的拟合阶段。
+依赖大型预训练模型（Wan 2.1 1.3B）是务实之举，但也存在“蛮力”成分；
+核心贡献在五轴RoPE和课程训练，而非基础架构。
+更简单的方法（如用更小的模型fine-tune相对姿态条件）可能被探索过但效果不佳。
+
+**实验诚意**: 基线合理（与DNA-Rendering和ActorsHQ上的现有方法对比）。
+零样本动物泛化令人印象深刻。
+然而所有评估都在有多视角真实性数据的数据集上进行，
+没有展示真实世界单目视频的结果（论文声称“单目静态相机视频”，但实验用的数据集本质上是多视角）。
+另外缺少对三阶段课程的消融——每个阶段贡献多大？小细节：4D高斯溅射是现成的，
+重建质量严重依赖它。
+
+**写作功力**: 结构清晰，但实验部分信息密集且缺少生成图像的可视对比（只有指标表格）。
+如果能展示一个困难案例（如宽松衣物）的生成帧与真值对比，论文将大幅提升。
+
+**判决**: 弱接收——论文在4D内容创建上迈出了实用的一步，
+但新颖性属于增量（扩展RoPE+课程），存在被更小更廉价模型复现的风险。
+
+## 要点总结
+
+- **五轴位置编码配方**：如果你做多视角生成，可以直接借用给RoPE增加视图索引和相对SE(3)的思路。
+这是一个可泛化的技巧，适用于任何需要相机关系条件的模型。
+
+- **视频扩散的课程训练**：三阶段（姿态跟随 -> 灵活参考-目标 -> 时间展开）
+是分解复杂时空生成任务的模板。
+可应用于新视角合成、多目标跟踪甚至4D场景生成。
+
+- **将几何推迟到末端的设计哲学**：“先生成视角，后重建几何”的思路可移植。
+与其在隐空间估计3D，不如让视频扩散处理视点多样性，
+然后用经典3D拟合算法（这里是高斯溅射）提升到4D。
+这种分离简化了每个阶段的负担。
+:::
