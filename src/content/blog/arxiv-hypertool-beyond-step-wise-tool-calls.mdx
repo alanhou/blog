@@ -1,0 +1,292 @@
+---
+title:
+  en: "HyperTool: Beyond Step-Wise Tool Calls for Tool-Augmented Agents"
+  zh: "HyperTool：超越逐步工具调用的工具增强智能体"
+description:
+  en: "This paper introduces HyperTool, a unified executable tool interface that collapses deterministic multi-step tool workflows into a single model-visible call, improving accuracy on tool-augmented LLM agents from ~15% to ~35%."
+  zh: "本文提出HyperTool，一种统一的可执行工具接口，将确定性的多步工具工作流折叠为单个模型可见调用，将工具增强型LLM智能体的准确率从约15%提升至约35%。"
+date: 2026-06-12
+tags: ["arxiv", "ai", "cs.cl"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.13663](https://arxiv.org/abs/2606.13663)
+**Authors**: Yaxin Du, Yifan Zhou, Yujie Ge, Jiajun Wang, Xianghe Pang, Shuo Tang, Tuney Zheng, Bryan Dai, Jian Yang, Siheng Chen
+**Categories**: cs.CL
+
+## The Gap
+
+Existing tool-augmented LLMs follow a step-wise atomic paradigm: each tool call, its observation, and any value transfer are explicitly written into the model's reasoning trace.  
+This works fine for a single tool call, but quickly breaks down for multi-step compositional tasks.  
+The model must repeatedly decide which tool to call next, how to parse the output, and where to route intermediate values — even when the sequence is fully deterministic.  
+
+This creates an **execution-granularity mismatch**: locally deterministic tool workflows are unfolded into many model-visible decisions, wasting context window and forcing the model to manage low-level dataflow that has no reasoning content.  
+Prior work (e.g., ReAct, Toolformer, GPT-4 function calling) has not addressed this abstraction level — they all expose atomic calls.  
+
+HyperTool closes this gap by changing the model-visible unit of tool execution from a single call to an entire deterministic workflow expressed as a code block.
+
+```
++----------------+   +----------------------+   +-----------------+   +--------------------+   +------------------+
+|   Problem:     |   |   Assumption:       |   |   Method:       |   |   Evidence:        |   |   Conclusion:    |
+| Step-wise tool |-->| Abstracting deter-  |-->| HyperTool inter-|-->| MCP-Universe:      |-->| HyperTool sub-   |
+| calls waste    |   | ministic subroutines|   | face: model out-|   | Qwen3-32B accuracy |   | stantially im-   |
+| context & force|   | into single visible |   | puts a code block|   | 15.69% -> 35.29%   |   | proves multi-    |
+| model to manage|   | calls reduces cog-  |   | that calls tools,|   | Qwen3-8B accuracy  |   | step tool use.   |
+| low-level flux.|   | nitive load.        |   | runtime executes.|   | 9.93% -> 33.33%    |   |                  |
++----------------+   +----------------------+   +-----------------+   +--------------------+   +------------------+
+```
+
+## The Increment
+
+**One sentence**: Before HyperTool, models had to manage every deterministic step of a tool workflow in their visible reasoning trace; after HyperTool, they can delegate entire deterministic subroutines to a single code-block invocation, cutting context waste and roughly doubling accuracy.
+
+### Core Mechanism
+
+HyperTool is a unified executable interface that sits between the LLM and the tool environment.  
+When the model decides to use tools, it doesn't output a single tool call — it outputs a **code block** (e.g., Python) that can call any registered tool through its original schema, capture return values, pass them to other tools, and return a final result.  
+This code block is sent to a runtime executor that runs it in a sandboxed MCP (Model Context Protocol) environment.  
+Only the final output is fed back into the model's reasoning trace; all intermediate tool calls and data movements happen off the trace.
+
+The components are:  
+- **HyperTool interface**: the prompt-side abstraction that tells the model "you can write code that uses tool functions".  
+- **MCP runtime**: executes the code block with actual tool calls, returning a single result.  
+- **Tool registry**: available tools with their original schemas (no retraining needed).  
+- **Synthetic trajectory generator**: creates training data by taking seed tasks, extracting deterministic sub-sequences, and folding them into code blocks.
+
+Data flow:  
+1. Model generates code block using HyperTool interface.  
+2. Runtime receives block, parses tool calls, executes them sequentially (or with internal logic).  
+3. Only the final return value is given back to the model.  
+
+```
++--------+     +------------------+     +------------+     +-------------+
+| Model  | --> | HyperTool Code   | --> | MCP Runtime| --> | Final Output|
+| (LLM)  |     | Block (Python)   |     |            |     | (value)     |
++--------+     +------------------+     +------------+     +-------------+
+                       |                        |
+                       | uses                   | calls tools
+                       v                        v
+                 +----------+           +-------------------+
+                 | Tool     |           | Tool 1 .. Tool N  |
+                 | Schemas  |           | (external APIs)   |
+                 +----------+           +-------------------+
+```
+
+**Structural metaphor**: Think of HyperTool like a recipe card vs asking a cook to announce every action.  
+In a step-wise approach, the model acts as a cook who must say "I crack the egg", "I beat it", "I pour it into the pan", "I flip it" — each step is a separate utterance.  
+HyperTool gives the model a recipe card: "Make an omelet: crack, beat, pour, flip, serve."  
+The cook (runtime) follows the card silently and only presents the final dish.  
+The model no longer wastes mental (context) bandwidth on the mechanics of cracking and beating; it just writes the card.  
+Each part maps cleanly: the recipe card is the code block, the cook is the MCP runtime, the dishes are tool outputs, and the final dish is the return value.  
+This metaphor explains why HyperTool reduces errors: the model doesn't need to perfectly remember the order of sub-steps or handle intermediate states.
+
+### Key Concepts
+
+- **Execution-Granularity Mismatch**: The difference between what the model reasons about (high-level goals) and what it must execute (low-level tool calls).  
+  When the two granularities don't align, the model gets bogged down in deterministic mechanics.  
+  Example: to answer "What's the weather and flight price to Tokyo?", a step-wise model must call weather API, parse result, call flight API, parse result, then combine.  
+  With HyperTool, it can write a single code block: `weather = get_weather("Tokyo"); flights = get_flights("Tokyo"); return f"{weather}, {flights}"`.  
+  The runtime handles the two calls as one unit, so the model only sees the final combined string.
+
+- **MCP-Style Interface**: Model Context Protocol (MCP) refers to an interface where the model outputs executable code (not just structured function calls) that a runtime environment runs.  
+  Unlike function calling (where the model outputs a list of arguments and the system calls the function for one call at a time), MCP allows the model to script a sequence of calls with control flow.  
+  This shifts the boundary between model and environment: the model becomes a programmer, not just an invoker.
+
+- **Deterministic Tool Workflow**: A sequence of tool calls where the order and dependencies are fixed and don't require model reasoning.  
+  For example, "search for a paper, then download its PDF" is deterministic; the model doesn't need to choose between search and download.  
+  Identifying such workflows is key to generating HyperTool training trajectories.
+
+## Framework Shift
+
+```
+Before (step-wise):                     After (HyperTool):
++-------+   +------+   +--------+       +-------+   +------------------+
+| Model |-->|Tool 1|-->|Obs 1   |       | Model |-->| HyperTool Code   |
++-------+   +------+   +--------+       +-------+   | Block (runtime)  |
+   |           |           |                |        +------------------+
+   |           v           v                |                 |
+   |      +------+   +--------+            |                 v
+   +----->|Tool 2|-->|Obs 2   |            |           +----------+
+   |      +------+   +--------+            |           | Final    |
+   |           |           |               |           | Output   |
+   |           v           v               |           +----------+
+   +-----> ... (repeats) ...               +
+   |
+   +-----> Final Answer
+```
+
+One sentence: From **atomic tool calls exposed in the trace** to **code-block workflows executed off the trace**, the core shift is **raising the abstraction level of tool use from individual actions to deterministic scripts**.
+
+## Expert Assessment
+
+**Problem choice**: Genuine, not manufactured.  
+The execution-granularity mismatch is a known pain point for multi-step tool agents, and prior work has mostly ignored it.  
+This sits squarely at the intersection of LLM efficiency and tool use, a timely direction.
+
+**Method maturity**: Clever rather than brute force.  
+The insight to collapse deterministic subroutines into code blocks is simple but effective.  
+One could argue that simply teaching the model to be more efficient with step-wise calls might also work, but HyperTool's approach is more principled — it changes the interface rather than patching the model.  
+No simpler approach is overlooked; function calling is already the simplest, and HyperTool extends it.
+
+**Experimental integrity**: Baselines are fair (same models with step-wise tool use).  
+The accuracy jump from ~15% to ~35% is substantial and consistent across model sizes.  
+The inclusion of GPT-OSS and Kimi-k2.5 as stronger baselines adds credibility.  
+One red flag: the evaluation is on a single benchmark (MCP-Universe). Generalization to other tool environments is unproven.  
+Also, synthetic trajectories might not cover all edge cases; real-world tool sequences could be less deterministic.
+
+**Writing quality**: Generally clear, but the abstract and introduction could better motivate the **gap* — they jump quickly to the solution.  
+The related work section is thin; it lumps ReAct, Toolformer, etc. without a detailed comparison.  
+If the authors rewrote the related work to explicitly contrast execution granularity and discuss when step-wise fails, the paper would feel more complete.
+
+**Verdict**: **weak accept** — solid, practical improvement with clear results, but limited novelty in the core idea (coding as tool orchestration) and narrow evaluation.
+
+## Takeaways
+
+- **Macro tool actions**: Practitioners can design "macro" tool interfaces that bundle common deterministic sequences (e.g., "search+open", "check+book") into a single modelled call.  
+- **Code block over function call**: Allow the model to output scripts instead of individual function invocations — this reduces context usage and error propagation.  
+- **Synthetic trajectory folding**: Take existing step-wise demonstration data and automatically identify deterministic sub-sequences to fold into HyperTool-style code blocks.  
+- **MCP-style execution enables error isolation**: If a tool call fails inside the block, the failure can be handled locally without polluting the model's reasoning trace.  
+- **Not a silver bullet**: Only helps for deterministic workflows; tasks requiring model reasoning between tool calls (e.g., "search, decide next step based on result") still need step-wise or a hybrid approach.
+:::
+
+:::zh
+**论文**: [2606.13663](https://arxiv.org/abs/2606.13663)
+**作者**: Yaxin Du, Yifan Zhou, Yujie Ge, Jiajun Wang, Xianghe Pang, Shuo Tang, Tuney Zheng, Bryan Dai, Jian Yang, Siheng Chen
+**分类**: cs.CL
+
+## 缺口
+
+现有的工具增强型LLM采用逐步调用的原子范式：每个工具调用、其观察结果、以及任何值传递都被显式写入模型的推理轨迹中。  
+这在单次调用时还好，但面对多步组合任务就迅速崩溃。  
+模型必须反复决定下一个调用哪个工具、如何解析输出、如何传递中间值——即使整个序列是完全确定的。  
+
+这造成了**执行粒度不匹配**：局部确定的工具工作流被展开成许多模型可见的决策，浪费上下文窗口，并强迫模型管理没有推理内容的底层数据流。  
+此前的工作（如ReAct、Toolformer、GPT-4函数调用）都没有解决这个抽象层次问题——它们都暴露原子调用。  
+
+HyperTool通过将模型可见的执行单元从单个调用改变为整个确定工作流（以代码块形式表达）来填补这一空白。
+
+```
++----------------+   +----------------------+   +-----------------+   +--------------------+   +------------------+
+|   问题：        |   |   假设：            |   |   方法：        |   |   证据：          |   |   结论：        |
+| 逐步工具调用    |-->| 将确定性子过程抽象  |-->| HyperTool接口： |-->| MCP-Universe：     |-->| HyperTool显著   |
+| 浪费上下文，    |   | 为单个可见调用可降低 |   | 模型输出代码块， |   | Qwen3-32B准确率   |   | 改善多步工具     |
+| 强迫模型管理    |   | 认知负载。          |   | 运行时执行。     |   | 15.69% -> 35.29%   |   | 使用。           |
+| 低级数据流。    |   |                     |   |                  |   | Qwen3-8B准确率     |   |                  |
+|                |   |                     |   |                  |   | 9.93% -> 33.33%    |   |                  |
++----------------+   +----------------------+   +-----------------+   +--------------------+   +------------------+
+```
+
+## 增量
+
+**一句话**：这篇论文之前，模型必须在推理轨迹中管理每个确定的工具步骤；  
+这篇论文之后，模型可以将整个确定性子过程委托给一个代码块调用，削减上下文浪费，准确率几乎翻倍。
+
+### 核心机制
+
+HyperTool是一个统一的可执行接口，位于LLM和工具环境之间。  
+当模型决定使用工具时，它不输出单个工具调用——而是输出一个**代码块**（例如Python），该代码块可以调用任何已注册的工具（使用其原始模式）、捕获返回值、将其传递给其他工具，并返回最终结果。  
+该代码块被发送给一个运行时执行器，在沙箱化的MCP（模型上下文协议）环境中运行。  
+只有最终输出被反馈回模型的推理轨迹；所有中间工具调用和数据移动都在轨迹之外进行。
+
+组件包括：  
+- **HyperTool 接口**：提示侧的抽象，告诉模型“你可以编写调用工具函数的代码”。  
+- **MCP 运行时**：执行代码块并调用真实工具，返回单个结果。  
+- **工具注册表**：可用的工具及其原始模式（无需重新训练）。  
+- **合成轨迹生成器**：通过获取种子任务、提取确定的子序列、并将其折叠为代码块来创建训练数据。
+
+数据流：  
+1. 模型使用HyperTool接口生成代码块。  
+2. 运行时接收代码块，解析工具调用，顺序执行（或内部逻辑）。  
+3. 只有最终的返回值被回传给模型。
+
+```
++--------+     +------------------+     +------------+     +-------------+
+| 模型   | --> | HyperTool 代码块  | --> | MCP 运行时 | --> | 最终输出     |
+| (LLM)  |     | (Python)         |     |            |     | (值)         |
++--------+     +------------------+     +------------+     +-------------+
+                       |                        |
+                       | 使用                   | 调用工具
+                       v                        v
+                 +----------+           +-------------------+
+                 | 工具模式 |           | 工具1 .. 工具N    |
+                 |          |           | (外部API)         |
+                 +----------+           +-------------------+
+```
+
+**核喻**：把HyperTool想象成一份食谱卡，而厨师（模型）不必每步都宣布动作。  
+逐步方式中，模型像个厨师，必须说“我敲鸡蛋”、“我打散它”、“我倒进锅”、“我翻面”——每步都是独立语句。  
+HyperTool给模型一份食谱卡：“做煎蛋：敲、打、倒、翻、装盘。”  
+厨师（运行时）默默执行卡上内容，只呈现最终菜品。  
+模型不再浪费上下文带宽去理解敲和打的机械动作；它只需写卡。  
+各部分一一对应：食谱卡是代码块，厨师是MCP运行时，菜品是工具输出，最终盘菜是返回值。  
+这个比喻解释了为何HyperTool减少错误：模型无需完美记住子步骤的顺序或处理中间状态。
+
+### 关键概念
+
+- **执行粒度不匹配**：模型推理的内容（高层目标）与实际执行的内容（底层工具调用）之间的差异。  
+  当两者粒度不对齐时，模型会被确定的机械步骤拖累。  
+  举例：回答“东京的天气和航班价格”，逐步模型必须依次调用天气API、解析结果、调用航班API、解析结果、然后合并。  
+  用HyperTool，它可以写一个代码块：`weather = get_weather("东京"); flights = get_flights("东京"); return f"{weather}, {flights}"`。  
+  运行时将两次调用作为一个单元处理，模型只看到最终合并的字符串。
+
+- **MCP风格接口**：模型上下文协议（MCP）指的是模型输出可执行代码（而不仅仅是结构化函数调用），由运行时环境执行。  
+  与函数调用（模型输出参数列表，系统为单次调用执行函数）不同，MCP允许模型编排具有控制流的调用序列。  
+  这改变了模型与环境之间的边界：模型成为程序员，而不仅仅是调用器。
+
+- **确定性工具工作流**：工具调用的顺序和依赖关系固定，无需模型推理的序列。  
+  例如“搜索论文，然后下载PDF”是确定的；模型不需要在搜索和下载之间选择。  
+  识别这类工作流是生成HyperTool训练轨迹的关键。
+
+## 框架转变
+
+```
+之前（逐步）：                      之后（HyperTool）：
++-------+   +------+   +--------+       +-------+   +------------------+
+| 模型   |-->|工具1 |-->|观察1   |       | 模型   |-->| HyperTool 代码块 |
++-------+   +------+   +--------+       +-------+   | （运行时执行）   |
+   |           |           |                |        +------------------+
+   |           v           v                |                 |
+   |      +------+   +--------+            |                 v
+   +----->|工具2 |-->|观察2   |            |           +----------+
+   |      +------+   +--------+            |           | 最终输出 |
+   |           |           |               |           +----------+
+   |           v           v               |
+   +-----> ... （重复） ...                +
+   |
+   +-----> 最终答案
+```
+
+一句话：从**轨迹中暴露原子工具调用**到**在轨迹外执行代码块工作流**，核心转变是**将工具使用的抽象层次从单个动作提升为确定性脚本**。
+
+## 专家评审
+
+**选题眼光**：这是真缺口，非人造。  
+执行粒度不匹配是多步工具智能体的已知痛点，此前工作几乎忽略了它。  
+这个方向在LLM效率与工具使用的交叉点上，时机恰好。
+
+**方法成熟度**：巧劲而非蛮力。  
+将确定的子过程折叠为代码块的洞察简单而有效。  
+有人可能认为仅教模型更高效地逐步调用也能改善，但HyperTool的方法更彻底——它改变接口而不是修补模型。  
+没有更简单的被忽略的方法；函数调用已经是最简单的，HyperTool是对其的扩展。
+
+**实验诚意**：基线公平（相同模型采用逐步工具使用）。  
+准确率从~15%跃升至~35%在不同模型规模上一致。  
+包含GPT-OSS和Kimi-k2.5作为更强基线增加了可信度。  
+一个值得警惕的点：评估仅在一个基准（MCP-Universe）上进行。推广到其他工具环境未经证明。  
+此外，合成轨迹可能无法覆盖所有边界情况；真实世界的工具序列可能更少确定性。
+
+**写作功力**：总体清晰，但摘要和引言可以更好地激发“缺口”——它们直接跳到解决方案。  
+相关工作部分较薄；将ReAct、Toolformer等混为一谈，没有详细对比。  
+如果作者重写相关工作，明确对比执行粒度并讨论逐步在何时失败，论文会更完整。
+
+**判决**：**弱接收**——扎实的实用改进，结果清晰，但核心创意（将编码作为工具编排）的新颖性有限，评估范围较窄。
+
+## 要点总结
+
+- **宏工具动作**：实践者可以设计“宏”工具接口，将常见的确定序列（如“搜索+打开”、“查询+预订”）打包成单个模型调用。  
+- **代码块优先于函数调用**：允许模型输出脚本而非单独函数调用——减少上下文使用和错误传播。  
+- **合成轨迹折叠**：获取现有的逐步演示数据，自动识别确定的子序列并折叠成HyperTool风格的代码块。  
+- **MCP风格执行实现错误隔离**：如果块内工具调用失败，可在本地处理，不污染模型推理轨迹。  
+- **并非万能**：仅对确定性工作流有效；对于需要在工具调用间进行模型推理的任务（如“搜索，根据结果决定下一步”），仍需逐步或混合方法。
+:::

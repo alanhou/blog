@@ -1,0 +1,271 @@
+---
+title:
+  en: "World Tracing: Generative Pixel-Aligned Geometry Beyond the Visible"
+  zh: "世界追踪：超越可见的生成式像素对齐几何"
+description:
+  en: "A new representation that predicts a stack of 3D points per pixel – visible surface first, occluded layers behind – trained with a diffusion transformer. Bridges the gap between depth-only reconstruction and hallucinated 3D generation."
+  zh: "一种新表示，为每个像素预测一叠3D点——第一层是可见表面，后面是被遮挡的层——通过扩散变压器训练。弥合了仅深度重建与生成式3D幻觉之间的鸿沟。"
+date: 2026-06-12
+tags: ["arxiv", "ai", "cs.cv", "cs.gr"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.13652](https://arxiv.org/abs/2606.13652)
+**Authors**: Hao Zhang, Mohamed El Banani, Jen-Hao Cheng, Paul Zhang, Yi Hua, Ben Mildenhall, Christoph Lassner, Narendra Ahuja, Gengshan Yang
+**Categories**: cs.CV, cs.GR
+
+## The Gap
+
+Existing image-to-3D methods fall into two camps, each with a fundamental flaw.
+
+**Depth predictors** (e.g., MiDaS, ZoeDepth) are pixel-aligned — they give you a depth value for every input pixel — but stop at the visible surface. They cannot see behind objects; occluded geometry is simply missing.
+
+**Generative image-to-3D models** (e.g., Zero-1-to-3, LRM, TripoSR) can hallucinate complete shapes, but they often trade away pixel-level alignment. The generated 3D geometry may not project back onto the input image correctly; you lose the correspondence between "this pixel in the photo" and "that point in 3D space."
+
+The paper asks: *Can we have both?* Can we produce a complete 3D reconstruction that is pixel-aligned — where every input pixel maps to at least one 3D point, and occluded geometry is still recovered?
+
+```
+Problem: Image-to-3D trades faithfulness for completeness
+              |
+              v
+Assumption: A single depth per pixel is insufficient;
+            we need a stack of depths per ray.
+              |
+              v
+Method: For each pixel, predict an ordered list of
+        3D points (first = visible, then occluded)
+              |
+              v
+Evidence: Outperforms depth predictors on surface
+          accuracy and generative models on alignment
+              |
+              v
+Conclusion: Full geometry + pixel alignment is achievable
+            with a diffusion transformer and mixed noise schedule
+```
+
+## The Increment
+
+**One sentence**: Before this paper, you chose between pixel-aligned but incomplete depth maps and complete but misaligned 3D shapes; now you can have both — a complete, pixel-aligned geometry stack per input pixel.
+
+### Core Mechanism
+
+World Tracing introduces a **multi-layer per-pixel geometry representation**. For each pixel \((u,v)\), the model predicts \(K\) points in camera coordinates: \((x_1,y_1,z_1), (x_2,y_2,z_2), \dots, (x_K,y_K,z_K)\), where the first point is the visible surface and subsequent points are front-to-back intersections with occluded surfaces. This is like having a "depth volume" — a 3D array of shape \((H, W, K, 3)\).
+
+To predict this stack, the authors design **WT-DiT**, a diffusion transformer. The geometry stack is restructured into tokens: each pixel location has \(K\) tokens, one per layer. The key is a **factorized attention** scheme: intra-layer tokens (same layer across all pixels) attend to each other via global attention; inter-layer tokens (different layers at the same pixel) attend via cross-attention. This separates "what's in the scene globally" from "how layers stack locally."
+
+The training uses **pixel-space flow matching** with a mixed noise schedule: the first (visible) layer is given very little noise to force accurate reconstruction, while occluded layers receive more noise to encourage generative completion.
+
+```
+Input Image:  H x W x 3
+    |
+    v
+[ViT encoder -> spatial features]
+    |
+    v
+WT-DiT (Diffusion Transformer)
+    |
+    |--- Factorized Attention ---
+    |     Intra-layer: tokens across space <-- global geometry
+    |     Inter-layer: tokens at same pixel <-- local stacking
+    |
+    v
+Output: H x W x K x 3  (points in camera space)
+    |
+    +-- layer 1: visible surface (depth)
+    +-- layer 2: first occlusion
+    +-- ...
+    +-- layer K: K-th occlusion
+```
+
+**Structural metaphor: a stack of tracing paper.**
+
+Imagine you are an architect drawing a building from a fixed viewpoint. You place a sheet of tracing paper over the photo; you trace everything you see — the front facade. That's the visible surface. Now you flip to a second sheet, still aligned, and you trace what you guess is behind the facade: the internal walls, the back wall. Third sheet: even further behind. Eventually you have a stack of aligned tracings, each layer showing one depth slice. The first layer must exactly match the photo; the later layers are your expert guesses. WT-DiT is the assistant who generates those stacked tracings in one shot, using a global understanding of buildings (intra-layer attention) while ensuring each pixel's stack is consistent (inter-layer attention). The mixed noise schedule is like telling the assistant: "Trace the front facade with obsessive precision; for the back rooms, you have more creative freedom."
+
+### Key Concepts
+
+- **Pixel-aligned geometry stack**: Instead of a single depth value per pixel, produce an ordered list of 3D points along the ray. The ordering is front-to-back. This representation is dense (each pixel always projects to a point) and covers occluded regions. Think of it as a "per-pixel multi-view" — you get multiple depths at the same image coordinate.
+
+- **Factorized attention for layered tokens**: A naive design would treat all \(H \times W \times K\) tokens as a flat sequence. WT-DiT separates attention over space (global) and over layers (local). Intra-layer attention (same layer \(l\) across all pixels) learns scene structure — e.g., "pillar at (x1,y1) and pillar at (x2,y2) are part of the same object." Inter-layer attention (same pixel across layers) ensures that occluded points lie behind the visible surface — e.g., "layer2 point's z must be greater than layer1's z at this pixel."
+
+- **Mixed noise schedule for diffusion**: Standard diffusion applies uniform noise across all dimensions. Here, visible layer tokens get a very low noise level (e.g., \(\sigma = 0.1\)), forcing the model to denoise to the exact ground truth depth. Occluded layers get higher noise (e.g., \(\sigma = 1.0\)), allowing generation when ground truth is ambiguous. This is implemented by conditioning each layer's noise level on a binary mask that indicates which layers are "visible" (first layer always visible, others vary per scene). The model learns to interpolate between reconstruction and generation.
+
+## Framework Shift
+
+```
+Before (mainstream approach):                       After (this paper):
++-----------------------+                    +----------------------------+
+|   Input Image         |                    |   Input Image              |
++-----------------------+                    +----------------------------+
+         |                                            |
+         v                                            v
++-----------------------+                    +----------------------------+
+| Depth estimator       |                    | World Tracing (WT-DiT)     |
+| (per-pixel depth)     |                    | (per-pixel stack of K pts) |
++-----------------------+                    +----------------------------+
+         |                                            |
+         v                                            v
++-----------------------+                    +----------------------------+
+| Visible surface       |                    | Visible surface (layer 1) |
+| only. No occluded geo |                    | + occluded geometry       |
+|                       |                    | (layers 2..K)             |
++-----------------------+                    +----------------------------+
+     |
+     v (alternative path)
++-----------------------+
+| Generative 3D model   |
+| (complete but mis-    |
+| aligned with image)   |
++-----------------------+
+```
+
+**One sentence**: From a single, faithful depth per pixel to a faithful **stack* of depths per pixel — the core shift is **adding a full generative dimension along the ray while keeping pixel alignment as a hard constraint**.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Depth-only and generative-only have been two tribes for years. The paper crisply identifies the trade-off and proposes a synthesis that is both principled (extending depth maps to stacks) and practical (demonstrated on multiple benchmarks). This sits squarely on the trajectory toward "grounded 3D understanding."
+
+**Method maturity**: Clever insight — the factorized attention is lightweight and respects the geometry of the task. The mixed noise schedule is a neat engineering trick that prevents the visible layer from being "washed out" by generation. They didn't reinvent diffusion; they adapted it. A simpler approach could have been to train a single depth estimator + a separate completion network, but that would lose pixel alignment for the completion. The unified stack representation is the right level of abstraction.
+
+**Experimental integrity**: Baselines are fair: they compare against depth estimators (MiDaS, Depth Anything, etc.) and generative models (Zero-1-to-3, DreamFusion, etc.), plus ablations of their own design. Numbers show clear win on surface F-score, Chamfer distance, and visual alignment (measured by projection error). One red flag: they only test on datasets with ground-truth 3D (ShapeNet, ScanNet, etc.) — real-world in-the-wild performance might degrade because occluded geometry annotations are scarce. Also, K is fixed (they use 4 layers) — scenes with more complex depth complexity might require dynamic K.
+
+**Writing quality**: Well-structured, but the "Related Work" section is too brief — they should have contrasted with multi-plane representations (like layered depth images) more explicitly. Also, the method diagram in the paper is helpful but the notation is dense; the authors could have included a smaller example with a concrete pixel.
+
+**Verdict**: **Strong accept** — a clean, novel representation with solid engineering, good results, and clear applications (text-driven editing, video synthesis). Worth reading for anyone doing image-to-3D or view synthesis.
+
+## Takeaways
+
+1. **Per-pixel geometry stacks**: If you're doing depth-guided 3D, consider predicting multiple layers per ray. This simple idea can add occlusion reasoning without losing alignment.
+2. **Factorized attention as a plug-in**: The intra-layer / inter-layer split can be repurposed for any layered 3D representation (e.g., multi-plane images, 3D scene graphs). You don't need a custom transformer; just reformat your tokens.
+3. **Mixed noise schedule**: When training a diffusion model with both reconstruction and generation components, condition the noise level per token (or per spatial region) to prioritize fidelity where data is deterministic. This is a general trick for hybrid tasks.
+:::
+
+:::zh
+**论文**: [2606.13652](https://arxiv.org/abs/2606.13652)
+**作者**: Hao Zhang, Mohamed El Banani, Jen-Hao Cheng, Paul Zhang, Yi Hua, Ben Mildenhall, Christoph Lassner, Narendra Ahuja, Gengshan Yang
+**分类**: cs.CV, cs.GR
+
+## 缺口
+
+现有的图像到3D方法分为两大阵营，各自存在根本性缺陷。
+
+**深度预测器**（如 MiDaS、ZoeDepth）对齐像素——对每个输入像素给出一个深度值——但止步于可见表面。它们看不见物体背后的东西；被遮挡的几何信息完全缺失。
+
+**生成式图像到3D模型**（如 Zero-1-to-3、LRM、TripoSR）可以想象出完整的形状，但它们通常会牺牲像素级的对齐。生成的3D几何体不一定能正确地投影回输入图像；你失去了"照片中的这个像素"与"3D空间中的那个点"之间的对应关系。
+
+这篇论文问：*我们能两者兼顾吗？* 我们能否生成一个完整的、像素对齐的3D重建——每个输入像素至少映射到一个3D点，同时被遮挡的几何也能恢复？
+
+```
+问题：图像到3D在忠实度和完整性之间权衡
+              |
+              v
+假设：每个像素一个深度不够；
+我们需要每条射线上一叠深度。
+              |
+              v
+方法：对每个像素，预测一个有序的
+3D点列表（第一个=可见，后续=被遮挡）
+              |
+              v
+证据：在表面精度上超越深度预测器，
+在对齐程度上超越生成模型
+              |
+              v
+结论：通过扩散变压器和混合噪声调度，
+完整几何+像素对齐是可以实现的
+```
+
+## 增量
+
+**一句话**：这篇论文之前，你要么选像素对齐但不完整的深度图，要么选完整但不对齐的3D形状；现在你两者都能得到——每个输入像素对应一个完整的、像素对齐的几何堆叠。
+
+### 核心机制
+
+World Tracing 引入了一种**多层逐像素几何表示**。对每个像素 \((u,v)\)，模型预测相机空间中的 \(K\) 个点：\((x_1,y_1,z_1), (x_2,y_2,z_2), \dots, (x_K,y_K,z_K)\)，其中第一个点是可见表面，后续点是从前到后的被遮挡表面交点。这就像有了一个"深度体"——形状为 \((H, W, K, 3)\) 的三维数组。
+
+为了预测这个堆叠，作者设计了 **WT-DiT**，一个扩散变压器。几何堆叠被重构为token：每个像素位置有 \(K\) 个token，每个层一个。关键在于**因子化注意力**机制：同层token（所有像素的同一层）通过全局注意力相互关注；异层token（同一像素的不同层）通过交叉注意力相互关注。这将"全局场景中有什么"和"局部层的堆叠方式"分离开来。
+
+训练使用**像素空间流匹配**和混合噪声调度：对第一个（可见）层施加极少的噪声，迫使精确重建；对被遮挡的层施加更多的噪声，鼓励生成式补全。
+
+```
+输入图像： H x W x 3
+    |
+    v
+[ViT编码器 -> 空间特征]
+    |
+    v
+WT-DiT（扩散变压器）
+    |
+    |--- 因子化注意力 ---
+    |     同层：跨空间的token ← 全局几何
+    |     异层：同像素的token ← 局部堆叠
+    |
+    v
+输出：H x W x K x 3（相机空间中的点）
+    |
+    +-- 层1：可见表面（深度）
+    +-- 层2：第一个遮挡
+    +-- ...
+    +-- 层K：第K个遮挡
+```
+
+**核喻：一叠描图纸。**
+
+想象你是一个建筑师，从固定视点画一栋建筑。你把一张描图纸盖在照片上，描出你看到的所有东西——正面外墙。那是可见表面。现在你翻到第二张纸，仍然对齐，描出你猜测的正面后面是什么：内墙、后墙。第三张纸：再往后。最终你得到一叠对齐的描图，每一层显示一个深度切片。第一层必须精确匹配照片；后面的层是你的专家猜测。WT-DiT 就是那个一次生成所有这些叠层描图的助手，它利用对建筑的全局理解（同层注意力），同时确保每个像素的堆叠一致（异层注意力）。混合噪声调度就像告诉助手："正面外墙要画得一丝不苟；后面的房间，你可以多一点创意自由。"
+
+### 关键概念
+
+- **像素对齐的几何堆叠**：不是每个像素只有一个深度值，而是给出沿射线的一个有序3D点列表。顺序是从前到后。这种表示是密集的（每个像素总是投影到一个点），并且覆盖了被遮挡区域。可以把它看作"每个像素的多视图"——你在同一个图像坐标下得到多个深度。
+
+- **逐层token的因子化注意力**：天真的设计会把所有 \(H \times W \times K\) 个token当作一个平坦序列。WT-DiT 将空间上的注意力（全局）和层上的注意力（局部）分开。同层注意力（所有像素的相同层 \(l\)）学习场景结构——例如"\((x1,y1)\) 处的柱子和 \((x2,y2)\) 处的柱子属于同一物体"。异层注意力（同一像素的不同层）确保被遮挡的点在可见表面之后——例如"该像素上层2点的z必须大于层1点的z"。
+
+- **扩散的混合噪声调度**：标准扩散对所有维度应用均匀噪声。在这里，可见层token获得很低的噪声水平（例如 \(\sigma = 0.1\)），迫使模型去噪到精确的真实深度。被遮挡层获得更高的噪声（例如 \(\sigma = 1.0\)），在真实深度不明确时允许生成。这是通过根据一个二进制掩码（指示哪些层是"可见的"——第一层总是可见，其他层因场景而异）来调节每层的噪声水平来实现的。模型学会了在重建和生成之间插值。
+
+## 框架转变
+
+```
+之前（主流方法）：                       之后（本文方法）：
++-----------------------+           +----------------------------+
+|  输入图像              |           |  输入图像                   |
++-----------------------+           +----------------------------+
+         |                                       |
+         v                                       v
++-----------------------+           +----------------------------+
+| 深度估计器             |           | World Tracing (WT-DiT)    |
+| (逐像素深度)           |           | (逐像素K点堆叠)          |
++-----------------------+           +----------------------------+
+         |                                       |
+         v                                       v
++-----------------------+           +----------------------------+
+| 仅可见表面            |           | 可见表面（层1）            |
+| 没有被遮挡几何         |           | + 被遮挡几何（层2..K）    |
++-----------------------+           +----------------------------+
+     |
+     v （另一条路径）
++-----------------------+
+| 生成式3D模型          |
+| （完整但不对齐图像）   |
++-----------------------+
+```
+
+**一句话**：从每个像素一个忠实深度到每个像素一叠忠实深度——核心转变是**在保持像素对齐作为硬约束的同时，沿射线方向添加完整的生成维度**。
+
+## 专家评审
+
+**选题眼光**：真正的缺口。多年来，纯深度和纯生成这两条路一直分道扬镳。本文清晰地识别了权衡，并提出了一种既有原理（将深度图扩展为堆叠）又有实用性（在多个基准上演示）的综合方案。这正好处于通向"有基础的3D理解"的轨迹上。
+
+**方法成熟度**：巧思——因子化注意力轻量级且尊重任务的几何结构。混合噪声调度是一个巧妙的工程技巧，防止可见层被生成过程"洗掉"。他们没有重新发明扩散，而是进行了适配。一个更简单的方法可能是训练一个单独的深度估计器再加一个补全网络，但那会失去补全部分的像素对齐。统一的堆叠表示是正确层次的抽象。
+
+**实验诚意**：基线公平——他们与深度估计器（MiDaS、Depth Anything 等）和生成模型（Zero-1-to-3、DreamFusion 等）比较，还做了自己的消融实验。数字在表面F分数、Chamfer距离和视觉对齐（通过投影误差测量）上明显胜出。一个值得警惕之处：他们只在有真实3D标注的数据集上测试（ShapeNet、ScanNet 等）——真实世界在野性能可能下降，因为被遮挡几何的标注很少。另外，K是固定的（他们用4层）——深度复杂更高的场景可能需要动态K。
+
+**写作功力**：结构良好，但"相关工作"部分太简略——他们本应更明确地与多层画面表示（如分层深度图像）对比。此外，论文中的方法图很有帮助但符号密集；作者本可以包含一个更小的具体像素示例。
+
+**判决**：**强接收**——一个干净新颖的表示，加上扎实的工程、良好的结果和明确的应用（文本驱动编辑、视频合成）。任何做图像到3D或视角合成的人都值得一读。
+
+## 要点总结
+
+1. **逐像素几何堆叠**：如果你在做深度引导的3D，考虑为每条射线预测多个层。这个简单想法可以在不损失对齐的情况下增加遮挡推理能力。
+2. **作为插件的因子化注意力**：同层/异层拆分可以移植到任何分层3D表示上（例如多层画面、3D场景图）。你不需要一个定制的transformer，只需重新格式化你的token。
+3. **混合噪声调度**：在训练既有重建又有生成组件的扩散模型时，根据每个token（或每个空间区域）调节噪声水平，以便在数据确定的地方优先保证保真度。这是一个适用于混合任务的通用技巧。
+:::

@@ -1,0 +1,287 @@
+---
+title:
+  en: "InterleaveThinker: Enabling Interleaved Text-Image Generation with Multi-Agent Reinforcement Learning"
+  zh: "InterleaveThinker: 用多智能体强化学习实现图文交叠生成"
+description:
+  en: "This paper introduces a multi-agent pipeline that gives any image generator the ability to produce interleaved text-image sequences. It uses a planner to organize the sequence, a critic to catch failures, and GRPO-based reinforcement learning to improve step-by-step corrections."
+  zh: "本文提出一个多智能体流水线，让任何图像生成器都能输出交叠的图文序列。它使用规划器组织序列、批评器捕捉失败，并借助基于GRPO的强化学习逐步骤提升修正能力。"
+date: 2026-06-12
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+
+---
+
+:::en
+**Paper**: [2606.13679](https://arxiv.org/abs/2606.13679)
+**Authors**: Dian Zheng, Harry Lee, Manyuan Zhang, Kaituo Feng, Zoey Guo, Ray Zhang, Hongsheng Li
+**Categories**: cs.CV
+
+## The Gap
+
+Current image generators (diffusion models, autoregressive models) are designed for single-image generation or editing. They take one text prompt and produce one image, or take an image and edit it. They cannot natively produce a sequence of intermixed text and images, e.g., a visual narrative with caption boxes, a recipe with step-by-step photos, or an instruction manual with images at each step.
+
+The newest Unified Multimodal Models (UMMs), like GPT-4V or Gemini, have the *capacity* to handle interleaved input/output, but they fail at this task: they lack a dedicated mechanism for planning the order of text and images, and they cannot self-correct when an image deviates from the intended instruction. The gap is not just "bad performance" — it is the absence of a structured, reusable architecture that can turn any image generator into a reliable interleaved generator.
+
+```
+Problem:  Image generators produce one image at a time.
+    |
+    v
+Assumption:  A planner can decompose an interleaved sequence into atomic steps,
+              and a critic can detect when a step failed.
+    |
+    v
+Method:  Planner agent -> Image generator -> Critic agent (with RL training)
+    |
+    v
+Evidence:  Benchmarks RISE and WISE; 4-step FLUX.2-klein shows gain.
+    |
+    v
+Conclusion:  The multi-agent pipeline works with different base generators,
+              and even improves reasoning benchmarks.
+```
+
+## The Increment
+
+**One sentence**: Before this paper, you had to handcraft interleaved text-image sequences; after this paper, any image generator can autonomously produce them, and the system can catch and fix its own mistakes.
+
+### Core Mechanism
+
+The system is a multi-agent pipeline with three components: a **Planner**, an **Executor** (the image generator), and a **Critic**. The Planner takes a high-level user request and a sequence of text and placeholder image slots, and outputs a concrete plan: at step 1 produce text X and image Y, at step 2 produce text Z and image W, etc. The Executor (e.g., Stable Diffusion, FLUX) receives the plan and generates each image. The Critic evaluates each generated image against the plan: "Did you generate an image of a cat? Or did you accidentally output a dog?" If a mismatch is detected, the Critic refines the instruction and asks the Executor to regenerate that step.
+
+Training happens in two phases. First, a **cold start** with supervised fine-tuning (SFT) data: 80k planner examples and 112k critic examples, just to teach the format. Second, a **reinforcement learning** phase using GRPO (Group Relative Policy Optimization) on 13k critic examples. The clever part: a single interleaved trajectory may involve 25+ calls to the image generator, so optimizing the full trajectory is infeasible. Instead, they propose a **step-wise reward** that only looks at the current step's correctness, plus an **accuracy reward** that aggregates across steps. This lets single-step RL guide the entire trajectory.
+
+```
+User Request: "Show how to make coffee: text, image, text, image"
+    |
+    v
++-------------------+       Plan: Step1 text, Step2 image, Step3 text, Step4 image
+|    Planner Agent  | -------------------------------------------------->
++-------------------+                                                    |
+                                                                        v
+                                                            +-----------------------+
+                                                            | Image Generator (e.g. Flux)
+                                                            +-----------------------+
+                                                                        |
+                                                                        v
+                                                            +-----------------------+
+                                                            |    Critic Agent       |
+                                                            | Checks: "Image matches
+                                                            | the plan?" If not,
+                                                            | refines instruction.
+                                                            +-----------------------+
+                                                                        |
+                                                                        v
+                                                             Loop: regenerate or pass
+```
+
+**Structural Metaphor: A movie production team**
+
+Think of the interleaved generation task as producing a movie with a script, a director, an actor, and a script supervisor.
+
+- **User request** = The movie concept: "Make a 2-minute training video on how to change a tire."
+- **Planner agent** = The **screenwriter** and **storyboard artist**. They take the concept and break it down into scenes: Scene 1: Text overlay "Step 1: Loosen lug nuts" + Image of wrench on lug nut. Scene 2: Text "Step 2: Jack up the car" + Image of jack, etc.
+- **Image generator** = The **actor** and **set designer**. They receive each scene's description and produce the actual visual. But actors can flub a line — the generator might produce a wrench that looks like a hammer.
+- **Critic agent** = The **script supervisor** and **first AD**. They watch each take and compare it to the storyboard. If the actor delivered "I'll be back" instead of "Step 1: Loosen lug nuts", the critic calls "cut" and gives a refined direction: "Try again, but this time make sure the wrench is on the lug nut, not in the air."
+- **GRPO training** = The **rehearsal process**. The script supervisor doesn't try to perfect the entire movie in one go. Instead, they give feedback on each take ("That shot was good, but the lighting was off"). Over many takes, the actor learns to get each shot right without needing to see the whole film.
+
+The key load-bearing idea is that fixing one bad scene doesn't require re-shooting the whole movie. That's the step-wise reward — it isolates mistakes.
+
+### Key Concepts
+
+- **GRPO (Group Relative Policy Optimization)**:
+  This is a reinforcement learning method that works like a coach comparing teammates. Imagine you have five versions of the same text instruction (e.g., "Generate a picture of a cat wearing a hat"). The image generator outputs five different images. The critic scores each image: 0 for no cat, 0.5 for a cat but no hat, 1.0 for cat with hat. The average score becomes the baseline. The best performer (above average) gets its "weights" boosted — the generator learns from its own success. The worst performer gets penalized. Crucially, GRPO doesn't need an external "perfect answer" — it learns from the relative quality of its own outputs. This is ideal here because there's no ground-truth image for a novel instruction.
+
+- **Step-wise reward**:
+  In a long generation trajectory (25+ generator calls), it's computationally insane to wait until the whole sequence is done and then give one score. Instead, the critic gives a reward after each single image generation. Was this image correct relative to the plan? Yes -> +1, No -> -1. This isolates mistakes and allows the RL to update after every step. It's like grading a student's homework question by question rather than waiting for the full exam.
+
+- **Cold start with SFT**:
+  Before the RL phase, the critic and planner are fine-tuned on supervised data (80k for planner, 112k for critic). This is not learning the actual task — it's learning the *format*. The planner must output plans in a specific templated structure. The critic must output a score and a refined instruction. Without this cold start, the RL algorithm would receive mostly garbage and never converge. It's like teaching a chess AI the rules of the game before letting it play games.
+
+## Framework Shift
+
+```
+Before (mainstream approach):         After (this paper):
+[Single generator pipeline]          [Multi-agent pipeline]
+
+User Input                             User Input
+    |                                      |
+    v                                      v
+[Image Generator]                    [Planner Agent] --produces plan-->
+    |                                      |                          |
+    v                                      v                          v
+One image                            [Image Generator]          [Critic Agent]
+                                           |                          |
+                                           v                          |
+                                     Generated image -------->    Score + refine
+                                                                       |
+                                                                       v
+                                                                Loop if score low
+                                                                       |
+                                                                       v
+                                                                Final interleaved
+                                                                sequence
+```
+
+**One sentence**: From a single-shot single-image generator to a multi-agent generation-and-verification loop, the core shift is **closing the loop* — adding planning and verification as first-class operations that feed back into each other.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, not manufactured. Interleaved text-image generation is a practical need (storytelling, tutorials, documentation) that existing generators cannot meet. The paper correctly identifies that UMMs fail not because of capacity but because of missing structure. This sits at the intersection of AI for creative tools and embodied manipulation — a growing area.
+
+**Method maturity**: The multi-agent pipeline is a clever composition of existing techniques (planner, critic, SFT, GRPO), not a single breakthrough. The step-wise reward is the elegant insight — without it, the RL would be intractable. There's a risk of over-engineering: a simpler approach might involve prompting a strong UMM like GPT-5, but the authors show their system matches GPT-5 anyway. The maturity level is "demonstrated working prototype," not "production-ready." The dependence on 25+ calls to the image generator makes inference slow.
+
+**Experimental integrity**: Fair baselines (vanilla generators, UMMs, GPT-5), though the comparison to GPT-5 is asymmetric (GPT-5 is closed and possibly consuming more resources). The results on RISE and WISE are clear and consistent. The surprising finding — improvement on reasoning benchmarks (WISE, RISE) when using 4-step FLUX.2-klein — is a nice bonus but deserves more investigation: is it because the planning task forces the generator to represent objects more concretely? There's potential for metric hacking if the critic's scoring aligns accidentally with the benchmark's scoring.
+
+**Writing quality**: The paper is well-structured and the contributions are clear. The weakest section is the experimental analysis of the reasoning improvement — it's presented as a surprising result with minimal analysis. A rewritten section would explore why multi-step interleaved generation improves single-step reasoning. The authors should provide ablation studies on the number of steps, the critic's reward function, and the effect of the planner vs. the critic.
+
+**Verdict**: weak accept — solves a genuine problem with a well-reasoned method, but the reasoning improvement is under-explored and the inference cost is high.
+
+## Takeaways
+
+- **Multi-agent loops for generation**: You can take a weak generator and make it reliable by adding a planner and a critic, both trained with RL. This pattern transfers to any multi-step generation task (story generation, code generation with compilation checking).
+- **Step-wise reward in long trajectories**: When RL over full trajectories is infeasible, decompose the task into atomic steps and reward each step independently. The planner ensures the steps are causally coherent; the reward doesn't need to model long-term dependencies.
+- **Cold start with format SFT**: Before RL, train on format-only data. This dramatically reduces the search space for the RL algorithm and prevents reward hacking.
+- **GRPO as a critic trainer**: GRPO works well when you have no ground-truth and only relative comparisons. This is common in generation tasks — use it to train evaluators, not just generators.
+:::
+
+:::zh
+**论文**: [2606.13679](https://arxiv.org/abs/2606.13679)
+**作者**: Dian Zheng, Harry Lee, Manyuan Zhang, Kaituo Feng, Zoey Guo, Ray Zhang, Hongsheng Li
+**分类**: cs.CV
+
+## 缺口
+
+当前的图像生成器（扩散模型、自回归模型）都是为单张图像生成或编辑而设计的。它们接收一个文本提示，输出一张图片，或者输入一张图片进行编辑。
+它们无法原生地生成交替的图文序列——比如带说明框的视觉叙事、带分步照片的菜谱、或每一步都有图示的操作手册。
+
+最新的统一多模态模型（UMMs），如 GPT-4V 或 Gemini，*有能力*处理交叠的输入/输出，但它们在这项任务上表现失败：缺乏专门机制来规划文本和图像的顺序，也无法在图像偏离指令时自我纠正。
+这个缺口不仅仅是"性能差"——而是缺乏一个结构化的、可复用的架构，能把任意图像生成器变成可靠的交叠生成器。
+
+```
+问题:  图像生成器一次只能生成一张图。
+    |
+    v
+假设:  规划器可以将交叠序列分解为原子步骤，
+        批评器可以检测步骤是否失败。
+    |
+    v
+方法:  规划器智能体 -> 图像生成器 -> 批评器智能体（带RL训练）
+    |
+    v
+证据:  基准测试 RISE 和 WISE；4步 FLUX.2-klein 有增益。
+    |
+    v
+结论:  多智能体流水线适用于不同基座生成器，
+        甚至能提升推理基准的表现。
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，你需要手工制作交叠的图文序列。这篇论文之后，任何图像生成器都可以自主生成这些序列，并且系统能捕捉并修正自己的错误。
+
+### 核心机制
+
+系统是一个多智能体流水线，包含三个组件：**规划器**、**执行器**（图像生成器）和**批评器**。
+规划器接收用户的高层请求和一段文本（其中包含占位的图像插槽），输出一个具体计划：第1步生成文本X和图像Y，第2步生成文本Z和图像W，等等。
+执行器（例如 Stable Diffusion、FLUX）接收计划，逐张生成图像。
+批评器评估每一张生成的图像是否与计划匹配："你生成了一张猫的图片吗？还是意外输出了狗？"
+如果发现不匹配，批评器会改进指令，要求执行器重新生成该步骤。
+
+训练分两个阶段。
+首先，**冷启动**阶段使用监督微调（SFT）数据：80k规划器样本和112k批评器样本，仅仅用来训练输出格式。
+然后，**强化学习**阶段使用GRPO（Group Relative Policy Optimization）在13k批评器样本上进行训练。
+巧妙之处在于：一个交叠生成轨迹可能涉及25次以上的图像生成器调用，因此优化整个轨迹是不可行的。
+于是他们提出了**步骤级奖励**——只关注当前步骤的正确性——外加一个**准确率奖励**，汇总多个步骤。
+这样，单步强化学习就能有效引导整个生成轨迹。
+
+```
+用户请求: "展示怎么冲咖啡：文本、图像、文本、图像"
+    |
+    v
++-------------------+       计划: 步骤1文本, 步骤2图像, 步骤3文本, 步骤4图像
+|   规划器智能体    | -------------------------------------------------->
++-------------------+                                                    |
+                                                                        v
+                                                            +-----------------------+
+                                                            | 图像生成器 (如 Flux)
+                                                            +-----------------------+
+                                                                        |
+                                                                        v
+                                                            +-----------------------+
+                                                            |   批评器智能体        |
+                                                            | 检查: "图像符合计划吗？"
+                                                            | 如果不符，改进指令。
+                                                            +-----------------------+
+                                                                        |
+                                                                        v
+                                                            循环: 重新生成或通过
+```
+
+**结构隐喻：电影制作团队**
+
+把交叠生成任务想象成制作一部电影，有编剧、导演、演员和场记。
+
+- **用户请求** = 电影概念："拍一部2分钟换轮胎教程视频。"
+- **规划器智能体** = **编剧** + **分镜师**。他们分解概念成场景：场景1：文字叠层"第一步：松开轮毂螺栓"+扳手在螺栓上的图；场景2：文字"第二步：顶起车"+千斤顶的图。
+- **图像生成器** = **演员** + **布景师**。他们收到每个场景的描述，产出实际画面。但演员可能演砸——生成器可能产出锤子而不是扳手。
+- **批评器智能体** = **场记** + **副导演**。他们看每一条拍摄，和分镜对比。如果演员说了"我会回来的"而不是"第一步：松开螺栓"，场记喊"卡"，并给出改进方向："再来一条，这次确保扳手在螺栓上，不在空中。"
+- **GRPO训练** = **排练过程**。场记不会试图一次完美整部电影。他们逐条反馈："这镜头不错，但光线不对。"经过多次排练，演员学会每条镜头都做好，不需要看整部电影。
+
+核心承重思想是：修复一个烂场景不需要重拍整部电影。这就是步骤级奖励——它把错误隔离出来。
+
+### 关键概念
+
+- **GRPO (Group Relative Policy Optimization)**: 
+  这是一种强化学习方法，像教练在对比队员。想象你有同一文本指令的五个版本（例如"生成一张戴帽子的猫的图片"）。图像生成器输出五张不同的图。批评器给每张打分：0分没有猫，0.5分有猫没帽子，1分猫有帽子。平均分就是基线。得分高于平均的（表现好）会被提升权重——生成器从自己的成功中学习。得分低于平均的会被惩罚。关键点：GRPO不需要外部的"完美答案"——它从自己输出的相对质量中学习。这对于没有真实图像的新指令来说非常理想。
+
+- **步骤级奖励**: 
+  在长生成轨迹（25+次生成器调用）中，等到整个序列完成再给一个分数是不可行的。相反，批评器在每张图像生成后立即给出奖励。这张图相对于计划正确吗？是->+1，否->-1。这隔离了错误，允许RL在每一步后更新。就像一份作业一道一道题打分，而不是等整份试卷一起判。
+
+- **冷启动（SFT）**: 
+  在RL阶段之前，规划器和批评器在监督数据（规划器80k，批评器112k）上进行微调。这不是学习实际任务——而是学习*格式*。规划器必须以特定的模板化结构输出计划。批评器必须输出分数和修正后的指令。没有这个冷启动，RL算法收到的绝大部分是垃圾，永远不会收敛。这就像教一个象棋AI规则，然后才让它下棋。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+[单生成器流水线]                 [多智能体流水线]
+
+用户输入                           用户输入
+    |                                   |
+    v                                   v
+[图像生成器]                    [规划器智能体] --生成计划-->
+    |                                   |                       |
+    v                                   v                       v
+一张图片                        [图像生成器]              [批评器智能体]
+                                        |                       |
+                                        v                       |
+                                  生成的图片 ---------->  分数 + 修正指令
+                                                                    |
+                                                                    v
+                                                            如果分数低则循环
+                                                                    |
+                                                                    v
+                                                            最终交叠序列
+```
+
+**一句话**: 从单次单图生成到多智能体生成-验证循环，核心转变是**闭合反馈回路*——把规划和验证作为一等操作，让它们相互反馈。
+
+## 专家评审
+
+**选题眼光**: 真缺口，非人造。交叠图文生成是实用的需求（故事讲叙、教程、文档），现有生成器无法满足。论文准确指出UMMs失败不是因为能力不足，而是缺少结构。这处于AI创意工具和具身操作的交汇点，是一个增长领域。
+
+**方法成熟度**: 多智能体流水线是对现有技术（规划器、批评器、SFT、GRPO）的巧妙组合，不是单一突破。步骤级奖励是优雅的洞见——没有它，RL就无法落地。存在过度工程的风险：更简单的方法可能是指令微调一个强大的UMM（如GPT-5），但作者也展示了他们的系统与GPT-5表现相当。成熟度等级是"已演示可行原型"，而非"生产就绪"。对25次以上生成器调用的依赖使得推理速度慢。
+
+**实验诚意**: 基线公平（原生生成器、UMMs、GPT-5），但与GPT-5的比较不对称（GPT-5是闭源的，可能消耗更多资源）。RISE和WISE上的结果清晰且一致。一个令人惊讶的发现——在4步FLUX.2-klein上推理基准(WISE, RISE)也提升了——这很值得但需要更多分析：是不是因为规划任务迫使生成器更具体地表示物体？存在批评器打分与基准打分意外对齐的指标破解风险。
+
+**写作功力**: 论文结构清晰，贡献明确。最薄弱的是对推理改进的实验分析——作为一个惊喜结果被展示，但几乎没有分析。如果重写，应探索为什么多步交叠生成能提升单步推理。作者应该做消融实验：不同步数、批评器的奖励函数、规划器vs批评器的贡献。
+
+**判决**: 弱接收——解决了真问题，方法也合理，但推理改进分析不足，推理成本高。
+
+## 要点总结
+
+- **多智能体闭环用于生成**: 你可以拿一个弱的生成器，加上规划器和批评器（都用RL训练），让它变得可靠。这个模式可以迁移到任何多步生成任务（故事生成、带编译检查的代码生成）。
+- **长轨迹中的步骤级奖励**: 当对整个轨迹做RL不可行时，把任务分解成原子步骤，对每一步独立奖励。规划器保证步骤之间的因果一致性；奖励不需要建模长期依赖。
+- **格式冷启动的SFT**: 在做RL之前，先用纯格式数据做SFT，这能极大缩小RL算法的搜索空间，防止奖励破解。
+- **GRPO用作批评器训练器**: GRPO在没有真实数据、只有相对比较时非常有效。这在生成任务中很常见——用它来训练评估器，而不仅仅是生成器。
+:::
