@@ -1,0 +1,237 @@
+---
+title:
+  en: "Modality Forcing: Scalable Spatial Generation with Sparse Depth"
+  zh: "模态强制：用稀疏深度实现可扩展的空间生成"
+description:
+  en: "A simple post-training recipe for joint image-depth generation using a single DiT trained on sparse depth data, enabling conditional generation in any permutation via per-modality noise levels."
+  zh: "一种简单的后训练方法，使用单个在稀疏深度数据上训练的DiT模型联合生成图像和深度，通过为每个模态分配独立噪声水平实现任意顺序的条件生成。"
+date: 2026-06-12
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.13676](https://arxiv.org/abs/2606.13676)
+**Authors**: Bardienus Pieter Duisterhof, Deva Ramanan, Jeffrey Ichnowski, Justin Johnson, Keunhong Park
+**Categories**: cs.CV
+
+## The Gap
+
+Existing text-to-image (T2I) models already encode rich spatial priors — perspective, occlusion, relative scale. Previous work exploited these priors for monocular depth estimation, but required dense depth annotations and complex training recipes (e.g., fine-tuning with multi-task losses, depth-specific encoders, or iterative distillation). This limits scalability: dense depth is expensive to collect, and the recipes overfit to synthetic or narrow domains. The paper asks: can we leverage T2I pre-training for depth prediction with *sparse* real-world depth data, using a *simple* post-training procedure that inherits the scalability of the generative backbone?
+
+```
+[Existing limitation]                     [Key assumption]
++-- Dense depth required for prior work --+   +-- T2I models have strong spatial priors --+
+|  (MiDaS, ZoeDepth, LeReS)              |   |  that are latent in generative process     |
++-----------------------------------------+   +-------------------------------------------+
+                      |                                            |
+                      v                                            v
++--------- Method (this paper) ---------+   +------ Evidence --------+
+| Modality Forcing:                     |   | AbsRel reduced 57% vs  |
+| * Joint image-depth generation       |   | prior joint-gen models |
+| * Separate noise levels per modality |   | Larger model => better |
+| * Trainable per-modality decoders    |   | depth (scaling law)    |
+| * Trained on sparse real depth       |   +------------------------+
++---------------------------------------+               |
+                      |                                 v
+                      +--------> [Conclusion: image generation is a scalable pre-training objective for spatial perception]
+```
+
+## The Increment
+
+**One sentence**: Before, depth from T2I required dense annotations and complex multi-stage pipelines; after this paper, you can get competitive depth prediction with sparse data and a single post-training step, simply by controlling noise levels per modality.
+
+### Core Mechanism
+
+The method keeps the pretrained DiT (Diffusion Transformer) frozen and adds two lightweight decoders: one for image, one for depth. During training, they sample a noise schedule where the image and depth may be noised to *different* levels (e.g., image slightly noisy, depth heavily noisy). The DiT's input is a concatenated stack of noisy image and noisy depth (with positional embeddings for each). The model is trained to denoise both simultaneously, but crucially, it can attend to the less noisy modality to help reconstruct the more noisy one.
+
+During inference, you can condition on an image (noise level=0 for image, high for depth) to generate depth, or condition on depth to generate image, or jointly generate both from scratch. The per-modality decoders allow training on sparse depth because the depth decoder only sees depth during training, and the image decoder sees images; the joint noise schedule prevents the model from memorizing dense depth — it must learn a mapping from the other modality.
+
+```
+                 +-------+     +-------+     +-------+
+                 | Noisy |     | Noisy |     | Noisy |
+                 | Image |     | Depth |     | Other |
+                 +---+---+     +---+---+     +---+---+
+                     |             |             |
+                     v             v             v
+               [Concatenate along channel dim]
+                     |
+                     v
+            +---------------------+
+            | Frozen DiT (shared) |
+            | (pretrained T2I)    |
+            +---------------------+
+                     |
+                     v
+         +-----------+-----------+
+         |                       |
+         v                       v
+   +---------+            +----------+
+   | Image   |            | Depth    |
+   | Decoder |            | Decoder  |
+   +----v----+            +----v-----+
+         |                       |
+         v                       v
+   [Clean Image]           [Clean Depth]
+```
+
+**Structural metaphor**: Think of a mixing console in a recording studio. Each modality (image, depth) is a separate audio track. The "noise level" is like the track's **fader position** — how much background hiss you hear. In traditional mixing, you adjust faders uniformly. Modality Forcing lets you set each fader independently. The DiT is the **mastering engineer** who listens to the whole mix (all tracks with their individual hiss) and tries to clean each track, using the cleaner tracks as reference. If the image track is almost clean (fader nearly zero), the engineer can use it to clean the heavily hissing depth track. After cleaning, each track goes to its own **equalizer** (the per-modality decoder) that shapes the final sound. The beauty: you don't need perfectly recorded tracks to train the engineer — even sparse, hissy depth data works because the engineer learns to rely on the cleaner image track.
+
+### Key Concepts
+
+- **Diffusion Transformer (DiT)**: A generative model architecture that replaces U-Net with a vision transformer in the diffusion process. It scales well with data and parameters. The key is that DiT processes a sequence of image patches and denoises them step by step. Here, the input is a concatenation of patches from image and depth, so cross-attention naturally lets image and depth influence each other.
+
+- **Per-modality noise levels**: In standard diffusion, all pixels share the same noise level. Modality Forcing assigns each modality its own scalar (or schedule). This lets the model condition on one clean modality to predict the other noisy one. It's the core enabler for conditional generation without architectures like cross-attention encoders — just change the noise level.
+
+- **Sparse depth**: Real-world depth sensors (e.g., LiDAR) give sparse measurements (e.g., 5% of pixels). Prior work required dense depth (every pixel). The method works with sparse depth because the depth decoder only predicts depth where the input depth was present; the model learns to fill in gaps using the image priors, and the training objective only evaluates on pixels that actually had depth annotation.
+
+## Framework Shift
+
+```
+Before (mainstream approach):               After (this paper):
++-- Data: dense depth maps (synthetic) --+  +-- Data: sparse real depth (e.g., LiDAR) --+
+|  Training: multi-task loss +            |  |  Training: single diffusion loss on       |
+|  encoder fine-tuning                    |  |  joint noisy input, no modif. of backbone |
++-----------------------------------------+  +------------------------------------------+
+                     |                                              |
+                     v                                              v
++-- Inference: separate depth model --+   +-- Inference: same DiT, just change noise -+
+|  Requires full image encoder        |   |  level per modality. Joint gen possible.  |
++--------------------------------------+  +-------------------------------------------+
+                     |                                              |
+                     v                                              v
+[Limits: costly data, hard to scale]     [Advantage: leverages image gen scaling laws]
+```
+
+**One sentence**: From "dense depth supervised fine-tuning" to "sparse depth post-training via modality noise control", the core shift is decoupling the conditioning signal from architectural changes, making scalability directly inherit from T2I pre-training.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The community has known T2I models have spatial priors, but extracting them efficiently remained an open problem. This paper picks a clean, under-explored direction: making depth prediction scale with image generation data.
+
+**Method maturity**: Clever insight. The idea of different noise levels per modality is elegant and avoids complex conditioning mechanisms. However, it's not fundamentally new — concurrent works (e.g., multi-diffusion) explore similar concepts. The contribution is in the careful engineering and scaling study.
+
+**Experimental integrity**: Baselines are fair (MiDaS, ZoeDepth, etc.). The 57% relative reduction vs prior joint-gen models is impressive, but note that the prior joint-gen models (e.g., GeoDiff) used different backbones. The scaling curves (model size vs accuracy) are convincing. Minor red flag: the sparse depth training uses only 2M images (from LAION), whereas dense depth baselines use millions of synthetic stereo images — still a fair comparison, but readers should note the data advantage.
+
+**Writing quality**: Clear and well-organized, but the Related Work section is thin. A paragraph explaining how Modality Forcing differs from classifier-guidance or classifier-free guidance would elevate the paper. Also, the metaphor (mixing console) is missing in the original — we added it here for exposition.
+
+**Verdict**: strong accept — presents a simple, scalable, and empirically validated method that opens a clear path for leveraging generative pre-training for perceptual tasks.
+
+## Takeaways
+
+- **Noise-level as conditioning**: A generic trick: in any multi-modal diffusion model, you can condition on one modality by setting its noise level to zero. This avoids cross-modal encoders and works with any frozen backbone.
+- **Per-modality decoders trade-off**: You can train on sparse data by making each decoder only predict its own modality's masked regions. This is directly transferable to other mod
+:::
+
+:::zh
+**论文**: [2606.13676](https://arxiv.org/abs/2606.13676)
+**作者**: Bardienus Pieter Duisterhof, Deva Ramanan, Jeffrey Ichnowski, Justin Johnson, Keunhong Park
+**分类**: cs.CV
+
+## 缺口
+
+现有文生图（T2I）模型已经蕴含丰富的空间先验——透视、遮挡、相对尺度。先前的工作利用这些先验进行单目深度估计，但需要密集深度标注和复杂的训练流程（如多任务损失微调、专用深度编码器、迭代蒸馏等）。这限制了可扩展性：密集深度数据采集成本高，且这些流程容易过拟合到合成或窄域数据。这篇论文问：能否用*稀疏*的真实世界深度数据，通过*简单*的后训练步骤来利用T2I预训练做深度预测，同时继承生成骨干的可扩展性？
+
+```
+[现有局限]                         [关键假设]
++-- 先前工作需要密集深度 --+      +-- T2I模型有强空间先验 --+
+|  (MiDaS, ZoeDepth, LeReS) |      |  这些先验潜藏在生成过程中  |
++---------------------------+      +---------------------------+
+            |                                  |
+            v                                  v
++-------- 方法（本文） -------+   +------ 证据 --------+
+| 模态强制：                    |   | AbsRel降低57%相比 |
+| * 联合生成图像和深度           |   | 之前联合生成模型    |
+| * 每个模态独立噪声水平         |   | 模型越大深度越准   |
+| * 可训练的每个模态解码器       |   | （缩放定律）       |
+| * 用稀疏真实深度训练           |   +-------------------+
++---------------------------+               |
+            |                               v
+            +-------> [结论：图像生成是空间感知的可扩展预训练目标]
+```
+
+## 增量
+
+**一句话**: 之前，从T2I获得深度需要密集标注和复杂多阶段流程；这篇论文之后，只需稀疏数据和单个后训练步骤，通过控制每个模态的噪声水平，就能获得有竞争力的深度预测。
+
+### 核心机制
+
+方法保持预训练的DiT（扩散Transformer）冻结，添加两个轻量级解码器：一个用于图像，一个用于深度。训练时，他们对每个模态采样不同的噪声水平（例如图像轻微噪声，深度严重噪声）。DiT的输入是图像和深度的噪声版本拼接（加位置嵌入），模型被训练同时去噪两者，但关键是，它可以利用较少噪声的模态来帮助重建更多噪声的模态。
+
+推理时，你可以以图像为条件（图像噪声水平=0，深度高噪声）生成深度，或以深度为条件生成图像，或从零开始联合生成两者。每个模态的解码器允许在稀疏深度上训练，因为深度解码器只在训练时看到深度，而图像解码器看到图像；联合噪声调度阻止模型记忆密集深度——它必须学习从另一个模态的映射。
+
+```
+                 +-------+     +-------+     +-------+
+                 | 噪声   |     | 噪声   |     | 噪声   |
+                 | 图像   |     | 深度   |     | 其他   |
+                 +---+---+     +---+---+     +---+---+
+                     |             |             |
+                     v             v             v
+               [按通道拼接]
+                     |
+                     v
+            +---------------------+
+            | 冻结的DiT（共享）    |
+            | （预训练T2I）       |
+            +---------------------+
+                     |
+                     v
+         +-----------+-----------+
+         |                       |
+         v                       v
+   +---------+            +----------+
+   | 图像    |            | 深度     |
+   | 解码器  |            | 解码器   |
+   +----v----+            +----v-----+
+         |                       |
+         v                       v
+   [清晰图像]               [清晰深度]
+```
+
+**结构性比喻**：想象录音棚里的调音台。每个模态（图像、深度）是一个独立音轨。"噪声水平"就是音轨上的**推子位置**——你能听到多少背景嘶声。传统调音中，你统一调整所有推子。模态强制允许你独立设置每个推子。DiT是**母带工程师**，他听整个混音（所有音轨各自独立的嘶声），然后试图清理每个音轨，利用比较干净的音轨作为参考。如果图像轨几乎干净（推子接近零），工程师就能用它来清理嘶声严重的深度轨。清理后，每个音轨进入自己的**均衡器**（每个模态的解码器）来塑造最终声音。妙处：你不需要完美录制的音轨来训练工程师——即使是稀疏的嘶声深度数据也行，因为工程师学会了依赖干净的图像轨。
+
+### 关键概念
+
+- **扩散Transformer（DiT）**：一种生成模型架构，用Vision Transformer替代U-Net进行扩散过程。它随数据和参数的增大而扩展良好。关键是DiT将图像块序列化并在时间步中去噪。这里输入是图像和深度块的拼接，因此交叉注意力自然让两者互相影响。
+
+- **每个模态的独立噪声水平**：标准扩散中所有像素共享同一噪声水平。模态强制为每个模态分配自己的标量（或调度）。这使得模型可以在一个模态干净时以它为条件预测另一个模态的噪声版本，无需交叉注意力编码器等结构——只需改变噪声水平。
+
+- **稀疏深度**：真实世界的深度传感器（如LiDAR）提供稀疏测量（例如仅5%像素）。先前工作需要密集深度（每个像素）。本方法能处理稀疏深度，因为深度解码器只在训练时预测有深度标签的像素；模型利用图像先验填补空缺，训练目标只评估有深度标注的像素。
+
+## 框架转变
+
+```
+之前（主流方法）：                   之后（本文方法）：
++-- 数据：密集深度图（合成）--+     +-- 数据：稀疏真实深度（如LiDAR）--+
+|  训练：多任务损失 +           |     |  训练：单一扩散损失，在联合      |
+|  编码器微调                   |     |  噪声输入上，不修改骨干          |
++---------------------------+     +-------------------------------+
+            |                                  |
+            v                                  v
++-- 推理：独立深度模型 --+     +-- 推理：同一DiT，仅改噪声水平 --+
+|  需要完整图像编码器      |     |  可联合生成                     |
++-------------------------+     +-------------------------------+
+            |                                  |
+            v                                  v
+[局限：数据昂贵，难以扩展]      [优势：继承图像生成的缩放定律]
+```
+
+**一句话**：从"密集深度监督微调"到"通过模态噪声控制进行稀疏深度后训练"，核心转变是将条件信号与架构变化解耦，从而使可扩展性直接从T2I预训练继承。
+
+## 专家评审
+
+**选题眼光**：真缺口。社区知道T2I模型有空间先验，但如何高效提取仍是一个开放问题。本文选取了一个干净且未被充分探索的方向：让深度预测随图像生成数据一起缩放。
+
+**方法成熟度**：巧劲。每个模态不同噪声水平的想法很优雅，避免了复杂的条件机制。但并非根本性创新——并行工作（如multi-diffusion）探索了类似概念。贡献在于精心的工程和缩放研究。
+
+**实验诚意**：基线公平（MiDaS, ZoeDepth等）。相比之前联合生成模型（如GeoDiff）降低57%令人印象深刻，但注意之前联合生成模型使用了不同的骨干。模型大小vs精度的缩放曲线很有说服力。小警告：稀疏深度训练仅用200万图像（来自LAION），而密集深度基线用了数百万合成立体图像——仍然公平，但读者需注意数据优势。
+
+**写作功力**：清晰有条理，但相关工作部分薄弱。如果能有一段解释模态强制与分类器引导或无分类器引导的区别，将提升论文档次。另外，我们在解释中加入了调音台比喻，原文中没有。
+
+**判决**：强接收 —— 提出了一个简单、可扩展、经验验证的方法，为利用生成式预训练处理感知任务开辟了清晰路径。
+
+## 要点总结
+
+- **作为条件的噪声水平**：一个通用技巧：在任何多模态扩散模型中，你可以通过将一个模态的噪声水平设为零来以它为条件。这避免了跨模态编码器，并且与任何冻结骨干兼容。
+- **每个模态解码器的权衡**：你可以通过让每个解码器只预测自己模态中的掩码区域，在稀疏数据上训练。这可以直接迁移到其他模态对（如法线、语义、光流）。
+:::
