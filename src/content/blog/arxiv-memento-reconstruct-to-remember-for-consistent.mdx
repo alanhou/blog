@@ -1,0 +1,267 @@
+---
+title:
+  en: "Memento: Reconstruct to Remember for Consistent Long Video Generation"
+  zh: "Memento：通过重建来记住——长视频生成中的主体一致性"
+description:
+  en: "A new framework that treats subject preservation as an explicit identity grounding problem, using memory-based reconstruction and dual-query attention to keep characters consistent across shots in long-form video generation."
+  zh: "一种将主体保持视为显式身份对齐的新框架，利用基于记忆的重建和双查询注意力机制，在长视频生成中跨镜头保持角色一致。"
+date: 2026-06-15
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.14667](https://arxiv.org/abs/2606.14667)  
+**Authors**: Xuan Wei, Longbin Ji, Guan Wang, Xiangrui Liu, Zhenyu Zhang, Shuohuan Wang, Yu Sun, Qingqi Hong  
+**Categories**: cs.CV
+
+## The Gap
+
+Long video generation today works by decomposing the video into shots and generating them sequentially, with each shot conditioned on the previous one. This "next-shot continuation" paradigm, used in methods like VideoGPT, NUWA-XL, and Coach-LLM, is scalable but suffers from a critical blind spot: *it never checks whether the accumulated memory still faithfully represents the subject's identity*. As generation proceeds, recurring subjects (e.g., a character's face, a unique object) gradually drift—a phenomenon the authors call **identity dilution**: small errors compound, features are overwritten by newer context, and after a few shots the subject is effectively forgotten. No prior work treated subject preservation as an explicit reconstruction problem; they simply assumed that conditioning on history is enough. Memento shows this assumption is false, and replaces it with a learnable verification loop.
+
+```
+                   Problem:
+    Recurring subjects diluted/forgotten across shots
+                            |
+                            v
+                  Implicit Assumption:
+   Conditioning on previous shots preserves identity
+                            |
+                            v (Assumption is false)
+                    Explicit Method:
+   Joint training of next-shot generation + memory-based
+   subject reconstruction (recover target from memory alone)
+                            |
+                            v
+                     Evidence:
+   SOTA on subject consistency, cross-shot coherence, quality
+                            |
+                            v
+                     Conclusion:
+   Reconstruction-loop is necessary for long-term identity
+```
+
+## The Increment
+
+**One sentence**: Before Memento, long video generation trusted that sequential continuity would preserve subjects; after Memento, the generator must prove it can reconstruct the subject from its memory bank alone, making identity preservation a testable objective rather than a hope.
+
+### Core Mechanism
+
+Memento consists of three interacting modules: a **Memory Bank** that stores past keyframes and their semantic features, a **Generator** that produces the next shot conditioned on both the global story caption and two separate memory queries, and a **Reconstructor** that takes only the memory bank and the global caption and tries to reconstruct a target subject appearance. The whole system is trained end-to-end with a dual loss: the standard next-shot generation loss (cross-entropy on visual tokens) plus a **reconstruction loss** that forces the memory bank to contain enough identity information to recover the subject.
+
+Data flows as follows. During training, a full video is available. For a given shot boundary, the global caption (story-level description) and the current memory bank (from previous shots) are fed into the Generator. Additionally, a **dual-query attention** mechanism operates: one query (`Q_long`) attends over the entire memory bank to extract long-range identity cues, while another (`Q_short`) attends over a small set of recent keyframes to capture short-range coherence. The generator produces the next shot tokens. Separately, the Reconstructor receives the same memory bank and global caption, but **without* the previous shot's visual input, and tries to produce the target subject's appearance (e.g., a close-up of the character's face). The reconstruction loss penalizes failure, forcing the memory bank to be *reconstructively sufficient*—a property no previous method enforced.
+
+```
+                        +-------------------+
+                        |   Global Caption  |
+                        +---------+---------+
+                                  |
+                    +-------------+-------------+
+                    |             |             |
+                    v             v             v
+             +-----------+  +-----------+  +-----------+
+             | Q_long    |  | Q_short   |  | Reconst-  |
+             | (over all |  | (over few |  | ructor    |
+             | memory)   |  | keyframes)|  | (from     |
+             +-----+-----+  +-----+-----+  | memory)   |
+                   |              |         +-----+-----+
+                   +------+-------+               |
+                          |                       v
+                    +-----v------+          +----------+
+                    | Generator  |          | Reconst  |
+                    | (produces  |          | loss     |
+                    | next shot) |          +----------+
+                    +-----+------+
+                          |
+                          v
+                    +-----------+
+                    | Next Shot |
+                    +-----------+
+```
+
+**Load-bearing metaphor**: Think of Memento as a **film continuity supervisor** who works alongside the director.  
+- The **Memory Bank** is the supervisor's binder of Polaroid photos: shots of the character from previous scenes, with notes about key outfit details, scars, or mannerisms.  
+- The **Generator** is the director shooting the next scene from a script (global caption) while glancing at the binder (long query) and the last few takes (short query).  
+- The **Reconstructor** is a pop quiz: the supervisor closes the binder and asks the assistant to sketch the character from memory alone. If the assistant fails, the binder didn't contain enough identity info.  
+The director and assistant are trained together: the director learns to store useful identity cues in the binder, and the assistant learns to reconstruct from those cues. Crucially, the assistant *never sees the current shot*, so the binder must be self-sufficient for identity—exactly what long-term consistency demands.
+
+### Key Concepts
+
+- **Identity reconstruction loss**: Instead of just measuring how well the generated next shot matches ground truth, Memento adds a separate loss that asks: "Given only the memory bank (no recent context), can you still reconstruct the subject's appearance?" This forces the memory to be a compact, identity-rich representation. Example: If a character has a unique scar on their cheek, the memory bank must encode it clearly; otherwise, the reconstructor will produce a blurry or wrong face, and the loss will spike.
+
+- **Dual-query memory**: A single attention over all memory is prone to long-range distractions or short-range myopia. Memento splits the query into two: one attends to the entire memory bank (for stable identity features like hair color, face structure) and the other attends to only the most recent few keyframes (for motion continuity and scene transitions). Example: For a character walking through a door, the long query ensures they still look like the same person, while the short query picks up the correct door frame and walking pose from the last shot.
+
+- **Subject-aware cinematic data pipeline**: To get clean reconstruction supervision, the authors built a custom dataset pipeline that extracts subject names from captions (e.g., "Alice" vs. a generic "person") and aligns them with bounding-box annotations. This ensures that during training, the reconstruction loss targets specific subjects rather than aggregating over all entities. Without this, the reconstructor might learn to average over multiple characters and lose identity distinctiveness.
+
+## Framework Shift
+
+Previous methods implicitly trusted sequential continuity; Memento explicitly verifies memory sufficiency. The shift is from *generation-as-optimization-of-next-shot* to *generation-as-proof-of-identity-reconstruction*.
+
+```
+Before (mainstream approach):
+   Shot_1 --> Shot_2 --> Shot_3 --> ... (only continuity loss)
+   [Memory is passively accumulated, never checked]
+   Weakness: identity drifts silently.
+   
+After (Memento):
+   Shot_1 --> Memory --> +--> Generator --> Shot_2
+                         |        |
+                         +--> Reconstructor (loss)
+                         [Memory must pass reconstruction test]
+   Strength: identity drift is penalized explicitly.
+```
+
+**One sentence**: From passive accumulation to active reconstruction verification, the core shift is that memory's adequacy is no longer assumed but measured.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Long video generation's main failure mode is identity loss, and prior work (e.g., temporal decomposition) simply didn't address it. This paper picks a fundamental, practically important problem.
+
+**Method maturity**: Clever insight—framing identity preservation as a reconstruction task is elegant and principled. The dual-query mechanism is a reasonable engineering choice, though it could be argued that a single gated attention might suffice. The method is not brute force; it introduces a novel training objective that directly targets the problem. However, the reliance on a custom data pipeline (subject-aware annotations) may limit applicability to domains without such annotations.
+
+**Experimental integrity**: Baselines include Coach-LLM, NUWA-XL, and a VideoGPT variant—standard competitors. Metrics cover subject consistency (CLIP score on subjects, face ID similarity), cross-shot coherence (temporal consistency), and visual quality (FID, FVD). The gains on subject consistency are sizable (e.g., +7% face ID similarity). One potential red flag: the reconstruction loss is computed on a single subject per shot—how do they handle videos with multiple subjects that share screen time? The paper mentions "consistent, pronoun-free subject descriptions" but multi-subject scenarios are not deeply discussed. Also, the ablation study only removes the reconstruction loss or the dual-query; removing the entire memory bank is not tested, which would be a strong sanity check.
+
+**Writing quality**: The introduction and method sections are clear. However, the experiment section is a bit dense; a table summarizing the correlation between reconstruction loss value and subject consistency would add more intuition. The paper could also benefit from a failure case analysis (e.g., when does the reconstruction loss fail to prevent drift?). The appendix is thin.
+
+**Verdict**: **Weak accept** — The core idea is sound and the results are promising, but the evaluation scope (single subject, custom pipeline) and missing comparisons to retrieval-based methods (e.g., storing reference images) leave room for future work. It's worth reading for the reconstruction-loss framing.
+
+## Takeaways
+
+- **Reconstruction as verification**: Any generative system with a long-term memory module can benefit from adding a reconstruction head that tests whether the memory is **self-sufficient* for the most critical features (identity, style, layout). This is transferable to text-to-video, multi-image generation, and even long-document generation.
+- **Dual-query separation**: Splitting attention into long-range identity queries and short-range coherence queries is a simple trick that can likely improve any sequential generation model. Practitioners should consider replacing a single cross-attention with two separate heads that have different receptive fields.
+- **Subject-aware annotation pipeline**: The insight that modern LLMs can extract subject names from captions and tie them to visual annotations is useful beyond this paper. Anyone working on character consistency can adopt this cheap data augmentation strategy.
+:::
+
+:::zh
+**论文**: [2606.14667](https://arxiv.org/abs/2606.14667)  
+**作者**: Xuan Wei, Longbin Ji, Guan Wang, Xiangrui Liu, Zhenyu Zhang, Shuohuan Wang, Yu Sun, Qingqi Hong  
+**分类**: cs.CV
+
+## 缺口
+
+目前长视频生成的主流做法是将视频分解为多个镜头，逐镜头生成。
+每个镜头只依赖前一个镜头，比如 VideoGPT、NUWA-XL、Coach-LLM 等方法。
+这种"下一个镜头的延续"范式可扩展，但有一个关键盲点：**从不检查累积的记忆是否还忠实地代表主体的身份**。
+随着生成进行，重复出现的主体（例如角色面部、独特物体）会逐渐漂移——作者称之为**身份稀释**：小的误差聚集，特征被更新的上下文覆盖，几轮镜头后主体实际上被遗忘。
+没有先前的工作将主体保持视为显式的重建问题；它们只是假设条件于历史就足够了。
+Memento 证明这个假设是错的，并用一个可学习的验证循环替代它。
+
+```
+                   问题：
+  重复主体在镜头间被稀释/遗忘
+                            |
+                            v
+                  隐式假设：
+  基于前镜头的条件能保持身份
+                            |
+                            v （假设不成立）
+                 显式方法：
+  联合训练下一个镜头生成 + 基于记忆的主体重建
+  （仅从记忆恢复目标外观）
+                            |
+                            v
+                    证据：
+  在主体一致性、跨镜头连贯性、视觉质量上达到SOTA
+                            |
+                            v
+                    结论：
+  重建循环对长期身份保持是必要的
+```
+
+## 增量
+
+**一句话**：在Memento之前，长视频生成相信序列连续性会自动保持主体；
+在Memento之后，生成器必须证明它能从记忆库中重建主体，使身份保持成为一个可测试的目标，而不是一个希望。
+
+### 核心机制
+
+Memento由三个交互模块组成：**记忆库**（存储过去的关键帧及其语义特征）、**生成器**（根据全局故事描述和两种记忆查询生成下一个镜头）、**重建器**（仅使用记忆库和全局描述，尝试重建目标主体的外观）。
+整个系统端到端训练，使用双重损失：标准的下一个镜头生成损失（视觉token的交叉熵）加上**重建损失**，迫使记忆库包含足够的信息以恢复主体。
+
+训练时数据流程如下：给定完整的视频，在一个镜头边界处，全局描述和当前的记忆库（来自先前镜头）喂给生成器。
+另外，**双查询注意力**机制运作：一个查询（`Q_long`）关注整个记忆库以提取长期身份线索，另一个（`Q_short`）关注一小部分近期的关键帧以捕捉短期连贯性。
+生成器生成下一个镜头token。
+同时，重建器接收相同的记忆库和全局描述，但**没有**前一镜头的视觉输入，尝试生成目标主体的外观（例如角色面部的特写）。
+重建损失惩罚失败，迫使记忆库**在重构上是充分的**——这是以前任何方法都没有强制执行的属性。
+
+```
+                        +-------------------+
+                        |   全局描述        |
+                        +---------+---------+
+                                  |
+                    +-------------+-------------+
+                    |             |             |
+                    v             v             v
+             +-----------+  +-----------+  +-----------+
+             | Q_long    |  | Q_short   |  | 重建器    |
+             | (整个记忆 |  | (近几个   |  | (仅从记忆|
+             | 库)       |  | 关键帧)   |  | 恢复)     |
+             +-----+-----+  +-----+-----+  +-----+-----+
+                   |              |               |
+                   +------+-------+               |
+                          |                       v
+                    +-----v------+          +----------+
+                    | 生成器     |          | 重建损失  |
+                    | (产生下一  |          +----------+
+                    | 个镜头)    |
+                    +-----+------+
+                          |
+                          v
+                    +-----------+
+                    | 下一个镜头 |
+                    +-----------+
+```
+
+**核喻**：把Memento想象成一个**电影连续性主管**和导演一起工作。
+- **记忆库**就是主管的宝丽来相册：角色以前场景的照片，记录着装细节、伤疤、特色。
+- **生成器**是导演按剧本（全局描述）拍摄下一场，同时瞄一眼相册（长查询）和最近几场（短查询）。
+- **重建器**是一个突击测验：主管合上相册，让助理凭记忆画出角色。如果助理画不出来，说明相册里没有足够的身份信息。
+导演和助理一起训练：导演学会在相册里存入有用的身份线索，助理学会从这些线索重建。
+关键在于助理**从未看过当前镜头**，所以相册必须自给自足地包含身份信息——这正是长期连贯性所需要的。
+
+### 关键概念
+
+- **身份重建损失**：Memento不仅仅衡量生成的下一帧与真实值的匹配度，还增加了一个独立的损失，问："仅给出记忆库（没有近期上下文），你还能重建主体的外观吗？" 这迫使记忆库成为一个紧凑的、富含身份信息的表示。例：如果一个角色脸颊上有独特的疤痕，记忆库必须清晰地编码它；否则重建器会生成模糊或错误的面部，损失会飙升。
+
+- **双查询记忆**：单一注意力于所有记忆容易产生长期干扰或短期近视。Memento将查询分为两个：一个关注整个记忆库（用于稳定的身份特征，如发色、脸型），另一个仅关注最近几个关键帧（用于运动连贯性和场景过渡）。例：角色穿过一扇门，长查询确保他看起来还是同一个人，短查询从上一镜头获取正确的门框和走路姿态。
+
+- **主体感知电影数据流程**：为了获得干净的重建监督，作者构建了一个自定义数据集流程，从描述中提取主体名称（例如"Alice"对泛化的"人"），并将其与边界框注释对齐。这确保在训练时重建损失针对具体主体，而不是聚合所有实体。否则重建器可能学习平均值，丢失身份独特性。
+
+## 框架转变
+
+先前方法隐式信任序列连贯性；Memento显式验证记忆是否充分。转变从"生成=优化下一镜头"到"生成=身份重建的证明"。
+
+```
+之前（主流方法）：
+   镜头1 --> 镜头2 --> 镜头3 --> ... （只有连贯性损失）
+   [记忆被动累积，从不检查]
+   弱点：身份无声漂移。
+
+之后（Memento）：
+   镜头1 --> 记忆 --> +--> 生成器 --> 镜头2
+                       |        |
+                       +--> 重建器（损失）
+                       [记忆必须通过重建测试]
+   优势：身份漂移被显式惩罚。
+```
+
+**一句话**：从被动累积到主动重建验证，核心转变是记忆的充分性不再被假设，而是被测量。
+
+## 专家评审
+
+**选题眼光**：真实缺口。长视频生成的主要失败模式是身份丢失，先前工作（如时间分解）根本没有解决这个问题。这篇论文选择了一个基础且实际重要的问题。
+
+**方法成熟度**：巧妙——将身份保持视为重建任务是优雅且原则性的。双查询机制是合理的工程选择，不过也可以说单一门控注意力可能就足够。该方法不是蛮力；它引入了一个直接针对问题的训练目标。然而，依赖自定义数据流程（主体感知注释）可能限制了没有此类注释领域的适用性。
+
+**实验诚意**：基线包括Coach-LLM、NUWA-XL和一个VideoGPT变体——标准对手。指标覆盖主体一致性（对主体的CLIP分数、人脸ID相似度）、跨镜头连贯性（时间一致性）和视觉质量（FID、FVD）。主体一致性的提升是显著的（例如人脸ID相似度+7%）。一个可能的红旗：重建损失是针对每个镜头的一个主体计算的——他们如何处理多个主体共享屏幕时间的视频？论文提到"一致的、无代词的主体描述"，但多主体场景未深入讨论。此外，消融实验只移除了重建损失或双查询，没有测试移除整个记忆库，这将是一个很强的合理性检查。
+
+**写作功力**：引言和方法部分清晰。但实验部分有点密集；添加一个表格展示重建损失值与主体一致性之间的相关性会更有直觉。论文也可以受益于失败案例分析（例如重建损失在何时未能阻止漂移？）。附录很薄。
+
+**判决**：**弱接收** — 核心想法是合理的，结果有希望，但评估范围（单一主体、自定义流程）和缺少与基于检索方法的比较（例如存储参考图像）留下了未来工作空间。值得一读，因为重建损失框架很有启发性。
+
+## 要点总结
+
+- **重建作为验证**：任何带有长期记忆模块的生成系统都可以从增加一个重建头中受益，该头测试记忆对最关键特征（身份、风格、布局）是否**自足**。这可以迁移到文本到视频、多图像生成，甚至长文档生成。
+- **双查询分离**：将注意力拆分为长期身份查询和短期连贯性查询是一个简单技巧，很可能改进任何序列生成模型。实践者应该考虑用两个具有不同感受野的独立头替换单个交叉注意力。
+- **主体感知注释流程**：利用现代LLM从描述中提取主体名称并将其与视觉注释关联起来的洞察，在这个论文之外也很有用。任何研究角色一致性的人都可以采用这种廉价的数据增强策略。
+:::
