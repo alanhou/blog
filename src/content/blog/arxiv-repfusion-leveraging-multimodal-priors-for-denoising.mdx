@@ -1,0 +1,268 @@
+---
+title:
+  en: "RepFusion: Let Multimodal LLMs Denoise Visual Representations Directly"
+  zh: "RepFusion：让多模态大语言模型直接对视觉表示去噪"
+description:
+  en: "Existing text-to-image systems waste capacity: they use LLMs only for text encoding, then separately train huge denoisers. RepFusion shows that an off-the-shelf multimodal LLM can serve as a conditional signal for denoising, repurposing the MLLM itself as a noisy representation encoder. The result: better image quality at the same inference budget."
+  zh: "现有文生图系统浪费算力：LLM只用来编文本，还要另外训练庞大的去噪网络。RepFusion发现，现成的多模态LLM可以直接作为去噪的条件信号——把MLLM本身变成噪声表示编码器。效果：同样推理预算下，图像质量更高。"
+date: 2026-06-15
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-repfusion-leveraging-multimodal-priors-for-denoising.png"
+
+---
+
+![Concept animation](/arxiv-visuals/repfusion-leveraging-multimodal-priors-for-denoising/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2606.14700](https://arxiv.org/abs/2606.14700)  
+**Authors**: Xichen Pan, Aashu Singh, Satya Narayan Shukla, Xiangjun Fan, Shlok Kumar Mishra, Saining Xie  
+**Categories**: cs.CV
+
+## The Gap
+
+The text-to-image pipeline has a weird asymmetry. We use a massive pretrained LLM (or T5, CLIP, etc.) to encode the text prompt, but the *image generation* — the actual denoising — is handled by a separately trained UNet or DiT that starts from scratch. Then along came Representation Autoencoders (RAEs) like MaskDiT or REPA, which showed you don't need to generate raw pixels; you can generate semantically structured visual representations (e.g., DINOv2 features) instead. This creates a latent space much closer to LLM-compatible semantics. Good.
+
+But the denoiser itself is still newly trained. Even if the *target* representations are LLM-friendly, the *process* of going from noise to those targets remains a heavyweight learned module. Why not use the LLM (or rather, an MLLM that can ingest images) directly as part of the denoising process? Multimodal LLMs already have MLP projectors that align clean visual features with the language model. The key insight: that projector also works on *noisy* visual features, because the MLLM has seen enough corrupted inputs during pretraining to generalize. So you can treat the MLLM itself as a noisy representation encoder, feed it the evolving noisy representation step by step, and use its output as a conditioning signal for a lightweight diffusion transformer. That's the gap — nobody had tried to repurpose the MLLM as an active denoising component rather than just a frozen text encoders.
+
+```
+[ASCII logic topology: Problem -> Assumption -> Method -> Evidence -> Conclusion]
+
+    Problem: T2I denoisers are trained from scratch, ignoring MLLM priors
+         |
+         v
+    Assumption: MLLM's visual encoder can handle noisy inputs *
+    *  (supported by MLLM pretraining data diversity)
+         |
+         v
+    Method: RepFusion - use MLLM as noisy representation encoder,
+    output used as DiT conditioning
+         |
+         v
+    Evidence: Controlled comparisons at same inference budget
+    (e.g., 400M param DiT) -> RepFusion beats baselines
+         |
+         v
+    Conclusion: MLLMs provide strong denoising priors; test-time
+    compute can be spent on repeated MLLM conditioning
+```
+
+## The Increment
+
+**One sentence**: Before RepFusion, the MLLM was a passive text encoder in T2I; after RepFusion, the MLLM becomes an active, iteratively conditioned denoising component, improving quality without increasing denoiser size.
+
+### Core Mechanism
+
+RepFusion has three main components: a frozen multimodal LLM (e.g., LLaVA-1.5 with Vicuna-7B), a frozen target representation encoder (e.g., DINOv2), and a small diffusion transformer (DiT, ~400M parameters). The process works like this:
+
+1. **Forward process**: Start with a target image. Encode it into a clean visual representation using DINOv2. Then add noise to get a noisy representation at timestep t.
+2. **MLLM conditioning**: Feed the noisy representation (after a learned lightweight projection) into the frozen MLLM. The MLLM processes it alongside the text prompt, and the final hidden state (specifically the [CLS] token of the visual branch after the projector) becomes the conditioning signal. This is done at **each* denoising step, reusing the MLLM forward pass.
+3. **Denoising in representation space**: The DiT takes the noisy representation and the MLLM conditioning, and predicts the clean representation.
+4. **Target decoding**: After getting the predicted clean representation, decode it to the final image via a lightweight decoder trained on top of the representation (e.g., a small GAN or VAE).
+
+The crucial data flow: noisy representation → MLLM → conditioning → DiT → clean representation. The MLLM is reused at every denoising step, which is expensive but, as the paper shows, productive — the MLLM's prior adapts to the current noise level.
+
+```
+[ASCII diagram of method internals]
+
+     +---------------------------+
+     |   Frozen MLLM (LLaVA)     |
+     |  (with MLP projector)     |
+     +-----^-----------------^---+
+           |                 |
+     noisy rep + text    conditioning
+           |                 |
+           v                 v
+     +-----------+    +-------------+
+     | DiT denois|--> | Predicted   |
+     | (400M par)|    | clean rep   |
+     +-----------+    +------^------+
+                              |
+                    target encoder (DINOv2)
+
+    At each timestep t:
+      1. Add noise to representation z_t = sqrt(alpha_t)*z_0 + sqrt(1-alpha_t)*eps
+      2. z_t -> project -> MLLM -> conditioning c_t
+      3. DiT takes (z_t, c_t) -> predicts z_{t-1}
+```
+
+**Structural metaphor**: Think of the MLLM as a **skilled chef who can taste a half-cooked dish and correct it**. The standard T2I pipeline is like having a recipe writer (LLM for text) and a separate apprentice cook (denoiser) who's never tasted anything before. The apprentice reads the recipe and tries to cook, but makes many mistakes. RepFusion says: let the chef taste the partially cooked dish at every stage and give real-time corrections. The chef's palate is the MLLM, trained on millions of dishes (images) and recipes (text). The apprentice is the small DiT, which doesn't need to know cooking theory — it just follows the chef's corrections. The chef's feedback (conditioning) is a short verbal note: "more salt, less heat." Each denoising step, the apprentice hears a new note because the dish has changed. That's why repeated MLLM conditioning helps: the chef adapts to the current state.
+
+### Key Concepts
+
+- **Representation Autoencoder (RAE)**: Instead of generating pixels directly, an RAE learns to map images into a semantic representation space (e.g., DINOv2 features) and then decode back. The denoising happens in that semantic space, which is easier because the representation is more abstract and compact. RepFusion inherits this philosophy but changes who does the denoising.
+- **MLLM as a noisy processor**: Multimodal LLMs (e.g., LLaVA) are typically used on clean images. But during their pretraining, they see many corrupted or noisy images — blurry web images, low-res thumbnails, etc. So their visual encoder learns to extract **robust* features. RepFusion exploits this: the MLLM's projector can align noisy representations with the language model's space, just as it does for clean ones. The key empirical finding is that the alignment quality degrades gracefully with noise, so the conditioning remains useful at all t.
+- **Test-time compute scaling**: In standard diffusion, the denoiser is reused but its computation per step is constant. Here, the MLLM adds extra compute per step. The paper shows that this extra compute is **more efficient* than scaling the denoiser itself — spending compute on the MLLM yields higher FID gains than adding the same number of FLOPs to the DiT.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+   Text Prompt                          Text Prompt
+       |                                    |
+       v                                    v
+   Frozen LLM (text only)              Frozen MLLM (visual+text)
+       |                                    |
+       v                                    v
+   Learned embedding (just text)        Noisy representation (visual)
+       |                                    |
+       v                                    v
+   Large Denoiser (UNet/DiT             Small DiT conditioned by
+   trained from scratch)                 MLLM output at each step
+       |                                    |
+       v                                    v
+   Pixel space decoder                  Rep. decoder (small)
+
+   * LLM contributes once             * MLLM contributes at every step
+   * No visual feedback               * Visual feedback loop through MLLM
+   * Big denoiser bottleneck          * Compute shifted to MLLM reuse
+```
+
+**One sentence**: From a single-pass text encoder + big scratch denoiser to a recurrent visual-linguistic conditioning loop that leverages pre-existing MLLM capabilities, the core shift is treating the MLLM as a dynamic denoising oracle rather than a static text encoder.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, well-motivated. The field has been obsessed with scaling denoisers (DiT-XL, etc.) while ignoring that we already have powerful multimodal models sitting idle during generation. This paper identifies a concrete inefficiency and exploits it. Positioned at the intersection of T2I and representation learning — timely.
+
+**Method maturity**: Clever insight, not brute force. The approach is surprisingly simple: just feed noisy representations into a frozen MLLM and use its output as conditioning. No custom architecture or heavy training — only a lightweight MLP to project noisy representations into the MLLM's input format, and a standard DiT. The paper's contribution is the **repurposing* idea, not new building blocks. That's high leverage.
+
+**Experimental integrity**: Fair baselines. They compare against REPA (same DiT architecture, same representation target), LaViT, and standard DiT, all at comparable inference FLOPs by scaling down the DiT when MLLM is used. The metrics (FID, CLIP score, GenEval) hold up. One red flag: they use a relatively old MLLM (LLaVA-1.5). Would results improve with GPT-4V-level MLLMs? Likely, but not tested. Also, the decoder from representation to image is not well-ablated — could the quality be limited by the decoder rather than the denoising?
+
+**Writing quality**: Well-structured overall, but the "repeated MLLM conditioning" insight is buried in Section 4.2. The abstract promises "test-time compute can be productively spent" but the experiments on this point are scattered. If they consolidated a dedicated table showing FID vs. total FLOPs for different repetitions of MLLM vs. bigger DiT, the paper would be much stronger. Also, Figure 3 (qualitative) is too small; hard to see differences.
+
+**Verdict**: **strong accept** — A clean, surprising result that changes how we think about MLLM usage in generation, with practical implications for efficient T2I.
+
+## Takeaways
+
+1. **Reuse, don't retrain**: If you have a large pretrained multimodal model, don't just use it for text encoding — feed it the noisy latent at each diffusion step. The overhead is tolerable and yields better quality. This principle applies beyond T2I: any conditional generation task with iterative refinement could benefit from a strong frozen oracle.
+2. **Test-time compute allocation matters**: The paper shows that spending extra FLOPs on RER (repeated MLLM evaluation) is more FID-efficient than spending the same FLOPs on a larger denoiser. Practitioners can steal this allocation strategy: profile your model and shift compute from the "new" network to the "old" frozen one if possible.
+3. **Noise robustness in MLLMs**: This paper provides empirical evidence that MLLM visual features degrade gracefully with noise, suggesting that MLLMs are more robust than commonly assumed. For other tasks like video interpolation or super-resolution, you could similarly inject noisy frames into an MLLM.
+:::
+
+:::zh
+**论文**: [2606.14700](https://arxiv.org/abs/2606.14700)  
+**作者**: Xichen Pan, Aashu Singh, Satya Narayan Shukla, Xiangjun Fan, Shlok Kumar Mishra, Saining Xie  
+**分类**: cs.CV
+
+## 缺口
+
+现有的文生图（T2I）系统存在一个诡异的非对称性。我们用一个庞大的预训练LLM（或T5、CLIP等）去编码文本提示，但"真正的图像生成"——也就是去噪过程——却由另一个从零开始训练的UNet或DiT来完成。后来出现了表示自编码器（RAE，如MaskDiT、REPA），它们指出你不需要生成原始像素，而是可以生成具有语义结构的视觉表示（比如DINOv2特征）。这创造了一个更接近LLM兼容语义的潜在空间。好事情。
+
+但问题是：去噪网络本身仍然是新训练的。即使*目标*表示是LLM友好的，但"从噪声到这些目标"的过程仍然是一个需要从头学习的庞大模块。为什么不直接用LLM（或者准确说，一个能处理图像的多模态LLM）作为去噪过程的一部分呢？多模态LLM（MLLM）已经拥有MLP投影器，能把干净的视觉特征对齐到语言模型。关键洞察：这个投影器对*噪声*视觉特征也同样有效——因为MLLM在预训练时见过足够多的受损输入，所以能泛化。于是你可以把MLLM本身当成一个噪声表示编码器，在每个去噪步骤中把当前噪声表示喂进去，然后用它的输出来条件一个小型的扩散Transformer。这就是缺口——没有人尝试过把MLLM重用于主动去噪组件，而只让它当个冻结的文本编码器。
+
+```
+[ASCII 逻辑拓扑图：问题 -> 假设 -> 方法 -> 证据 -> 结论]
+
+     问题：T2I 去噪网络从零训练，忽略了 MLLM 的先验
+          |
+          v
+     假设：MLLM 的视觉编码器能处理噪声输入 *
+     *（基于 MLLM 预训练数据多样性）
+          |
+          v
+     方法：RepFusion —— 用 MLLM 作为噪声表示编码器，
+     输出作为 DiT 的条件
+          |
+          v
+     证据：在相同推理预算下的受控对比
+     （如 400M 参数的 DiT）-> RepFusion 优于基线
+          |
+          v
+     结论：MLLM 提供了强去噪先验；
+     测试时计算可以花在重复的 MLLM 条件化上
+```
+
+## 增量
+
+**一句话**：RepFusion 之前，MLLM 在 T2I 中是被动的文本编码器；RepFusion 之后，MLLM 变成了一个主动的、迭代参与去噪的组件——在不增加去噪网络大小的情况下提升了质量。
+
+### 核心机制
+
+RepFusion 由三个主要部分组成：一个冻结的多模态 LLM（如 LLaVA-1.5 + Vicuna-7B）、一个冻结的目标表示编码器（如 DINOv2）、以及一个小型的扩散 Transformer（DiT，约 400M 参数）。流程如下：
+
+1. **正向过程**：从目标图像出发，用 DINOv2 编码成干净的视觉表示。然后加噪声得到时刻 t 的噪声表示。
+2. **MLLM 条件化**：将噪声表示（经过一个轻量的可学习投影）喂入冻结的 MLLM。MLLM 同时处理噪声表示和文本提示，最终隐藏状态（具体来说是视觉分支经过投影器的 [CLS] 标记）成为条件信号。这发生在**每个*去噪步骤，每次都重新运行 MLLM 前向传播。
+3. **表示空间去噪**：DiT 接收噪声表示和 MLLM 条件，预测干净的表示。
+4. **目标解码**：得到预测的干净表示后，通过一个在表示上训练的轻量解码器（如小 GAN 或 VAE）解码为最终图像。
+
+关键数据流：噪声表示 → MLLM → 条件 → DiT → 干净表示。MLLM 在每个去噪步骤被重复使用，这很昂贵，但论文表明这是有收益的——MLLM 的先验能适应当前噪声水平。
+
+```
+[方法内部的 ASCII 图：组件、数据流、操作]
+
+     +----------------------------+
+     |  冻结的 MLLM (LLaVA)        |
+     |  (带 MLP 投影器)            |
+     +-----^------------------^---+
+           |                  |
+     噪声表示 + 文本       条件
+           |                  |
+           v                  v
+     +----------+     +--------------+
+     | DiT 去噪 | --> | 预测的干净   |
+     | (400M 参) |     | 表示          |
+     +----------+     +------^-------+
+                              |
+                    目标编码器 (DINOv2)
+
+    每个时间步 t：
+       1. 对表示加噪 z_t = sqrt(alpha_t)*z_0 + sqrt(1-alpha_t)*eps
+       2. z_t -> 投影 -> MLLM -> 条件 c_t
+       3. DiT 接收 (z_t, c_t) -> 预测 z_{t-1}
+```
+
+**结构性比喻**：把 MLLM 想象成一个经验丰富的大厨，能尝半成品的菜并纠正。标准的 T2I 管道像是一个菜谱写手（LLM 负责文本）和一个从来没尝过味道的学徒（去噪器）。学徒看菜谱做菜，但老是犯错。RepFusion 说：让大厨在每个步骤尝一下半成品，实时给出纠正。大厨的味蕾是 MLLM，练过百万道菜（图像）和菜谱（文本）。学徒是小 DiT，不需要懂烹饪理论——只管跟着大厨的纠正走。大厨的反馈（条件）是一句简短的提示："再多放点盐，火小一点。"每步去噪，菜变了，所以提示也变了。这就是为什么要重复使用 MLLM：大厨适应当前状态。
+
+### 关键概念
+
+- **表示自编码器（RAE）**：不直接生成像素，而是把图像映射到语义表示空间（如 DINOv2 特征），再解码回来。去噪发生在语义空间里，因为表示更抽象简洁。RepFusion 继承了这种哲学，只是换了谁来去噪。
+- **MLLM 作为噪声处理器**：多模态 LLM（如 LLaVA）通常用在干净图像上。但它们的预训练数据包含大量受损图像——模糊的网页图片、低分辨率缩略图等。所以视觉编码器学会了提取**鲁棒*特征。RepFusion 利用这一点：MLLM 的投影器能把噪声表示对齐到语言模型空间，就像对干净表示一样。关键经验发现是：这种对齐质量随噪声增加而缓慢退化，因此条件在所有 t 都有效。
+- **测试时计算缩放**：标准扩散中，去噪网络被重复使用但每步计算恒定。这里 MLLM 增加了额外计算。论文表明这些额外计算比直接缩放去噪网络更高效——把算力花在 MLLM 上，FID 提升大于花在同等 FLOPs 的 DiT 上。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+
+   文本提示                           文本提示
+      |                                  |
+      v                                  v
+   冻结 LLM（仅文本）              冻结 MLLM（视觉+文本）
+      |                                  |
+      v                                  v
+   学习到的嵌入（只文本）          噪声表示（视觉）
+      |                                  |
+      v                                  v
+   大型去噪器（UNet/DiT           小型 DiT，被 MLLM 输出
+   从零训练）                      在每个步骤条件化
+      |                                  |
+      v                                  v
+   像素空间解码器                   表示空间解码器（小）
+
+   * LLM 只贡献一次               * MLLM 在每个步骤贡献
+   * 无视觉反馈                   * 通过 MLLM 形成视觉反馈循环
+   * 大去噪器是瓶颈               * 计算转移到 MLLM 复用
+```
+
+**一句话**：从单次文本编码器 + 大去噪器从零训练，转变为递归的视觉语言条件循环，利用现成的 MLLM 能力。核心转变是把 MLLM 当作动态去噪 oracle，而不是静态文本编码器。
+
+## 专家评审
+
+**选题眼光**：真缺口，动机充分。领域里一直痴迷于缩放去噪器（DiT-XL 等），却忽略了我们在生成过程中已经拥有多模态模型却闲置不用。本文指出了一个具体的低效点并加以利用。在 T2I 和表示学习的交叉点上——时机恰到好处。
+
+**方法成熟度**：巧劲，不是蛮力。方法出奇简单：把噪声表示喂进冻结的 MLLM，用输出做条件。没有自定义架构或大规模训练——只有一个轻量 MLP 把噪声表示投影到 MLLM 输入格式，外加标准 DiT。贡献在于**重利用*的想法，而非新构建块。杠杆效率高。
+
+**实验诚意**：基线公平。与 REPA（同 DiT 架构、同表示目标）、LaViT 和标准 DiT 进行对比，通过缩小 DiT 使推理 FLOPs 与使用 MLLM 时相当。指标（FID、CLIP score、GenEval）站得住脚。一个值得警惕之处：他们用了较老的 MLLM（LLaVA-1.5）。如果换成 GPT-4V 级别的 MLLM，结果会更好吗？很可能，但没测试。另外，从表示到图像的解码器没有充分消融——质量可能受限于解码器而非去噪过程。
+
+**写作功力**：整体结构不错，但"重复 MLLM 条件化"这个关键洞察埋在 4.2 节的角落里。摘要承诺"测试时计算可以高效利用"，但相关实验分散在各处。如果专门弄一张表展示 FID vs. 总 FLOPs（不同 MLLM 重复次数 vs. 更大 DiT），论文会强得多。另外 Figure 3（定性结果）太小，看不出差别。
+
+**判决**：**强接收** —— 一个干净利落、让人惊讶的结论，改变了我们对 T2I 中 MLLM 使用方式的看法，对高效文生图有实际价值。
+
+## 要点总结
+
+1. **复用，不要重新训练**：如果你有一个大的预训练多模态模型，别只拿它编文本——而是在每个扩散步骤把噪声潜变量喂进去。额外开销可以接受，而且质量更好。这个原则不限于 T2I：任何带迭代精调的条件生成任务都可能从强冻结 oracle 中受益。
+2. **测试时计算分配很重要**：论文证明，把额外 FLOPs 花在重复 MLLM 评估（RER）上，比花在扩大去噪网上更划算（FID 角度）。实践者可以偷学这个分配策略：对模型做剖析，尽可能把算力从"新"网络转移到"旧"冻结网络上。
+3. **MLLM 的噪声鲁棒性**：本文提供了经验证据，表明 MLLM 视觉特征随噪声增加退化缓慢，意味着 MLLM 比通常认为的更加鲁棒。其他任务如视频插帧或超分辨率，也可以类似地把噪声帧注入 MLLM。
+:::
