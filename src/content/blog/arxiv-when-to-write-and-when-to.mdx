@@ -1,0 +1,291 @@
+---
+title:
+  en: "When to Write and When to Suppress: Route-Specialized Dual Adapters for Memory-Assisted Knowledge Editing"
+  zh: "何时写入，何时抑制：用于记忆辅助知识编辑的路由专用双适配器"
+description:
+  en: "Knowledge editing systems often update too broadly or too timidly. This paper introduces a router that decides when to apply an edit and a separate adapter that preserves the original behavior for unrelated queries—achieving state-of-the-art on three benchmarks."
+  zh: "知识编辑系统常常更新过广或过窄。本文引入了一个路由器来决定何时应用编辑，并训练一个独立的适配器为无关查询保留原始行为——在三个基准上达到最优。"
+date: 2026-06-15
+tags: ["arxiv", "ai", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.14668](https://arxiv.org/abs/2606.14668)  
+**Authors**: Yining Huang  
+**Categories**: cs.LG
+
+## The Gap
+
+Existing memory-assisted knowledge editing systems (e.g., SERAC, IKE, MEND) treat every incoming query as a potential edit target. They retrieve a stored edit memory and use a single parameter-efficient adapter to shift the model's object preference. This works when the query directly matches the edit scope, but it fails when a query is topically related yet should not receive the edit—the adapter leaks its bias to neighboring facts. Previous attempts to suppress leakage relied on fixed thresholds or hand-crafted rules, which break across datasets with different distributions of edit-relevant vs. irrelevant queries.  
+
+The gap is clear: prior work has no principled way to **say no** to an edit. The field conflated two distinct tasks—**writing an edit** and **preserving locality**—into one adapter.
+
+```
+Problem -> Assumption -> Method -> Evidence -> Conclusion
+
+Problem: Single adapter spills edit bias onto unrelated queries.
+          |
+          v
+Assumption: Not all queries that trigger memory retrieval need the edit.
+             |                                           
+             v
+Method: A router separates queries into "edit-needed" 
+        and "preserve-original" paths, each with its own adapter.
+        |
+        v
+Evidence: On 3 benchmarks (CF, ZSRE, MQuAKE) with 2 base models,
+          DARE achieves best probability-preference accuracy.
+        |
+        v
+Conclusion: Deciding when to suppress is as important as how to write.
+```
+
+## The Increment
+
+**One sentence**: Before this paper, every query with a memory hit was edited; after this paper, a learned router decides **whether** to edit, and a dedicated locality adapter prevents collateral damage.
+
+### Core Mechanism
+
+The system has three components: a **Relevance Router**, an **Edit Adapter**, and a **Locality Adapter**.  
+
+**Data flow**:  
+1. A query + its retrieved edit memory (a single fact) enter the router.  
+2. The router outputs a binary decision: route or suppress.  
+3. If routed, the query goes to the Edit Adapter, which is trained to favor the new object over the original.  
+4. If suppressed, the query goes to the Locality Adapter, which is trained to preserve or restore the original object preference (the behavior before the edit).  
+
+**Training**: The two adapters are trained separately. The Edit Adapter is trained on the edited fact and a small set of nearby paraphrases. The Locality Adapter is trained on unrelated queries sampled from the same topic neighborhood, with the goal of keeping the original prediction. The router is a lightweight classifier (two variants: lexical overlap or BGE embedding similarity).
+
+```
+               +--------------+
+               |   Query +    |
+               |  Edit Memory |
+               +------+-------+
+                      |
+                      v
+               +------+-------+
+               |   Router     |
+               | (lexical or  |
+               |  embedding)  |
+               +------+-------+
+                      |
+         +-------+--------+-------+
+         |                       |
+         v                       v
++--------+--------+    +--------+--------+
+|   Edit Adapter  |    | Locality Adapter|
+| (train to prefer|    |(train to keep   |
+|  new object)    |    |original object) |
++--------+--------+    +--------+--------+
+         |                       |
+         +-------output----------+
+```
+
+**Structural metaphor**: Think of a restaurant kitchen with two speciality stations.  
+- **Router** = the head chef reading the ticket. A ticket with "Vegan" in the note goes to the vegan station; a ticket without goes to the chef station.  
+- **Edit Adapter** = the vegan station: every dish follows the vegan substitution rules.  
+- **Locality Adapter** = the chef station: every dish follows the standard menu, ignoring any vegan annotations.  
+Crucially, the head chef doesn't guess—they have a clear rule (e.g., "vegan" in ticket → vegan station). The router is that rule, learned from data. If the head chef sent all tickets to the vegan station, salads would get vegan cheese (bad). If they sent all to the chef station, no vegan dishes would ever be made (worse). The dual-station design is what makes the kitchen work for both kinds of customers.
+
+### Key Concepts
+
+- **Memory-Assisted Knowledge Editing**: A system that stores factual updates in an external memory. At inference, for each query, the memory is retrieved and fed to the model as additional context. The update is "assisted" by this memory, rather than being baked into the weights.  
+  - *Intuition*: Instead of fine-tuning the whole model to remember a new fact (expensive, can cause forgetting), keep the fact in a key-value store and pull it out when needed.  
+  - *Problem*: The memory often contains cue words that trigger the model even for queries where the edit should *not* apply.  
+
+- **Parameter-Efficient Adapter**: A small trainable module inserted into a frozen LLM (e.g., LoRA). Only the adapter weights are updated, not the base model.  
+  - *Here*: The Edit Adapter is a LoRA trained to shift the object prediction toward the new fact. The Locality Adapter is another LoRA trained to keep the original prediction.  
+  - *Why two?* One adapter would have to learn both behaviors, which is contradictory. Separating them lets each focus on its goal.  
+
+- **Relevance Router**: A binary classifier that decides whether the current query is within the edit's intended scope.  
+  - *Variants*: Lexical router (keyword overlap with the edit subject), or embedding-based router (cosine similarity between query and edit context).  
+  - *Key insight*: The router is not trained end-to-end with the adapters; it's a separate optimization that can be adapted per dataset (as the ablation shows: lexical works best for CF, BGE for ZSRE and MQuAKE).
+
+## Framework Shift
+
+```
+Before (single adapter, no router):
+   +----------+                       +--------+
+   | Query +  |   always apply        | Single |
+   | Memory   | --------------------> |Adapter |
+   +----------+                       +---+----+
+                                          |
+                                          v
+                                     New object (or broken locality)
+
+After (dual adapter with router):
+   +----------+                 +------------+
+   | Query +  | --- router --- >| Edit       |--- edit object
+   | Memory   |   /             | Adapter    |
+   +----------+  /              +------------+
+                 \
+                  \             +------------+
+                   ---router<-->| Locality   |--- original object
+                     (no)       | Adapter    |
+                                +------------+
+```
+
+From a monolithic edit injection to a conditional dual-path system, the core shift is: **editing is not one-size-fits-all—it requires separate machinery for writing and for suppressing.**
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Knowledge editing is an active area, and the leakage problem is well documented but poorly addressed. This paper picks a concrete, measurable variant of that problem and tackles it head-on.  
+**Method maturity**: Clever but not revolutionary. The idea of a router is straightforward, and the separation of adapters is a natural solution once you frame the problem correctly. The authors didn't invent new adapters or routers—they combined existing ideas cleverly.  
+**Experimental integrity**: Mostly solid. The three benchmarks cover different domains and difficulty levels. Baselines include recent methods (SERAC, MEND, etc.). One red flag: the router ablation shows dataset-dependent best router, but the main results use a fixed router per dataset (tuned on validation). That's fine, but the authors don't report performance with a universal router across all datasets.  
+**Writing quality**: Good structure, but the router section is dense and could use a toy example walked through step by step. The appendix is minimal—some details on router training are skipped.  
+**Verdict**: **weak accept** — solid incremental improvement with clean experiments, but not a breakthrough that changes how we think about knowledge editing.
+
+## Takeaways
+
+- **Router-first design**: Before putting an edit into production, think about the "non-edit" case. Build a gatekeeper. The dual-adapter pattern can be applied to any task where a model needs to sometimes override its behavior and sometimes not.
+- **LoRA separation**: Instead of increasing LoRA rank to capture conflicting behaviors, train two smaller LoRAs with opposing objectives. This principle generalizes to multi-task learning where tasks conflict.
+- **Per-dataset router tuning**: The lexical vs. embedding router result warns against assuming one routing method works everywhere; test both on your own data.
+
+:::
+
+:::zh
+**论文**: [2606.14668](https://arxiv.org/abs/2606.14668)  
+**作者**: Yining Huang  
+**分类**: cs.LG
+
+## 缺口
+
+现有的记忆辅助知识编辑系统（如SERAC、IKE、MEND）把每个输入查询都当成潜在的编辑对象。
+它们检索到存储的记忆，然后用单个参数高效适配器来改变模型对某个对象的偏好。
+当查询与编辑范围严格匹配时，这种做法有效。
+但当查询只是主题相关却不应该被编辑时，适配器会把编辑的偏见泄露到邻近的事实上。
+以前的抑制手段靠固定阈值或手工规则，在不同数据集上（编辑相关查询与无关查询的分布不同）表现不稳定。
+
+缺口很清楚：之前的工作没有一个原则性的方法来**拒绝编辑**。
+这个领域把两个不同的任务——**写入编辑**和**保持局部性**——混在了同一个适配器里。
+
+```
+问题 -> 假设 -> 方法 -> 证据 -> 结论
+
+问题：单个适配器把编辑偏见泄漏到不相关的查询上。
+          |
+          v
+假设：并非所有触发记忆检索的查询都需要编辑。
+          |
+          v
+方法：路由器把查询分为"需要编辑"和"保持原始"两条路径，
+     每条路径有自己的适配器。
+          |
+          v
+证据：在3个基准（CF、ZSRE、MQuAKE）上，使用2个基础模型，
+     DARE在概率偏好准确率上达到最优。
+          |
+          v
+结论：决定何时抑制与决定如何写入同样重要。
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，每个命中记忆的查询都会被编辑；这篇论文之后，一个学习到的路由器决定**是否**编辑，一个专门的局部性适配器防止了附带损伤。
+
+### 核心机制
+
+系统有三个组件：**相关性路由器**、**编辑适配器**和**局部性适配器**。
+
+**数据流**：
+1. 查询和检索到的编辑记忆（一个事实）进入路由器。
+2. 路由器输出一个二值决策：路由或抑制。
+3. 如果路由，查询进入编辑适配器，该适配器被训练为偏爱新对象而非原对象。
+4. 如果抑制，查询进入局部性适配器，该适配器被训练为保留或恢复原始对象偏好（编辑前的行为）。
+
+**训练**：两个适配器分别训练。
+编辑适配器在编辑的事实及其少量近义改写上训练。
+局部性适配器在来自同一主题邻域的不相关查询上训练，目标是保持原始预测。
+路由器是一个轻量级分类器（两种变体：词汇重叠或BGE嵌入相似度）。
+
+```
+               +--------------+
+               |   查询 +     |
+               |  编辑记忆    |
+               +------+-------+
+                      |
+                      v
+               +------+-------+
+               |   路由器     |
+               | (词汇或嵌入) |
+               +------+-------+
+                      |
+         +-------+--------+-------+
+         |                       |
+         v                       v
++--------+--------+    +--------+--------+
+|   编辑适配器   |    |  局部性适配器  |
+| (训练为偏爱新 |    | (训练为保留原 |
+|  对象)        |    |  始对象)      |
++--------+--------+    +--------+--------+
+         |                       |
+         +--------输出-----------+
+```
+
+**结构性隐喻**：想象一家厨房，有两个专精站。
+- **路由器** = 主厨看订单。订单上写着"素食"就去素食站；没写就去主厨站。
+- **编辑适配器** = 素食站：每道菜都按照素食替换规则做。
+- **局部性适配器** = 主厨站：每道菜都按标准菜单做，忽略任何素食标注。
+关键是主厨不乱猜——他有明确的规则（比如"素食"在订单中就去素食站）。路由器就是从数据中学习到的这条规则。如果主厨把所有订单都送去素食站，沙拉会被放上素食奶酪（糟糕）。如果全部送去主厨站，就永远做不出素食菜（更糟）。双站设计让厨房能同时服务两种顾客。
+
+### 关键概念
+
+- **记忆辅助知识编辑**：系统把事实更新存入外部记忆。
+  推理时，对每个查询检索记忆，作为额外上下文输入模型。
+  更新由记忆"辅助"完成，而非嵌入权重。
+  - *直觉*：与其对整个模型微调来记住一个新事实（昂贵，且可能遗忘），不如把事实存在键值存储中，需要时再拉出来。
+  - *问题*：记忆里的关键词会触发模型在不应应用编辑的查询上也做出改变。
+
+- **参数高效适配器**：插入到冻结的大语言模型中的小型可训练模块（如LoRA）。
+  只更新适配器权重，基础模型不变。
+  - *本文*：编辑适配器是一个LoRA，训练为将对象预测偏向新事实。
+  局部性适配器是另一个LoRA，训练为保持原始预测。
+  - *为什么两个？* 一个适配器要学会两种矛盾行为是不可能的。
+  分离后每个适配器可以专注自己的目标。
+
+- **相关性路由器**：一个二值分类器，决定当前查询是否在编辑的预期范围内。
+  - *变体*：词汇路由器（与编辑主体的关键词重叠度），或基于嵌入的路由器（查询与编辑上下文的余弦相似度）。
+  - *关键洞察*：路由器不与适配器端到端训练，而是独立优化，可以针对数据集调整（消融实验显示：词汇路由器在CF上最好，BGE在ZSRE和MQuAKE上最好）。
+
+## 框架转变
+
+```
+之前（单适配器，无路由器）：
+   +----------+              +--------+
+   | 查询 +   |   总是应用   | 单个  |
+   | 记忆     | -----------> |适配器 |
+   +----------+              +---+----+
+                                   |
+                                   v
+                             新对象（或局部性被破坏）
+
+之后（双适配器带路由器）：
+   +----------+               +------------+
+   | 查询 +   | --- 路由器 -> | 编辑       |--- 编辑对象
+   | 记忆     |   /          | 适配器     |
+   +----------+  /           +------------+
+                 \
+                  \          +------------+
+                   --路由器-->| 局部性    |--- 原始对象
+                     (否)    | 适配器     |
+                            +------------+
+```
+
+从单一的编辑注入到有条件的双路径系统，核心转变是：**编辑不是一刀切的——写入和抑制需要分开的机制。**
+
+## 专家评审
+
+**选题眼光**：真实的缺口。知识编辑是活跃领域，泄漏问题广为人知但缺少有效处理。本文挑了一个具体可测量的版本，正面解决。  
+**方法成熟度**：巧劲但不是革命性的。路由器的想法很直接，分离适配器是正确的问题框架下的自然解法。作者没有发明新的适配器或路由器——而是巧妙组合了已有思想。  
+**实验诚意**：总体扎实。三个基准覆盖不同领域和难度。基线包含近期方法（SERAC、MEND等）。一个值得注意的点：路由器消融显示最优路由器因数据集而异，但主结果使用了每个数据集调优后的固定路由器——这可以接受，但作者没有报告一个通用路由器在所有数据集上的表现。  
+**写作功力**：结构良好，但路由器部分较密集，缺少一个手把手走一遍的小例子。附录较少——路由器训练的一些细节被跳过了。  
+**判决**：**弱接收**——增量清晰，实验干净，但不是改变我们思考知识编辑方式的突破。
+
+## 要点总结
+
+- **路由器先行设计**：在部署编辑前，先考虑"非编辑"情况。建造一个守门人。双适配器模式可以推广到任何模型需要有时覆盖行为、有时保持不变的场景。
+- **LoRA分离**：与其增加LoRA秩来容纳矛盾行为，不如训练两个目标相反的小LoRA。这个原则可推广到任务冲突的多任务学习。
+- **按数据集调路由器**：词汇路由器与嵌入路由器的结果差异提醒我们：不要假设一种路由方法在所有地方都有效；在自己的数据上测试两种。
+
+:::
