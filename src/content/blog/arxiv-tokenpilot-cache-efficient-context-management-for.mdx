@@ -1,0 +1,369 @@
+---
+title:
+  en: "TokenPilot: Cache-Efficient Context Management for LLM Agents"
+  zh: "TokenPilot：面向LLM代理的缓存高效上下文管理"
+description:
+  en: "TokenPilot introduces a dual-granularity context management framework that stabilizes prompt prefixes and evicts expired segments only when task relevance decays, cutting inference costs by up to 87% without sacrificing performance."
+  zh: "TokenPilot 提出双粒度上下文管理框架，通过稳定提示前缀并在任务相关性过期时才驱逐上下文片段，将推理成本降低高达 87%，且不损失性能。"
+date: 2026-06-16
+tags: ["arxiv", "ai", "cs.cl", "cs.ai", "cs.lg", "cs.ma"]
+image: "/arxiv-visuals/tokenpilot-cache-efficient-context-management-for/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/tokenpilot-cache-efficient-context-management-for/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2606.17016](https://arxiv.org/abs/2606.17016)
+**Authors**: Buqiang Xu, Zirui Xue, Dianmou Chen, Chenyang Fu, Chiyu Wu, Caiying Huang, Chen Jiang, Jizhan Fang, Xinle Deng, Yijun Chen
+**Categories**: cs.CL, cs.AI, cs.LG, cs.MA
+
+## The Gap
+
+Prior work on LLM agent context management follows two lines: **text pruning** (e.g., LLMLingua) compresses prompts statically; **dynamic memory eviction** (e.g., StreamingLLM, H2O) drops low-attention tokens on the fly. Both reduce token count, but they mutate the sequence layout arbitrarily – adding, removing, or reordering tokens. This breaks prompt cache continuity: any layout change invalidates the KV cache prefix, forcing costly recomputation. The field implicitly treated "make the context smaller" as the sole goal, ignoring the structural cost of cache misses.
+
+The paper formalizes the hidden trade-off: **text sparsity vs. prompt cache continuity**. Every eviction or rewrite gains sparsity but loses cache locality. TokenPilot is the first to explicitly manage both.
+
+```
+                           [Problem]
+                         Context grows unbounded
+                         in long-horizon sessions
+                              |
+                              v
+                    [Existing Solutions]
+           +------------------+------------------+
+           |                                     |
+     Text Pruning                          Memory Eviction
+   (compress prompt)                    (drop low-attn tokens)
+           |                                     |
+           v                                     v
+      Layout mutates:                   Layout mutates:
+      tokens removed                    tokens removed
+      / reordered                       / reordered
+           |                                     |
+           +------------------+------------------+
+                              |
+                              v
+                     [Unintended Cost]
+              Prefix mismatch -> Cache invalidation
+              -> Frequent recomputation
+                              |
+                              v
+                        [The Gap]
+         No prior method balances sparsity
+         and cache continuity jointly
+                              |
+                              v
+                    [TokenPilot's Bet]
+         Dual-granularity management:
+         Global: stabilize prefix at ingestion gate
+         Local: evict only when task relevance expires
+                              |
+                              v
+                      [Evidence]
+         PinchBench & Claw-Eval: cost -61%/-56%/-87%
+         with competitive performance
+                              |
+                              v
+                    [Conclusion]
+         Cache-efficient context management
+         is achievable without sacrificing
+         either sparsity or continuity
+```
+
+## The Increment
+
+**One sentence**: Before TokenPilot, every context reduction came with the penalty of cache recomputation; after TokenPilot, context shrinking and cache continuity are decoupled – you shrink without breaking the cache.
+
+### Core Mechanism
+
+TokenPilot operates at two levels.
+
+At the **global level**, an **Ingestion-Aware Compaction* module sits at the entry gate of the agent loop. Every time new observations (tool outputs, environment feedback) arrive, this module rewrites them into a canonical form: it strips environmental noise (e.g., repeated headers, transient error messages), aligns the prefix (e.g., always prepend a timestamp tag in a fixed format), and packs the remaining content into fixed-size segments. The key invariant: the sequence of segment boundaries never changes across turns – the first N segments are always the same type and position. This ensures that the KV cache prefix (corresponding to the early, stable segments) remains valid across invocations.
+
+At the **local level**, a **Lifecycle-Aware Eviction* module monitors each segment’s *residual utility* – a scalar that decays with each turn where the segment is not accessed (measured by attention weight or task relevance signal). When a segment’s residual utility drops below a threshold, it is not evicted immediately; instead, the module collects all expired segments over several turns and offloads them in a **batch-turn schedule** – only at turn boundaries, and only in contiguous chunks. This batch design preserves cache locality for the remaining segments because eviction happens at structural boundaries that do not split the prefix region.
+
+```
+                     [Data Flow]
+     Agent input (new observation)
+          |
+          v
++---------------------------+
+| Ingestion-Aware Compaction|  <-- Global
+| - Canonicalize format     |
+| - Strip environmental     |
+|   noise                   |
+| - Align prefix structure  |
++---------------------------+
+          |
+          v
+[Context Buffer] (list of segments, each with metadata)
+          |
+          v
++------------------------------+
+| Lifecycle-Aware Eviction     |  <-- Local
+| - Monitor residual utility   |
+|   per segment                |
+| - When utility < threshold,  |
+|   mark as expired            |
+| - Batch expired segments     |
+|   and offload at turn        |
+|   boundary                   |
++------------------------------+
+          |
+          v
+[LLM Inference]
+- Cache hit on stable prefix
+- Partial recompute only for
+  non-offloaded tail
+```
+
+**Structural Metaphor: A Library with a Smart Lobby and Ghost Shelves**  
+Imagine a public library. Patrons (the LLM) come in every hour to read books (context segments).  
+- **Old way**: Every time a patron finishes, a janitor randomly throws away some books (prune) or reorganizes shelves by popularity (evict). The next patron finds books in new places and must re-scan the entire catalog – that’s cache invalidation.  
+- **TokenPilot’s way**:  
+  - The **Ingestion-Aware Compaction** is a **lobby librarian** who, before any book enters the reading room, checks it for sticky notes, trims torn pages, and stamps a uniform date on the cover. This ensures every new batch of books looks exactly the same: first book is always an almanac, second is always a map, etc. The layout is stable.  
+  - The **Lifecycle-Aware Eviction** is a **ghost shelf system** in the back room. Each book has a little counter that ticks down when not checked out. When a book’s counter hits zero, it’s not tossed immediately – it goes onto a “to-be-offloaded” list. At the end of the day (the turn boundary), the librarian removes all books on that list in one go, only from shelves that aren’t in the front row (the stable prefix). The next morning, the front row shelves are untouched, and the LLM can start reading without rebuilding those sections.
+
+### Key Concepts
+
+- **Prompt Cache Continuity**: The property that the KV cache computed for earlier tokens remains valid when the LLM is called again. In autoregressive models, the cache is a prefix tree: if you add a token before the current input, the whole tree shifts. Continuity means the prefix structure is invariant across calls. TokenPilot enforces this by never mutating the early segment slots.  
+  *Concrete example*: If your prompt always starts with `[System] You are a helpful assistant. [Tool] ...`, as long as the first 10 tokens never change, their KV cache can be reused. TokenPilot ensures that the first 5 segments (which contain these tokens) are preserved across turns.
+
+- **Residual Utility**: A scalar per segment that estimates how likely it will be needed in future turns. It’s not simply recency or frequency; it takes a task relevance signal (e.g., attention weights from the last LLM call) and decays exponentially. When utility crosses below a learned threshold, the segment is considered **dead*.  
+  *Concrete example*: In a code agent, the “current file content” segment might have high utility every turn because the agent keeps editing it. But a “yesterday’s error log” segment will have utility drop to zero after two turns – it’s dead. TokenPilot evicts it only after it stays dead for several turns, ensuring transient relevance doesn’t cause thrashing.
+
+- **Batch-Turn Schedule**: Instead of evicting segments one by one (which would shuffle the order and break cache), TokenPilot collects all expired segments during a turn and removes them together at the next turn boundary. This avoids intermediate cache invalidations.  
+  *Concrete example*: Suppose segments 4, 7, and 9 expire during turn 5. TokenPilot doesn’t remove them in the middle of turn 5; instead, it groups them and removes segments 7 and 9 (adjacent) and segment 4 (separate) at the start of turn 6, shifting remaining segments minimally. The prefix (segments 1-3) stays untouched.
+
+## Framework Shift
+
+```
+Before (mainstream approach):             After (this paper):
+[Context grows]                           [Context grows]
+      |                                         |
+      v                                         v
++-------------+                         +----------------------+
+| Prune/Evict |                         | Ingestion-Aware      |
+| anytime,    |                         | Compaction (global)  |
+| any token   |                         | - Canonicalize       |
++------+------+                         | - Strip noise        |
+       |                                | - Fix prefix slots   |
+       v                                +----------+-----------+
++------------+                                     |
+| Cache      |                                     v
+| invalidated|                           +--------------------+
+| frequently |                           | Context Buffer     |
++------------+                           | (stable prefix)    |
+       |                                +--------------------+
+       v                                         |
++-------------+                                 v
+| Recomputation|                         +--------------------+
+| cost grows   |                         | Lifecycle-Aware     |
++-------------+                         | Eviction (local)    |
+                                         | - Batch at         |
+                                         |   turn boundary    |
+                                         +----------+---------+
+                                                    |
+                                                    v
+                                          +-----------------+
+                                          | Cache mostly    |
+                                          | hit (prefix) +  |
+                                          | small recompute |
+                                          +-----------------+
+```
+
+**One sentence**: From **unconstrained mutation that destroys cache locality* to *dual-granularity management that stabilizes prefix and evicts only on batch boundaries*, the core shift is **decoupling sparsity from continuity**.
+
+## Expert Assessment
+
+**Problem choice**: Real and timely. LLM agents in production burn money on repeated context recomputation. The gap (cache continuity vs. sparsity) is not manufactured – prior work really ignored the cache invalidation cost. This sits in the intersection of systems and applied ML, a sweet spot for immediate impact.
+
+**Method maturity**: More clever than brute force. The ingestion-aware compaction is relatively simple (canonicalization rules are heuristic but effective), but the lifecycle-aware eviction with batch-turn scheduling is a nuanced engineering insight. One could argue that a simpler approach – e.g., never touch the first K tokens – might have achieved similar gain, but the paper claims that adaptive eviction works better when task relevance varies. The paper does not compare against a naïve “prefix-only freeze” baseline, which would have been informative.
+
+**Experimental integrity**: Baselines (LLMLingua, StreamingLLM, H2O, etc.) are standard and fair. The results show cost reductions of 61%/56%/87% across tasks. The continuous mode numbers (87% on Claw-Eval) are striking – worth checking if the baseline systems have been tuned for that scenario. No obvious red flags, but the paper does not report wall-clock time or memory usage at scale, which is important for deployment.
+
+**Writing quality**: The abstract and introduction are clear. The method description is dense but coherent. The weakest section is the related work – it reads like a laundry list. A rewrite that organizes prior work by the dimension (sparsity vs. continuity) would elevate the paper from “good” to “excellent.” Also, the figures in the paper (not reproduced here) are said to be helpful but not explained in text; the authors often rely on the reader to decode diagrams.
+
+**Verdict**: **weak accept** — solves a real practical problem with clean engineering, but lacks deep algorithmic novelty. Practitioners will want it, theorists will shrug.
+
+## Takeaways
+
+- **Stabilize input prefix before it reaches the LLM**: Any application that reuses a prompt across multiple turns (chatbots, code generation, simulation) can benefit from canonicalizing new observations into a fixed-slot structure. This cheap trick alone can dramatically improve cache hit rates.
+- **Evict in batches at turn boundaries**: Many systems evict tokens greedily (as soon as they become “unimportant”). This paper shows that batching evictions and delaying them to natural boundaries preserves cache locality without hurting performance. You can steal this scheduling pattern for any LRU-like cache.
+- **Residual utility as a learned scalar**: The lifecycle module uses a simple decay model, but the idea of maintaining a per-segment relevance score that factors in task context (not just attention scores) is transferable to other memory systems, such as retrieval-augmented generation or agent working memory.
+:::
+
+:::zh
+**论文**: [2606.17016](https://arxiv.org/abs/2606.17016)
+**作者**: Buqiang Xu, Zirui Xue, Dianmou Chen, Chenyang Fu, Chiyu Wu, Caiying Huang, Chen Jiang, Jizhan Fang, Xinle Deng, Yijun Chen
+**分类**: cs.CL, cs.AI, cs.LG, cs.MA
+
+## 缺口
+
+此前的工作分为两类：**文本修剪**（如 LLMLingua）静态压缩提示；**动态记忆驱逐**（如 StreamingLLM、H2O）实时丢弃低注意力令牌。两者都减少了令牌数量，但它们任意改变序列布局——添加、删除或重排令牌。这破坏了提示缓存连续性：任何布局变化都会使 KV 缓存前缀失效，导致昂贵重计算。该领域隐含地认为“让上下文更小”是唯一目标，忽略了缓存缺失的结构性成本。
+
+本文正式揭示了隐藏的权衡：**文本稀疏性与提示缓存连续性**。每一次驱逐或重写都获得稀疏性，但损失缓存局部性。TokenPilot 是第一个明确管理两者的方法。
+
+```
+                         [问题]
+                      长会话中上下文无限增长
+                            |
+                            v
+                   [现有解决方案]
+           +------------------+------------------+
+           |                                     |
+      文本修剪                            动态记忆驱逐
+    （压缩提示）                        （丢弃低注意力令牌）
+           |                                     |
+           v                                     v
+      布局改变：                        布局改变：
+      删除/重排令牌                     删除/重排令牌
+           |                                     |
+           +------------------+------------------+
+                            |
+                            v
+                     [未预期的代价]
+              前缀不匹配 -> 缓存失效
+              -> 频繁重计算
+                            |
+                            v
+                       [缺口]
+               尚无方法联合平衡
+               稀疏性与缓存连续性
+                            |
+                            v
+                    [TokenPilot 的赌注]
+               双粒度管理：
+               全局：在摄入阶段稳定前缀
+               局部：仅在任务相关性过期时驱逐
+                            |
+                            v
+                      [证据]
+               PinchBench & Claw-Eval：
+               成本降低61%/56%/87%
+               且性能持平
+                            |
+                            v
+                    [结论]
+               兼顾稀疏性与连续性的
+               缓存高效上下文管理
+               是可行的
+```
+
+## 增量
+
+**一句话**: TokenPilot 之前，每一次上下文缩减都带来缓存重计算的惩罚；TokenPilot 之后，上下文缩减与缓存连续性被解耦——你可以缩减上下文而不破坏缓存。
+
+### 核心机制
+
+TokenPilot 在两个层次运作。
+
+在**全局层次**，一个**摄入感知压缩*模块位于代理循环的入口处。每当新观察（工具输出、环境反馈）到达，该模块将其重写为标准形式：去除环境噪声（如重复标题、瞬态错误消息），对齐前缀（例如总是以固定格式添加时间戳标签），并将剩余内容打包成固定大小的段。关键不变量：段边界的顺序在轮次之间永不改变——前 N 个段总是相同的类型和位置。这确保了前几个稳定段的 KV 缓存前缀在多次调用间保持有效。
+
+在**局部层次**，一个**生命周期感知驱逐*模块监视每个段的*残余效用*——一个标量，当该段在若干轮次中没有被访问（通过注意力权重或任务相关性信号衡量）时衰减。当残余效用低于阈值时，不立即驱逐；而是收集多轮中所有过期段，在**批回合调度**下——仅在回合边界，且仅以连续块的形式——一次性卸载。这种批处理设计保留了剩余段的缓存局部性，因为驱逐发生在不拆分前缀区域的结构边界上。
+
+```
+                     [数据流]
+     代理输入（新观察）
+          |
+          v
++---------------------------+
+| 摄入感知压缩（全局）        |
+| - 规范化格式               |
+| - 去除环境噪声             |
+| - 对齐前缀结构             |
++---------------------------+
+          |
+          v
+[上下文缓冲区]（段列表，附带元数据）
+          |
+          v
++------------------------------+
+| 生命周期感知驱逐（局部）      |
+| - 监视每段的残余效用         |
+| - 效用低于阈值时标记为过期   |
+| - 批量收集过期段             |
+| - 在回合边界一次性卸载       |
++------------------------------+
+          |
+          v
+[LLM 推理]
+- 稳定前缀缓存命中
+- 仅对未卸载的尾部进行部分重计算
+```
+
+**结构性比喻：一个有智能大堂和幽灵书架的图书馆**  
+想象一个公共图书馆。读者（LLM）每小时进来读书（上下文段）。  
+- **旧方式**：每次读者离开，一位清洁工随机扔掉一些书（修剪），或者按热度重新整理书架（驱逐）。下一位读者发现书换了位置，必须重新扫描整个目录——这就是缓存失效。  
+- **TokenPilot 的方式**：  
+  - **摄入感知压缩**是**大堂图书管理员**，每一本新书进入阅览室前，都检查粘性便条、修剪撕页、并在封面上统一盖日期章。这保证了每批新书外观完全相同：第一本总是年鉴，第二本总是地图等。布局稳定。  
+  - **生命周期感知驱逐**是后台的**幽灵书架系统**。每本书有一个小计数器，当没有被借出时就递减。计数器归零时不会被立即扔掉，而是进入“待卸载列表”。在当天结束时（回合边界），管理员一次性移除列表上的所有书，只从非前排（非稳定前缀）的书架移除。第二天早晨前排书架完好无损，LLM 无需重建那些部分就能开始阅读。
+
+### 关键概念
+
+- **提示缓存连续性**：对于自回归模型，KV 缓存是一个前缀树。如果在当前输入之前添加令牌，整个树都会偏移。连续性意味着前缀结构在多次调用间保持不变。TokenPilot 通过永不改变早期段槽位来强制执行连续性。  
+  *具体例子*：如果提示总是以 `[系统] 你是一个有用的助手。[工具] ...` 开头，只要前 10 个令牌不变，它们的 KV 缓存就可以复用。TokenPilot 确保前 5 个段（包含这些令牌）在所有回合中保持原样。
+
+- **残余效用**：每个段的标量，估计它在未来回合中被需要的可能性。不是简单的近期性或频率；它考虑任务相关性信号（如来自上次 LLM 调用的注意力权重），并指数衰减。当效用低于学习阈值时，该段被视为“死亡”。  
+  *具体例子*：在代码代理中，“当前文件内容”段可能每回合效用都很高，因为代理持续编辑它。但“昨天的错误日志”段在几回合后效用降至零——它已经死亡。TokenPilot 只会在它连续死亡多轮后才驱逐，避免短暂相关性引起抖动。
+
+- **批回合调度**：TokenPilot 不是逐段驱逐（这会打乱顺序破坏缓存），而是在一个回合内收集所有过期段，在下一个回合边界一次性移除。这避免了中间的缓存失效。  
+  *具体例子*：假设在第 5 回合中段 4、7 和 9 过期。TokenPilot 不在第 5 回合中间移除它们；而是在第 6 回合开始时将它们分组（段 7 和 9 相邻，段 4 单独）一起移除，剩下的段移位最小化。前缀（段 1-3）完全不受影响。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+[上下文增长]                      [上下文增长]
+      |                                |
+      v                                v
++-------------+                +----------------------+
+| 修剪/驱逐    |                | 摄入感知压缩（全局）    |
+| 随时、任何   |                | - 规范化               |
+| 令牌        |                | - 去除噪声              |
++------+------+                | - 固定前缀槽位          |
+       |                       +----------+-----------+
+       v                                  |
++------------+                            v
+| 缓存频繁    |                  +--------------------+
+| 失效        |                  | 上下文缓冲区         |
++------------+                  |（稳定前缀）          |
+       |                       +--------------------+
+       v                                  |
++-------------+                           v
+| 重计算成本   |                  +--------------------+
+| 增长        |                  | 生命周期感知驱逐      |
++-------------+                  |（局部）               |
+                                 | - 在回合边界批量      |
+                                 +----------+---------+
+                                            |
+                                            v
+                                  +-----------------+
+                                  | 缓存大部命中     |
+                                  |（前缀）+ 少量    |
+                                  | 重计算          |
+                                  +-----------------+
+```
+
+**一句话**: 从“无约束突变，破坏缓存局部性”到“双粒度管理，稳定前缀并在回合边界批量驱逐”，核心转变是**解耦稀疏性与连续性**。
+
+## 专家评审
+
+**选题眼光**: 真实且及时。LLM 代理在生产中因重复上下文重计算而烧钱。缺口（缓存连续性与稀疏性之间的权衡）不是人造的——此前工作确实忽略了缓存失效成本。它处于系统与应用机器学习的交叉点，是能立即产生影响力的甜区。
+
+**方法成熟度**: 巧劲大于蛮力。摄入感知压缩相对简单（规范化规则是启发式的但有效），但生命周期感知驱逐结合批回合调度是精细的工程洞见。可以争辩说更简单的方法——例如永不触碰前 K 个令牌——也可能取得类似增益，但论文声称自适应驱逐在任务相关性变化时效果更好。论文没有与朴素的“前缀冻结”基线对比，那会更有信息量。
+
+**实验诚意**: 基线（LLMLingua、StreamingLLM、H2O 等）标准且公平。结果展示了 61%/56%/87% 的成本降低。连续模式在 Claw-Eval 上的 87% 很惊人——值得检查基线系统是否针对该场景调优。没有明显红旗，但论文未报告端到端耗时或大规模内存占用，这对部署很重要。
+
+**写作功力**: 摘要和引言清晰。方法部分密集但连贯。最薄弱的是相关工作——读起来像清单。如果能按维度（稀疏性 vs. 连续性）组织之前工作，整篇论文会从“好”提升到“优秀”。另外，论文中的图（本博客未重绘）据说有用但文字解释不足；作者常常依赖读者自己理解图表。
+
+**判决**: **弱接收** — 解决了实际工程问题，但缺乏深层算法新颖性。实践者会喜欢，理论家会耸肩。
+
+## 要点总结
+
+- **在输入到达 LLM 前稳定前缀**：任何在多个回合中复用提示的应用（聊天机器人、代码生成、模拟）都可以通过将新观察规范化到固定槽位结构中受益。这一廉价技巧可以大幅提高缓存命中率。
+- **在回合边界批量驱逐**：许多系统贪婪地驱逐（一旦变得“不重要”就立即丢弃）。本文表明将驱逐延迟到自然边界并批量处理，能保留缓存局部性而不损害性能。你可以将这个调度模式偷用到任何类 LRU 缓存中。
+- **残余效用作为可学习的标量**：生命周期模块使用了简单的衰减模型，但维护每个段的任务相关分数（不仅仅依赖注意力分数）的思想可以迁移到其他记忆系统，如检索增强生成或代理工作记忆。
+:::
