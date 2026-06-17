@@ -1,0 +1,240 @@
+---
+title:
+  en: "Zone of Proximal Policy Optimization: Teacher in Prompts, Not Gradients"
+  zh: "最近发展区策略优化：教师待在提示里，而非梯度里"
+description:
+  en: "ZPPO replaces gradient-based knowledge distillation with prompt-based scaffolding for small student models, using Binary Candidate Questions and Negative Candidate Questions to teach hard examples without breaking the on-policy assumption."
+  zh: "ZPPO 用提示脚手架取代基于梯度的知识蒸馏，对困难样本构造二元候选问题和负样本问题，在保持同策假设的同时让小型学生模型进步。"
+date: 2026-06-17
+tags: ["arxiv", "ai", "cs.cl"]
+image: "/arxiv-visuals/zone-of-proximal-policy-optimization-teacher/HeroScene.png"
+
+---
+
+![Hero diagram](/arxiv-visuals/zone-of-proximal-policy-optimization-teacher/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2606.18216](https://arxiv.org/abs/2606.18216)  
+**Authors**: Byung-Kwan Lee, Ximing Lu, Shizhe Diao, Minki Kang, Saurav Muralidharan, Karan Sapra, Andrew Tao, Pavlo Molchanov, Yejin Choi, Yu-Chiang Frank Wang  
+**Categories**: cs.CL
+
+## The Gap
+
+Existing knowledge distillation (KD) forces a small student to imitate the large teacher’s logit distribution. But when the student is much smaller (e.g., 0.8B vs 27B), the student fixates on the teacher’s sharpest modes and generalizes poorly outside the training corpus. Reinforcement learning (RL) avoids logit imitation by training on the student’s own rollouts. However, on hard questions where every rollout fails — yielding zero advantage — standard RL silently discards the example. Injecting the teacher’s response into the policy gradient to salvage such questions breaks the on-policy assumption and causes drift. The gap: **no existing method can effectively teach a very small student on its hardest examples without either distorting the learning signal or violating the RL framework.**
+
+```
+Problem: small student < teacher, KD brittle on hard Q's
+         + RL discards zero-advantage hard Q's
+Assumption: teacher's knowledge must enter through gradient
+       v
+Method: keep teacher in prompt, not in gradient
+    + construct BCQ (correct teacher + wrong student)
+    + construct NCQ (all wrong student rollouts)
+    + prompt replay buffer until student graduates
+       v
+Evidence: Qwen3.5 0.8B-9B, 27B teacher, 31 benchmarks
+    ZPPO beats off/on-policy KD and GRPO, largest gain at smallest size
+       v
+Conclusion: prompt scaffolding effective for extreme student-teacher gap
+```
+
+## The Increment
+
+**One sentence**: Before ZPPO, you could either imitate the teacher’s logits (and break on hard examples) or suffer silent failures in on-policy RL; after ZPPO, you can scaffold hard examples through prompts while preserving the RL loop.
+
+### Core Mechanism
+
+ZPPO intercepts every question that the student cannot solve reliably. For each such question, it constructs two special prompts. The **Binary Candidate-included Question (BCQ)** presents the original question alongside two anonymized candidate answers: one correct response from the teacher and one incorrect response from a previous student rollout. The student must distinguish between them. The **Negative Candidate-included Question (NCQ)** aggregates **all** of the student’s wrong rollouts for that question into a single prompt, forcing the student to see the shared failure mode — e.g., all wrong answers misidentified a door color, so the student learns to attend to that attribute.
+
+Both BCQ and NCQ are injected into the prompt of the student’s RL rollouts, not into the loss function. These are **replayed** through a buffer until the student’s mean rollout accuracy on the question reaches 0.5 (a "graduation" criterion), or the buffer reaches capacity and the question is FIFO-evicted. The replay buffer ensures that each hard question receives repeated, scaffolded practice exactly when the student is still in its **zone of proximal development** — challenges it cannot yet master alone but can with structured support.
+
+```
+                  Hard Question Detected (accuracy < threshold)
+                          |
+              +-----------+-----------+
+              |                       |
+           Build BCQ              Build NCQ
+          (teacher ok +            (concatenate all
+           student bad)             student failures)
+              |                       |
+              +----------+------------+
+                         |
+               Add to Prompt Replay Buffer
+                         |
+            +------------+------------+
+            |            |            |
+         Rollout BCQ  Rollout NCQ  Rollout original Q
+            |            |            |
+            +-------+----+            |
+                    |                 |
+          Average accuracy evaluated per question
+                    |
+          +---------+---------+
+          |                   |
+     >= 0.5 (graduate)    < 0.5 (stay + FIFO evict)
+```
+
+Imagine a math tutor who sees a student keep making the same algebra mistake — adding instead of multiplying. The tutor could show a worked example (teacher solution) alongside the student’s wrong attempt and ask, “Which one is correct and why?” That’s BCQ. Or the tutor could list three different problems where the student made the same addition error and say, “What pattern do you see?” That’s NCQ. The tutor then gives the student new similar problems until the student gets them right half the time, then moves on. The tutor never rewrites the student’s brain with a magic gradient — they just change the prompts (the worksheet) and let the student learn through practice. ZPPO does exactly that: the teacher becomes a prompt engineer, not a gradient source. The student’s RL loop stays clean; only the input changes.
+
+### Key Concepts
+
+- **Zone of Proximal Development (ZPD)**: Vygotsky’s idea that a learner can master a task with guidance but not alone. ZPPO operationalises ZPD by detecting hard questions (beyond student’s solo ability) and providing just enough scaffold (BCQ/NCQ) until the student graduates. The graduation threshold (0.5 accuracy) sets the boundary of the ZPD. Example: a student scoring 10% on a geometry question gets BCQ that highlights the correct theorem; after a few rounds, they hit 50% — they’ve grown into that zone.
+
+- **Binary Candidate-included Question (BCQ)**: A prompt that forces discrimination between a correct answer (from teacher) and an incorrect answer (from student’s own history). It’s not about imitating probability; it’s about learning the boundary between right and wrong. Unlike logit distillation, BCQ never exposes the teacher’s full distribution — only a single contrast. This is robust to mode-collapse.
+
+- **Negative Candidate-included Question (NCQ)**: A prompt that aggregates multiple wrong student rollouts for the same question. It surfaces the systematic error pattern. If a student’s three rollouts all misread a number, NCQ presents all three wrong answers together, making the pattern explicit. This is akin to “error analysis as a teaching tool.”
+
+## Framework Shift
+
+```
+Before (mainstream KD+RL):              After (ZPPO):
+Teacher provides logits or rewards      Teacher provides prompt scaffolds
+        |                                        |
+   Student:                                    Student:
+   - imitate logits (KD)                   - normal RL rollouts
+   - RL on own rollouts                    - but input is BCQ/NCQ
+   - discard zero-advantage Q's            - replay until graduate
+        |                                        |
+   Teacher gradient flows to student       Teacher never enters gradient
+   (via KL or advantage)                   (only in prompt strings)
+        |                                        |
+   Weakness:                              Strength:
+   - sharp mode overfit                    - student stays on-policy
+   - silent failure on hard Q's            - hard Q's get explicit teaching
+   - off-policy drift with teacher mix     - no distribution shift
+```
+
+**One sentence**: From **gradient-as-knowledge-transfer** to **prompt-as-scaffolding**, the core shift is that the teacher’s role changes from model modifier to dialogue partner, and the student keeps full ownership of its policy gradient.
+
+## Expert Assessment
+
+**Problem choice**: Real and timely. As models grow, deploying tiny students is pragmatic, and distillation + RL both hit clear walls. The hard-question discard problem in on-policy RL is a genuine blind spot. This paper plugs a hole that many practitioners have felt but not articulated.
+
+**Method maturity**: Clever insight — the “teacher in prompt” idea is elegant and low-overhead. No complex new training loop; just prompt engineering + a replay buffer. Simpler than mixing teacher logits into policy gradient. However, the graduation threshold (0.5) is arbitrary; a sensitivity study would strengthen it. Also, BCQ/NCQ assume we can reliably detect hard questions; the paper uses a simple accuracy threshold but doesn’t discuss training-stage dynamics (e.g., early vs late curriculum).
+
+**Experimental integrity**: Strong. 31 benchmarks across VLM, LLM, and video tasks. Baselines include off/on-policy KD and GRPO. Ablations (BCQ vs NCQ vs both) are present. Largest gains at smallest student size (0.8B) confirm the gap they addressed. One concern: GRPO might be a weak baseline (uses group reward, not teacher scaffolding); a comparison with a method that also uses teacher in prompts (e.g., prompt-based distillation) would be more direct. Also, the paper doesn’t report variance bars, which matters for RL-based methods.
+
+**Writing quality**: Clear in the high-level idea but mires details in long ablation tables. The method section could use a cleaner walkthrough — the current pseudocode is dense. A single concrete example (e.g., showing a BCQ prompt verbatim) would elevate understanding. The abstract does a good job setting up the problem.
+
+**Verdict**: **weak accept** — the core idea is sound and useful, but the paper needs better presentation and a few more control experiments to be a strong publication. Still worth reading for the “teacher in prompt” framing.
+
+## Takeaways
+
+1. **Prompt-based scaffolding**: For any task where you have a weaker model, you can construct contrastive prompts using a stronger model’s output. This applies beyond RL — fine-tuning of small encoders, data augmentation for low-resource settings, etc.
+2. **Hard-example replay buffer**: Instead of discarding or down-sampling failures, aggregate them and replay with structured support. The “graduation” condition (mean rollout accuracy > threshold) is a reusable metric for curriculum learning.
+3. **BCQ/NCQ pattern**: If you can identify common error patterns in your student’s outputs, injecting those as negative examples in the prompt is a cheap improvement. This generalizes: for any pairwise comparison task (ranking, classification), one positive + one negative is often better than many noisy logits.
+:::
+
+:::zh
+**论文**: [2606.18216](https://arxiv.org/abs/2606.18216)  
+**作者**: Byung-Kwan Lee, Ximing Lu, Shizhe Diao, Minki Kang, Saurav Muralidharan, Karan Sapra, Andrew Tao, Pavlo Molchanov, Yejin Choi, Yu-Chiang Frank Wang  
+**分类**: cs.CL
+
+## 缺口
+
+现有的知识蒸馏（KD）强迫小型学生模仿大型教师的 logit 分布。但当学生远小于教师（如 0.8B vs 27B）时，学生会过度聚焦于教师最尖锐的模式，在训练语料之外的基准上泛化能力差。强化学习（RL）避免了 logit 模仿，用学生自己的 rollout 训练。然而，对于所有 rollout 都失败（优势为零）的难题，标准 RL 会悄悄丢弃该样本。若将教师的回答注入策略梯度来挽救这些难题，则破坏了同策假设，导致漂移。缺口在于：**没有一种现有方法能在不扭曲学习信号或违反 RL 框架的前提下，有效教授小规模学生最难的样本。**
+
+```
+问题：小规模学生 < 教师，KD 对难题脆弱
+       + RL 丢弃零优势的难题
+假设：教师的知识必须通过梯度进入
+       v
+方法：教师留在提示中，而非梯度中
+    + 构造 BCQ（正确教师 + 错误学生）
+    + 构造 NCQ（所有错误学生 rollout）
+    + 提示重放缓冲区，直到学生毕业
+       v
+证据：Qwen3.5 0.8B-9B，27B 教师，31 个基准
+    ZPPO 超越离/同策 KD 和 GRPO，最小规模增益最大
+       v
+结论：提示脚手架对极端师生差距有效
+```
+
+## 增量
+
+**一句话**: ZPPO 之前，你要么模仿教师的 logit（在难题上崩溃），要么忍受同策 RL 中的无声失败；ZPPO 之后，你可以在保持 RL 循环的同时，通过提示为难题搭建脚手架。
+
+### 核心机制
+
+ZPPO 拦截每一个学生无法可靠解答的问题。对每个这样的问题，它构造两个特殊的提示。**二元候选问题（BCQ）** 呈现原始问题，并附上两个匿名候选答案：一个来自教师的正确回答，一个来自之前学生 rollouts 的错误回答。学生必须区分二者。**负样本候选问题（NCQ）** 将学生对该问题的**所有**错误 rollout 聚合成一个提示，迫使学生看到共同的失败模式——例如所有错误答案都弄错了门的颜色，于是学生学会关注那个属性。
+
+BCQ 和 NCQ 都被注入学生 RL rollouts 的提示中，而非损失函数中。它们通过一个重放缓冲区反复出现，直到学生在该问题上的平均 rollout 准确率达到 0.5（“毕业”标准），或者缓冲区容量满后按 FIFO 淘汰。重放缓冲区确保每个难题恰好在其仍处于**最近发展区**——学生独自尚不能掌握但通过结构化支持可以完成——时得到反复的脚手架练习。
+
+```
+                  检测到难题（准确率低于阈值）
+                          |
+              +-----------+-----------+
+              |                       |
+          构建 BCQ                构建 NCQ
+          （教师正确 +            （拼接所有
+           学生错误）             学生失败记录）
+              |                       |
+              +----------+------------+
+                         |
+              添加到提示重放缓冲区
+                         |
+            +------------+------------+
+            |            |            |
+         发放 BCQ      发放 NCQ     发放原始问题
+            |            |            |
+            +-------+----+            |
+                    |                 |
+             按问题计算平均准确率
+                    |
+          +---------+---------+
+          |                   |
+     >= 0.5 (毕业)        < 0.5 (保留 + FIFO 淘汰)
+```
+
+想象一位数学家教，他注意到学生反复犯同一个代数错误——把加法当成乘法。家教可以展示一个完整例题（教师解法）旁边放着学生的错误尝试，然后问“哪个正确？为什么？”——这就是 BCQ。或者家教可以把三个不同的、学生都犯了加法错误的题目列出来，问“你看到了什么模式？”——这就是 NCQ。然后家教给学生类似的新题目，直到学生一半以上答对，再移向下一个知识点。家教从未用神奇的梯度重写学生的大脑——他们只是更换了提示（练习卷），让学生通过实践学习。ZPPO 正是这么做的：教师变成了提示工程师，而非梯度源。学生的 RL 循环保持干净，只有输入变了。
+
+### 关键概念
+
+- **最近发展区（ZPD）**：维果茨基提出，学习者在指导下可以完成独自无法完成的任务。ZPPO 通过检测难题（超出学生独自能力）并提供恰好足够的脚手架（BCQ/NCQ）直到学生毕业，来具象化 ZPD。毕业阈值（0.5 准确率）划定了 ZPD 的边界。例如：学生在几何题上只拿到 10%，BCQ 突出显示了正确定理，几轮后达到 50%——学生已经成长到那个区域。
+
+- **二元候选问题（BCQ）**：强制学生区分一个正确答案（来自教师）和一个错误答案（来自学生自己的历史）的提示。这不是模仿概率，而是学习正确与错误的边界。与 logit 蒸馏不同，BCQ 从不暴露教师的完整分布——只提供一个对比。这对模式崩溃具有鲁棒性。
+
+- **负样本候选问题（NCQ）**：将相同问题的多个错误学生 rollout 聚合成一个提示。它揭示了系统性的错误模式。如果学生的三次 rollout 都读错了数字，NCQ 把三个错误答案一起呈现，使模式显式化。这相当于“作为教学工具的错误分析”。
+
+## 框架转变
+
+```
+之前（主流 KD+RL）：                    之后（ZPPO）：
+教师提供 logit 或奖励                    教师提供提示脚手架
+        |                                        |
+   学生：                                     学生：
+   - 模仿 logit (KD)                       - 正常 RL rollout
+   - 在自己 rollouts 上做 RL              - 但输入是 BCQ/NCQ
+   - 丢弃零优势的问题                      - 重放直到毕业
+        |                                        |
+   教师梯度流入学生                       教师从不进入梯度
+   （通过 KL 或优势）                     （只在提示字符串中）
+        |                                        |
+   弱点：                                 优点：
+   - 尖锐模式过拟合                        - 学生保持同策
+   - 难题被默默忽略                        - 难题得到显式教学
+   - 混入教师导致离策漂移                  - 无分布偏移
+```
+
+**一句话**: 从 **梯度作为知识转移** 到 **提示作为脚手架**，核心转变是教师的角色从模型修改者变成了对话伙伴，学生完全掌控自己的策略梯度。
+
+## 专家评审
+
+**选题眼光**: 真实且及时。模型越来越大，部署小型学生是实用选择，而蒸馏和 RL 都遇到了明确的天花板。同策 RL 中难题被丢弃的问题是一个未被言明的盲点。本文填补了一个很多实践者感觉到但未说清的缺口。
+
+**方法成熟度**: 巧劲——"教师留在提示中"的想法优雅且开销低。没有复杂的新训练循环，只有提示工程加重放缓冲区。比将教师 logit 混入策略梯度更简单。但是毕业阈值（0.5）是任意的，有敏感性分析会更好。另外 BCQ/NCQ 假设我们能可靠地检测难题，论文使用了简单的准确率阈值，但没有讨论训练阶段的动态（例如早期 vs 后期的课程安排）。
+
+**实验诚意**: 较强。31 个基准覆盖 VLM、LLM 和视频任务。基线包括离/同策 KD 和 GRPO。有消融实验（BCQ vs NCQ vs 两者结合）。最小规模（0.8B）上增益最大，印证了它们解决的缺口。一个担心：GRPO 可能是个较弱的基线（使用组奖励而非教师脚手架）；如果能与同样在提示中使用教师的方法（如基于提示的蒸馏）直接比较会更好。另外论文没有报告方差棒，这对基于 RL 的方法是个问题。
+
+**写作功力**: 高层想法清晰，但细节淹没在冗长的消融表格中。方法部分可以更清晰——现有伪代码较密集。如果能给出一个具体示例（例如展示一个 BCQ 提示的原文），理解度会大幅提升。摘要对问题的阐述做得好。
+
+**判决**: **弱接收**——核心想法扎实有用，但论文需要更好的呈现和一些额外的控制实验才能成为强发表。但值得一读，因为"教师留在提示中"的框架有启发。
+
+## 要点总结
+
+1. **基于提示的脚手架**：对于任何有弱模型的场景，你可以用强模型的输出来构造对比提示。这超出了 RL 的范畴——例如微调小型编码器、低资源数据增强等。
+2. **难题重放缓冲区**：不要丢弃或降采样失败样本，而是将它们聚合起来，在结构化支持下重放。"毕业"条件（平均 rollout 准确率 > 阈值）是一个可复用的课程学习指标。
+3. **BCQ/NCQ 模式**：如果你能识别学生输出中的常见错误模式，将这些模式作为负样本注入提示是一个低成本的改进。这具有普适性：对于任何成对比较任务（排序、分类），一个正例加一个反例常常优于许多有噪声的 logit。
+:::
