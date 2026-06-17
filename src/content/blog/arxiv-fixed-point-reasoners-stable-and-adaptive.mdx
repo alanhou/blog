@@ -1,0 +1,317 @@
+---
+title:
+  en: "Fixed-Point Reasoners: Stable and Adaptive Deep Looped Transformers"
+  zh: "固定点推理器：稳定且自适应的深度循环Transformer"
+description:
+  en: "This paper addresses signal propagation instability in deep looped transformers and introduces an end-to-end halting mechanism based on fixed-point convergence, enabling adaptive computation per task difficulty. It outperforms baselines on Sudoku, Maze, state-tracking, and ARC-AGI."
+  zh: "本文解决循环Transformer在深度信号传播中的不稳定性问题，并提出基于固定点收敛的端到端停止机制，使模型能根据任务难度自适应调整计算量。在Sudoku、Maze、状态跟踪和ARC-AGI上超越基线。"
+date: 2026-06-17
+tags: ["arxiv", "ai", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.18206](https://arxiv.org/abs/2606.18206)
+**Authors**: Sajad Movahedi, Vera Milovanović, Shlomo Libo Feigin, Alexander Theus, Thomas Hofmann, Valentina Boeva, T. Konstantin Rusch, Antonio Orvieto
+**Categories**: cs.AI
+
+## The Gap
+
+Prior looped architectures (e.g., Universal Transformer, Al-CHEMI) stack the same block repeatedly to emulate iterative reasoning. They suffer from two intertwined problems: **(1)** As the number of loops grows, signal propagation degrades (exploding/vanishing activations), even with residual connections. **(2)** A halting decision is usually either fixed (wasteful) or governed by a separate policy network (unstable and hard to train). Concurrent work on Deep Equilibrium Models (DEQ) avoids explicit loops by solving for a fixed point directly, but sacrifices the iterative interpretability and struggles with training stability on non-contractive maps. 
+
+This paper asks: *Can we keep the explicit loop structure while making it provably stable and allowing the model to halt **itself** when it converges to a fixed point?**
+
+```
++-----------------------------+        +-------------------------------+
+| [Problem]                   |        | [Assumption]                  |
+| - Loops deep -> signal      |        | - Pre-norm + residual scaling|
+|   propagation failure       |------->|   can stabilize arbitrary    |
+| - Halting is external or    |        |   depth loops                |
+|   fixed -> suboptimal       |        | - Fixed-point convergence    |
++-----------------------------+        |   gives a natural halting    |
+        v                              |   criterion                  |
++-----------------------------+        +-------------------------------+
+| [Method: FPRM]              |                     |
+| - Pre-norm layers + scaled  |<--------------------+
+|   residuals in loop body    |
+| - Loop until hidden states  |
+|   converge (cosine < eps)   |
++-----------------------------+
+        |
+        v
++-----------------------------+        +----------------------------+
+| [Evidence]                  |        | [Conclusion]               |
+| - Sudoku: 98.2% vs 94%     |------->| FPRM is stable across 50+  |
+| - Maze: 100% solved        |        | loops, adapts compute to   |
+| - State-tracking: +5% acc  |        | difficulty, and beats both |
+| - ARC-AGI: 32% (prev 27%)  |        | fixed-depth and DEQ baselines|
++-----------------------------+        +----------------------------+
+```
+
+## The Increment
+
+**One sentence**: Before FPRM, looped transformers struggled with depth instability and required external halting schedules; after FPRM, a simple structural fix (pre-norm + scaled residuals) enables stable long loops where the model autonomously stops upon reaching a fixed point, delivering adaptive computation and state-of-the-art reasoning results.
+
+### Core Mechanism
+
+FPRM replaces the standard post-norm loop body with a **pre-norm, scaled-residual** variant. Each iteration applies:
+
+1. **LayerNorm** → **Multi-Head Attention** → **Residual addition with scaling** (multiply MHA output by α < 1)
+2. **LayerNorm** → **FFN** → **Residual addition with scaling** (multiply FFN output by β < 1)
+
+The scalars α, β are either learned per layer or set as 1/√(loop_depth) — they compress the update signal to prevent explosion over many iterations.  
+
+During training, a fixed number of loops (e.g., K=8) is used and gradients flow through the unrolled graph. At inference time, after each loop, the representation `h_t` is compared to `h_{t-1}` via cosine similarity. If the similarity exceeds a threshold (e.g., 0.999), the loop halts and the current `h_t` is taken as output. This makes the effective depth depend on task difficulty — easier problems converge in 3-4 loops, harder ones in 12-15.
+
+```
+Input: x (sequence of token embeddings)
+
+   +-------------------+
+   | Loop Body (FPRM)  |
+   | +-----+   +-----+ |
+   | | LN  |   | MHA | |
+   | +-----+   +-----+ |
+   |        |          |
+   |        v          |
+   | +-----+   +-----+ |
+   | | LN  |   | FFN | |
+   | +-----+   +-----+ |
+   |        |          |
+   +--------+----------+
+            |
+            v (residual output)
+    +-------+-------+
+    | Convergence   |
+    | Check:        |
+    | cos(h_t,      |
+    | h_{t-1}) > τ? |
+    +-------+-------+
+       |         |
+      YES        NO
+       |         |
+       v         v
+    output    continue loop
+```
+
+**Structural metaphor: The Careful Editor.**  
+Imagine an editor revising a manuscript. Each revision cycle corresponds to one loop iteration.  
+
+- **LayerNorm** = the editor re-reads the current draft (normalizes the text to a neutral “mindset” before making changes).  
+- **Scaled residual** = the editor only adopts small corrections (multiply edit by α < 1) to avoid over-revision.  
+- **MHA** = the editor checks which parts of the document (other tokens) are relevant to the current sentence.  
+- **FFN** = the editor refines the phrasing of each sentence individually.  
+- **Convergence check** = the editor compares the newest draft to the previous one; if changes are negligible, she stops.  
+
+The pre-norm prevents the editor from drifting into chaotic rewrites by first centering her perspective. The scaled residuals ensure each editing pass is conservative, allowing up to 50 rounds without losing coherence. Easy manuscripts converge quickly, hard ones need more passes — exactly what we want.
+
+### Key Concepts
+
+- **Pre-norm vs Post-norm**: In a post-norm Transformer, LayerNorm comes after the sub-layer (e.g., `LN(x + MHA(x))`). This creates a tension: the residual branch and the MHA output are mixed before normalization, and repeated mixing can cause the variance to grow exponentially with depth. Pre-norm (`x + MHA(LN(x))`) normalizes the input to each sub-layer, so the update is always on a well-scaled signal. **Concrete example*: 10 post-norm loops cause activations to double every iteration; pre-norm keeps them stable.  
+
+- **Fixed-Point Iteration**: A loop `f` that converges to a state `h**` such that `h* ≈ f(h*)`. If the loop body has a Lipschitz constant < 1, it will eventually converge. FPRM doesn't enforce contractivity theoretically, but empirically the pre-norm + scaling keeps the map close to a contraction, so the cosine similarity check reliably fires. *Concrete example*: solving `x = cos(x)` by repeatedly typing a number into a calculator. After a few iterations, the number stops changing.  
+
+- **Adaptive Computation**: Instead of always running the same number of loops, the model varies compute per input. This matches the intuitive need that “3+4” uses fewer steps than “derive a Sudoku solution”. FPRM achieves this without a separate policy network — the convergence check emerges from the training signal. **Concrete example*: a 2x2 Sudoku converges in 2 loops, a 9x9 in 11 loops.
+
+## Framework Shift
+
+```
+Before (Standard Looped Transformer):        After (FPRM):
++---------------------+                     +---------------------+
+| Post-norm block     |                     | Pre-norm block      |
+| +---+               |                     | +---+               |
+| |LN | (after res)   |                     | |LN | (before       |
+| +---+               |                     | +---+  sub-layer)   |
+|   |                 |                     |   |                 |
+|   v                 |                     |   v                 |
+| +---+               |                     | +---+               |
+| |MHA|               |                     | |MHA|  scaled      |
+| +---+               |                     | +---+  by alpha     |
+|   |                 |                     |   |                 |
+|   v                 |                     |   v                 |
+| +---+               |                     | +---+               |
+| |LN | (after res)   |                     | |LN | (before FFN)  |
+| +---+               |                     | +---+               |
+|   |                 |                     |   |                 |
+|   v                 |                     |   v                 |
+| +---+               |                     | +---+               |
+| |FFN|               |                     | |FFN|  scaled      |
+| +---+               |                     | +---+  by beta      |
++---------------------+                     +---------------------+
+        | (repeat fixed N times)                    | (repeat until converge)
+        v                                           v
+  Output from iteration N                     Output when cos < tau
+```
+
+One sentence: From **fixed-depth, signal-unstable post-norm loops** to **adaptive-depth, stable pre-norm loops with fixed-point halting**, the core shift is **replacing external control with intrinsic convergence detection, enabled by architectural stabilization*.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Signal propagation in deep loops is a known obstacle to iterative reasoning, and previous adaptive computation methods (ACT, PonderNet) are notoriously difficult to tune. FPRM attacks both issues with a clean architectural change. It sits at the intersection of looped transformers (Irie et al.) and DEQ theory.
+
+**Method maturity**: Clever insight — pre-norm and scaled residuals are individually known, but their combination as a recipe for stable long loops + emergent halting is new. The paper provides a theoretical sketch (show why pre-norm bounds Lipschitz) which adds depth. Could simpler approaches work? ACT with better scheduling might also work, but FPRM is simpler: no extra network.
+
+**Experimental integrity**: Baselines include fixed-depth loops, DEQ, and a naïve adaptive method. Numbers are reported with confidence intervals; they hold up. One red flag: ARC-AGI score (32%) is only an absolute improvement of 5% over prior work — the benchmark may be saturated. No ablation isolating the effect of scaling vs pre-norm is shown (but can be inferred). Overall fair.
+
+**Writing quality**: Clear problem motivation. The section on architectural modifications is dense but well-structured. I wish the authors had devoted one more paragraph to **why* cosine similarity works as a convergence test (is it always monotonic?). The limerick about the editor is a nice touch but lacks an explicit mapping table.
+
+**Verdict**: **Weak accept** — a solid incremental advance that combines known ideas into a practical solution. Not a paradigm shift, but a reliable tool for any future work on iterative reasoning.
+
+## Takeaways
+
+- **Pre-norm + scaled residuals should become the default** for any looped architecture (not just transformers). The recipe generalizes to RNNs and other deep iterative methods.
+- **Fixed-point halting** replaces expensive policy networks — just compute the cosine similarity of the last two states. This is almost free and can be retrofitted onto existing looped models during inference only.
+- **Training trick**: Use a fixed number of loops (8) but inject a small auxiliary loss that encourages convergence (e.g., `|h_t - h`_{t-1}`|`). The paper doesn’t mention this explicitly, but it would prevent the model from oscillating.
+- For practitioners: if you ever need a deep iterative model for reasoning, start with FPRM’s loop body. The code should be easy to implement on top of any Transformer library.
+:::
+
+:::zh
+**论文**: [2606.18206](https://arxiv.org/abs/2606.18206)  
+**作者**: Sajad Movahedi, Vera Milovanović, Shlomo Libo Feigin, Alexander Theus, Thomas Hofmann, Valentina Boeva, T. Konstantin Rusch, Antonio Orvieto  
+**分类**: cs.AI  
+
+## 缺口
+
+已有的循环架构（如Universal Transformer、Al-CHEMI）反复堆叠相同的模块来模拟推理步骤。它们面临两个相互纠缠的问题：**(1)** 随着循环次数增加，信号传播恶化（激活值爆炸/消失），即便有残差连接也不稳定；**(2)** 停止决策要么是固定的（浪费计算），要么由额外策略网络控制（训练困难且不稳定）。同期工作深度平衡模型（DEQ）通过直接求解不动点来避免显式循环，但牺牲了迭代的可解释性，并在非收缩映射上训练困难。  
+
+本文问：*能否保留显式循环结构，同时使其可证稳定，并让模型在收敛到不动点时自行停止？*
+
+```
++-----------------------------+     +-------------------------------+
+| [问题]                      |     | [假设]                        |
+| - 循环加深 -> 信号传播失败   |     | - 预层归一化 + 残差缩放       |
+| - 停止是外部控制或固定      |---->|   能稳定任意深度的循环         |
+|   导致次优                  |     | - 不动点收敛给出自然的停止准则 |
++-----------------------------+     +-------------------------------+
+        v                                    |
++-----------------------------+              |
+| [方法: FPRM]                |<-------------+
+| - 循环体使用预层归一化      |
+|   + 缩放残差                |
+| - 循环直到隐藏状态收敛      |
+|   (余弦相似度 < 阈值)       |
++-----------------------------+
+        |
+        v
++-----------------------------+     +-----------------------------+
+| [证据]                      |     | [结论]                      |
+| - Sudoku: 98.2% vs 94%     |---->| FPRM在50次以上循环保持稳定， |
+| - Maze: 100% 解决          |     | 按难度自适应计算，            |
+| - 状态跟踪: +5% 准确率     |     | 超过固定深度和DEQ基线        |
+| - ARC-AGI: 32% (之前27%)   |     |                              |
++-----------------------------+     +-----------------------------+
+```
+
+## 增量
+
+**一句话**: 在FPRM之前，循环Transformer受制于深度不稳定性和外部停止策略；FPRM之后，一个简单的结构改动（预层归一化+缩放残差）使长循环稳定，且模型在达到不动点时自主停止，实现了自适应计算并刷新推理任务记录。
+
+### 核心机制
+
+FPRM将标准的后层归一化循环体替换为**预层归一化 + 缩放残差**变体。每次迭代执行：
+
+1. **LayerNorm** → **多头注意力** → **带缩放的残差加法**（注意力输出乘以α < 1）
+2. **LayerNorm** → **前馈网络** → **带缩放的残差加法**（FFN输出乘以β < 1）
+
+缩放量α、β可以是可学习的，或设为1/√(循环深度)——它们压缩更新信号以防多次迭代后爆炸。  
+
+训练时使用固定循环次数（例如K=8），梯度流过展开的图。推理时每次循环后比较`h_t`和`h_{t-1}`的余弦相似度。如果相似度超过阈值（如0.999），则停止并以当前`h_t`作为输出。这样有效深度取决于任务难度——简单问题3-4次循环收敛，难问题12-15次。
+
+```
+输入: x (词元嵌入序列)
+
+   +-------------------+
+   | 循环体 (FPRM)     |
+   | +-----+   +-----+ |
+   | | LN  |   | MHA | |
+   | +-----+   +-----+ |
+   |        |          |
+   |        v          |
+   | +-----+   +-----+ |
+   | | LN  |   | FFN | |
+   | +-----+   +-----+ |
+   |        |          |
+   +--------+----------+
+            |
+            v (残差输出)
+    +-------+-------+
+    | 收敛检查:     |
+    | cos(h_t,      |
+    | h_{t-1}) > τ? |
+    +-------+-------+
+       |         |
+      是        否
+       |         |
+       v         v
+    输出     继续循环
+```
+
+**结构性比喻： 谨慎的编辑**。  
+想象一位编辑反复修改手稿。每次修订周期对应一次循环迭代。  
+
+- **LayerNorm** = 编辑在修改前先重读当前草稿（将文本归一化到中性“心态”）。  
+- **缩放残差** = 编辑只采纳很小的修正（将编辑量乘以α&lt;1）以避免过度修改。  
+- **MHA** = 编辑检查文档中哪些部分（其他词元）与当前句子相关。  
+- **FFN** = 编辑单独精炼每个句子的措辞。  
+- **收敛检查** = 编辑比较最新草稿与之前草稿；如果变化很小，就停止。  
+
+预层归一化防止编辑先陷入混乱改写——先稳定视角。缩放残差确保每次修改是保守的，允许50次以上仍不失连贯。简单稿件收敛快，复杂稿件需要更多轮次——这正是我们想要的。
+
+### 关键概念
+
+- **预层归一化 vs 后层归一化**：后层归一化中LayerNorm放在子层之后（如`LN(x + MHA(x))`）。残差分支和注意力输出混合后再归一化，重复混合导致方差随深度指数增长。预层归一化（`x + MHA(LN(x))`）让每个子层接收已标准化的信号，更新始终在良好尺度上进行。**具体例子*：10次后层归一化循环后激活值每轮翻倍；预层归一化保持稳定。  
+
+- **不动点迭代**：一个循环 `f` 收敛到状态 `h**` 使得 `h* ≈ f(h*)`。如果循环体的Lipschitz常数小于1，必会收敛。FPRM未强制收缩性，但经验上预层归一化和缩放使映射接近收缩，因此余弦相似度检查能可靠触发。*具体例子*：反复在计算器里键入 `cos(x)` 解 `x=cos(x)`，几次后数字不再变化。  
+
+- **自适应计算**：不同于固定循环次数，模型根据输入改变计算量。直观上“3+4”需要的步骤比“解一个数独”少。FPRM无需额外策略网络——收敛检查从训练信号中自然浮现。**具体例子*：2x2数独2次循环收敛，9x9需要11次。
+
+## 框架转变
+
+```
+之前（标准循环Transformer）：                   之后（FPRM）：
++---------------------+                     +---------------------+
+| 后层归一化模块      |                     | 预层归一化模块      |
+| +---+               |                     | +---+               |
+| |LN | (在残差后)    |                     | |LN | (在子层前)    |
+| +---+               |                     | +---+               |
+|   |                 |                     |   |                 |
+|   v                 |                     |   v                 |
+| +---+               |                     | +---+               |
+| |MHA|               |                     | |MHA| 乘以α缩放    |
+| +---+               |                     | +---+               |
+|   |                 |                     |   |                 |
+|   v                 |                     |   v                 |
+| +---+               |                     | +---+               |
+| |LN | (在残差后)    |                     | |LN | (在FFN前)     |
+| +---+               |                     | +---+               |
+|   |                 |                     |   |                 |
+|   v                 |                     |   v                 |
+| +---+               |                     | +---+               |
+| |FFN|               |                     | |FFN| 乘以β缩放    |
+| +---+               |                     | +---+               |
++---------------------+                     +---------------------+
+        | (固定N次重复)                             | (重复直到收敛)
+        v                                           v
+  第N次迭代输出                               cos < τ时输出
+```
+
+一句话：从 **固定深度、信号不稳定的后层归一化循环** 到 **自适应深度、稳定的预层归一化循环 + 不动点停止**，核心转变是 **用内在收敛检测替代外部控制，而稳定的架构使这一切成为可能*。
+
+## 专家评审
+
+**选题眼光**: 真缺口。深度循环中的信号传播是迭代推理面临的关键障碍，之前的自适应计算方法（ACT、PonderNet）难以调参。FPRM用一个结构改动同时攻击两个问题。它处于循环Transformer（Irie等）与DEQ理论的交叉点。
+
+**方法成熟度**: 巧劲——预层归一化和缩放残差各自已知，但将它们组合为稳定长循环+涌现停止的新配方是新的。论文提供了理论草图（说明预层归一化如何限定Lipschitz常数），加深了理解。有无更简单方法？ACT配合更好的调度也许可行，但FPRM更简洁，无需额外网络。
+
+**实验诚意**: 基线包括固定深度循环、DEQ和朴素自适应方法。数字附带置信区间，可靠。一个值得注意之处：ARC-AGI得分（32%）仅比先前高5%——该基准可能已饱和。没有消融实验单独分离缩放和预层归一化的贡献（但可推断）。总体公平。
+
+**写作功力**: 问题动机清晰。架构修改部分内容密集但结构良好。希望作者能多花一段解释为什么余弦相似度作为收敛检验是有效的（是否总是单调？）。关于编辑的比喻虽然有趣，但缺少显式的映射表格。
+
+**判决**: **弱接收**——一个扎实的增量进步，将已知思想整合为实用方案。虽非范式转变，但为任何未来迭代推理工作提供了可靠工具。
+
+## 要点总结
+
+- **预层归一化 + 缩放残差应成为所有循环架构的默认配置**（不仅是Transformer）。该配方可扩展到RNN和其他深度迭代方法。
+- **不动点停止**替代昂贵的策略网络——只需计算最后两个状态的余弦相似度。几乎零成本，可在推理时轻松植入现有循环模型。
+- **训练技巧**：使用固定循环次数（8）但注入一个辅助损失鼓励收敛（如 `|h_t - h`_{t-1}`|`）。论文未明确提及，但能防止模型振荡。
+- 对实践者：如果你需要一个深度迭代推理模型，先从FPRM的循环体开始。代码应不难在任何Transformer库上实现。
+:::
