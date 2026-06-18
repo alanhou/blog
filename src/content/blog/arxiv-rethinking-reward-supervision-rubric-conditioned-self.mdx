@@ -1,0 +1,130 @@
+---
+title:
+  en: "Rethinking Reward Supervision: Rubric-Conditioned Self-Distillation"
+  zh: "重新思考奖励监督：基于评分标准的自蒸馏"
+description:
+  en: "This paper introduces a new training framework for reasoning language models that replaces scalar rewards or fixed rationales with structured rubrics, enabling token-level fine-grained guidance via self-distillation."
+  zh: "本文提出一种针对推理语言模型的新训练框架，用结构化的评分标准取代标量奖励或固定推理过程，通过自蒸馏实现词元级别的细粒度指导。"
+date: 2026-06-18
+tags: ["arxiv", "ai", "cs.ai", "cs.cl"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.19327](https://arxiv.org/abs/2606.19327)
+**Authors**: Siyi Gu, Jialin Chen, Sophia Zhou, Arman Cohan, Rex Ying
+**Categories**: cs.AI, cs.CL
+
+## The Gap
+
+Existing post-training for reasoning language models falls into two camps: supervised distillation, where a student learns from teacher-generated chain-of-thought rationales, and reinforcement learning (RL) with verifiable rewards (e.g. GRPO). Both have known weaknesses.
+
+Distillation treats the teacher's rationale as a gold standard, but rationales are expensive to collect and often noisy — a correct final answer can hide flawed intermediate reasoning. When the student mimics a partially incorrect rationale, it learns bad habits. RL, on the other hand, collapses all feedback into a single scalar reward. This obscures which parts of the reasoning process went wrong, leaving the model with a "good job / bad job" signal that lacks the resolution needed for fine-grained correction.
+
+The paper's insight is that both approaches suffer from the same root problem: **the supervision signal is too coarse** — either a full sequence to copy (distillation) or a single number to maximize (RL). What's missing is a way to give token-level credit assignment without human annotation.
+
+```
+[Problem: Coarse supervision in reasoning post-training]
+      |
+      v
+[Assumption: Rubrics can decompose reasoning quality into orthogonal criteria]
+      |
+      v
+[Method: Teacher conditioned on rubrics gives token-level feedback on student's own trajectories (on-policy)]
+      |
+      v
+[Evidence: Outperforms GRPO (+1.0 avg) and OPSD (+0.9 avg) on science reasoning benchmarks]
+      |
+      v
+[Conclusion: Rubric-conditioned self-distillation enables fine-grained credit assignment without expensive human rationales]
+```
+
+## The Increment
+
+**One sentence**: Before this paper, post-training could either copy a full rationale (distillation) or maximize a scalar reward (RL); after this paper, supervision is decomposed into rubric-level criteria, each providing token-level guidance on the student's own sampled reasoning.
+
+### Core Mechanism
+
+The framework has two stages.
+
+**Stage 1 — Rubric Generation**: A large teacher model generates task-specific rubrics from a small set of examples and a task description. Each rubric is a structured list of criteria (e.g. "uses correct formula", "explains assumptions", "avoids arithmetic errors"). This is done offline before training begins. The rubrics are not answers — they are quality dimensions that a strong response should satisfy.
+
+**Stage 2 — Rubric-Conditioned Self-Distillation**: For each training question, the student model first samples on-policy trajectories (its own reasoning chains). The teacher model, now conditioned on the rubrics, evaluates each trajectory criterion by criterion and produces token-level "guidance tokens" that correct specific reasoning steps. This is not a scalar reward — it's a sequence of corrective tokens interleaved with the student's original reasoning. The student then learns from these guidance tokens via standard autoregressive distillation.
+
+The key design choice is that the teacher never sees a gold-standard rationale. It only sees the rubric criteria and the student's attempt. This forces the teacher to give feedback that is *relative to the criteria*, not relative to a fixed answer key.
+
+```
+[Stage 1: Rubric Generation]
+   Task + Examples --> Teacher --> [Rubric: Criterion A, Criterion B, ...]
+                                          |
+                                          V
+[Stage 2: Self-Distillation]
+   Question --> Student --> sampled trajectory T
+                     |
+                     v
+   Teacher sees: [T] + [Rubric]
+                     |
+                     v
+   Teacher outputs: guidance tokens (token-level corrections)
+                     |
+                     v
+   Student trained on: guidance tokens (autoregressive loss)
+```
+
+**Structural metaphor**: Think of this as **guided revision in a writers' workshop**.  
+- The **question** is a writing prompt.  
+- The **student's trajectory** is a rough draft.  
+- The **rubrics** are a critique checklist given to the workshop leader (the teacher).  
+- The **teacher** reads the draft and marks specific sentences — not with a single grade, but with marginal comments: "This claim needs evidence", "This transition is confusing", "Your conclusion doesn't echo the introduction".  
+- These marginal comments are the **guidance tokens**.  
+- The **student** rewrites the draft incorporating those comments.  
+- Crucially, the teacher does not have a "perfect essay" in mind — only the checklist. The feedback is customized to what the student actually wrote.
+
+Without rubrics, a teacher can only say "this is an A" or "this is an F" (scalar reward) or provide a model essay to copy (fixed rationale). With rubrics, the teacher gives targeted, structure-aware feedback that respects the student's own starting point.
+
+### Key Concepts
+
+- **Rubric (评分标准)**: A rubric is a decomposition of quality into orthogonal criteria. For example, a rubric for a math proof might have: (1) states assumptions, (2) applies theorem X correctly, (3) handles edge cases. Each criterion is binary (satisfied/not satisfied) or ordinal (1-3). The key property is that criteria are **independent* — satisfying one doesn't guarantee another. This allows the teacher to give credit or feedback on each dimension separately. In contrast, a scalar reward conflates all criteria into one number: a model that fails on criterion 1 but nails criterion 3 gets the same reward as one that does the opposite, as long as the sum is the same.
+
+- **On-policy self-distillation (同策略自蒸馏)**: In standard distillation, the teacher generates a fixed set of rationales offline, and the student learns to imitate them regardless of what the student would actually generate. In on-policy distillation, the student first generates a trajectory ("what **this student* would do"), and the teacher provides feedback on *that specific trajectory*. This is much more sample-efficient because the feedback addresses the student's actual failure modes. The "self" in self-distillation emphasizes that the student learns from feedback on its own behavior, not from a static dataset.
+
+- **Token-level guidance (词元级指导)**: Instead of a single reward number at the end of a trajectory, the teacher produces corrective tokens at each step of reasoning. For example, if the student writes "x = 5" but should have written "x = 3", the teacher might insert a token like "[CORRECT: x = 3]" at the relevant position. This is more informative than a scalar reward because it tells the student **where* the error is and *what* to replace it with. The student's loss is computed only on these guidance tokens (or on a mixture of original tokens and guidance tokens), providing a dense training signal.
+
+## Framework Shift
+
+```
+Before (distillation or RL):        After (this paper):
+                                   
+Teacher --> fixed rationale          Teacher --> rubric criteria
+        |                                    |
+        v                                    v
+Student copies entire chain          Student samples own trajectory
+        |                                    |
+        v                                    v
+Loss: whole sequence match           Teacher provides token-level corrections
+        |                                    |
+        v                                    v
+Signal strength: single scalar        Signal strength: token-level dense
+       or full-sequence copy               guidance on student's own output
+```
+
+**One sentence**: From scalar optimization or full-sequence imitation to decomposed, student-specific token guidance, the core shift is replacing monolithic supervision with structured, criterion-level feedback.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The community has known for years that scalar rewards are too coarse for reasoning, and that distillation from expensive rationales is brittle. The paper correctly identifies the root cause (supervision granularity) and proposes a principled alternative. It sits at the intersection of two hot topics (reasoning models and preference optimization), so the timing is excellent.
+
+**Method maturity**: The idea is clever but not revolutionary — it's a well-engineered combination of existing ideas (rubrics from education, on-policy distillation, token-level reward). The two-stage pipeline is practical and the method description is clear. However, there's a potential efficiency concern: generating rubrics offline adds overhead, and the token-level guidance requires running the teacher model per student trajectory, which could be expensive. A simpler alternative might be to use the rubrics as a reward model for PPO instead of token-level guidance, but the authors' choice might be justified by the fine-grained credit assignment.
+
+**Experimental integrity**: The baselines are fair — GRPO and OPSD are current state-of-the-art for reasoning. The improvements (1.0 and 0.9 points average) are modest but consistent across diverse science benchmarks. I'd like to see ablation on the rubric size (how many criteria are optimal?), and whether the guidance tokens can be replaced by scalar rewards from a rubric-conditioned reward model. The fact that they test on science reasoning (which has clear verifiable answers) is a strength, but it also limits generality. No obvious red flags, but I would want to check the variance across runs.
+
+**Writing quality**: The abstract is clear and motivating. The method section is well-structured. The weakest part is the related work — it's thin and doesn't clearly distinguish from prior token-level reward approaches (like RLOO, DRGR). A more thorough comparison would elevate the paper.
+
+**Verdict**: **weak accept** — solid incremental contribution with clear practical value. Not a breakthrough, but a well-motivated improvement that will likely be adopted.
+
+## Takeaways
+
+1. **Rubrics as a drop-in replacement for fixed rationales**: If you're doing distillation on reasoning tasks, try replacing the gold-standard rationale with a rubric and let the teacher adapt feedback to the student's output. This should reduce the "learning from bad reasoning" problem.
+2. **On-policy supervision beats off-policy for reasoning**: The paper reinforces that letting the student generate its own trajectories before getting feedback is much more sample-efficient than training on a static dataset of teacher rationales.
+3. **Token-level guidance is cheap and effective**: If you have a strong teacher model, generating token-level corrections conditioned on rubrics costs less than training a separate reward model, and gives better signal than scalar rewards. This is a concrete technique you can borrow for any sequence-level task where quality can be decomposed into orthogonal criteria.
+:::
