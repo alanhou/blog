@@ -73,7 +73,14 @@ function findRawAngleBracketIssues(content, filePath) {
       }
 
       if (ch === '$') {
-        // toggle math (handles both $ and $$ because we toggle per $)
+        // Toggle math. Treat a `$$` pair as a single delimiter so that
+        // single-line display math ($$ ... $$) protects its contents
+        // (otherwise the two `$` cancel out and the math body is scanned).
+        if (line[j + 1] === '$') {
+          inMath = !inMath;
+          j += 2;
+          continue;
+        }
         inMath = !inMath;
         j++;
         continue;
