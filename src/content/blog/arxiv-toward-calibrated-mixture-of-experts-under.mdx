@@ -1,0 +1,276 @@
+---
+title:
+  en: "Toward Calibrated Mixture-of-Experts Under Distribution Shift"
+  zh: "分布偏移下的混合专家模型校准"
+description:
+  en: "Mixture-of-Experts models achieve strong accuracy-calibration tradeoffs under distribution shift — but only if you calibrate the right thing. This paper reveals when expert-level calibration works (hard routing) and when it fails (soft routing), then fixes it with adversarial reweighting."
+  zh: "混合专家模型在分布偏移下能实现很好的准确率-校准权衡——但前提是你校准对了东西。这篇论文揭示了专家级校准何时有效（硬路由）何时失败（软路由），并用对抗性重加权修复了问题。"
+date: 2026-06-20
+tags: ["arxiv", "ai", "cs.ai", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+
+:::en
+**Paper**: [2606.20544](https://arxiv.org/abs/2606.20544)
+**Authors**: Gina Wong, Drew Prinster, Suchi Saria, Rama Chellappa, Anqi Liu
+**Categories**: cs.AI, cs.LG
+
+## The Gap
+
+Prior work on calibration in deep ensembles and mixture-of-experts (MoE) showed that enforcing calibration at the _individual predictor_ level improves the ensemble's overall calibration and accuracy (Tran et al., 2022; Popordanoska et al., 2024). But these results were demonstrated under i.i.d. settings or with simple shifts. The interaction between _routing_ (how MoE assigns examples to experts) and calibration under distribution shift was left unexplored. In particular, it was unknown whether expert-level calibration is sufficient to guarantee aggregate calibration when the input distribution shifts — and whether that guarantee depends on the routing mechanism (hard vs soft). The paper identifies this as the gap.
+
+```
+[ASCII logic topology]
+                              +-------------------------------+
+                              |  Prior: calibrate each expert  |
+                              |  under i.i.d. works for MoE    |
+                              +-------+-----------------------+
+                                      |
+                                      | distribution shift
+                                      v
+            +-----------------+       +-----------------+       +-----------------+
+            | Assumption:     |       | Method:         |       | Evidence:       |
+            | expert calib.   | --->  | 1) theoretical  | --->  | 1) theorem for  |
+            | sufficient      |       |    analysis of  |       |    hard routing  |
+            | under any shift?|       |    routing type |       | 2) counterexam.  |
+            +-----------------+       | 2) adversarial  |       |    for soft      |
+                                      |    reweighting  |       | 3) improvement   |
+                                      +--------+--------+       |    on real data  |
+                                               |                +--------+--------+
+                                               v                         v
+                                       +-------------+           +-------------------+
+                                       | Conclusion: |           | Soft routing      |
+                                       | hard rout:  |           | needs explicit    |
+                                       | calib OK;   |           | distribution-     |
+                                       | soft rout:  |           | shift-aware       |
+                                       | calib fails |           | calibration       |
+                                       +-------------+           +-------------------+
+```
+
+## The Increment
+
+**One sentence**: Before this paper, we knew calibrating experts helps MoE under i.i.d. data; after, we know that under distribution shift expert calibration _alone_ is sufficient only for hard-routed MoE, and for soft-routed MoE we need an explicit penalty on calibration error under worst-case shifted distributions.
+
+### Core Mechanism
+
+The paper first proves a theorem: for hard-routed MoE (each input goes to exactly one expert), if every expert is calibrated on its in-distribution support, then the overall model remains calibrated under any marginal shift that does not change the expert assignment boundaries. For soft-routed MoE (each input gets a weighted combination of experts), even with perfectly calibrated experts, the weighted average of expert predictions can be miscalibrated under shift because the routing weights themselves distort the aggregate confidence.
+
+To fix soft-routed MoE, they propose **adversarial calibration reweighting** (ACR). The idea: during training, simulate a worst-case distribution shift by perturbing the routing weights or the input features such that the calibration error of the _aggregate_ output is maximized. Then minimize that worst-case calibration error jointly with the standard loss. This is implemented as a min-max optimization: the inner loop finds a reweighting of the experts' contributions that amplifies miscalibration, and the outer loop updates the model to reduce that error.
+
+```
+[ASCII diagram of method internals]
+
+                 soft assignments
+    Input x ---->+----------+----> gating network -> weights w_i(x)
+                 | Experts  |     +---> weighted sum -> p_agg = sum w_i * p_i
+                 | f_1...f_k|     |
+                 +----------+     +---> adversary tweaks w_i to max CalError(p_agg)
+                          |             |
+                          v             v
+                     In-dist loss + lambda * CalError_adv
+```
+
+**Structural metaphor**: Think of a committee of experts (the individual models) who each give a confidence score on a topic. In a hard-routed committee, one person decides alone — if that person is well-calibrated (i.e., when they say "80% sure", they're right 80% of the time), then the committee's final answer is automatically well-calibrated, because nobody else's opinion is mixed in. Now imagine a soft-routed committee: everyone gives a confidence, then a "moderator" (the gating network) takes a weighted average. Even if each expert individually is calibrated on their own data, the weighted average can be off — because the moderator's weights depend on the input, and under distribution shift the moderator might over-trust or under-trust certain experts for the wrong reasons. The paper's ACR method adds a "skeptical auditor" who, after seeing the weighted average, tries to find a reweighting that makes the prediction most miscalibrated (adversary), and then the committee is trained to be robust against that worst-case reweighting. So the committee learns not to let the moderator's biases cause calibration breakdown.
+
+### Key Concepts
+
+- **Calibration**: A model is calibrated if among all predictions that say "p confident", the actual fraction correct is p. For example, among all inputs where the model outputs 0.8 probability for class A, exactly 80% should be class A. This is measured by Expected Calibration Error (ECE). Under distribution shift, a model can become systematically overconfident (e.g., predicts 0.8 but only 60% are correct) or underconfident.
+
+- **Hard vs Soft Routing**: In MoE, each example is routed to experts. Hard routing: a single expert is selected (e.g., the one with highest gating weight, others ignored). Soft routing: all experts contribute proportionally to their gating weights. Hard routing is simpler and more interpretable but can waste expert capacity; soft routing shares information but can introduce calibration instability.
+
+- **Adversarial Reweighting (ACR)**: A min-max optimization where the "adversary" can perturb the routing weights (or the input features) to maximize the calibration error of the final aggregate prediction. The model is then trained to minimize this worst-case calibration error. This makes the final MoE robust to distribution shifts that the adversary could exploit.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
++-- Calibrate each expert separately +-- Calibrate each expert separately
+|   (e.g., temperature scaling)      |   (same step)
+|   then combine via gating (fixed)  |   then combine via gating (fixed)
++-- Assumed calibration transfers    |   but add: adversarial reweighting
+    across distributions             |   during training to enforce
+                                     |   aggregate calibration under shift
+                                     +-- Recognize: hard routing safe,
+                                         soft routing dangerous
+```
+
+From "calibrate experts, hope for the best" to "calibrate experts, then explicitly penalize worst-case aggregate miscalibration under shift," the core shift is recognition that the routing mechanism determines whether expert calibration is sufficient for aggregate calibration under distribution shift, and that soft routing requires distribution-aware regularization.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Calibration under shift is a pressing problem for deploying MoE in production (e.g., recommendation systems, medical diagnosis). The paper neatly isolates the routing mechanism as the key variable. It sits at a sweet spot between theory and practice.
+
+**Method maturity**: Clever insight. The adversarial reweighting is a natural extension of existing min-max calibration methods (e.g., distributionally robust optimization for calibration), but the novelty is applying it to the _routing weights_ specifically. The theoretical analysis (hard vs soft) is elegant and moves the understanding forward. Could there be a simpler approach? Possibly — e.g., post-hoc recalibration with a shift-robust temperature per expert — but the paper's method is more principled and addresses the distribution shift directly.
+
+**Experimental integrity**: Baselines are fair: they compare against standard calibration techniques (temperature scaling, isotonic regression) and against MoE variants without calibration. They test on synthetic shifts and real shifts (CIFAR-10-C, ImageNet-C, etc.). The numbers show consistent improvement in accuracy-calibration Pareto frontier. One red flag: the adversarial reweighting adds computational cost (inner loop), and they don't fully report training time. But for the claimed benefits, it's acceptable.
+
+**Writing quality**: The paper is well-structured but dense. The theoretical section (Theorem 1, Corollary) could be made more accessible with an intuitive explanation. The experimental section is thorough but the tables are crowded. If they added a single Figure showing the ECE vs accuracy tradeoff curves for hard vs soft routing with their method, that would greatly elevate clarity.
+
+**Verdict**: weak accept — a solid contribution that clarifies an important conceptual boundary and provides a practical fix, even if the method's complexity may limit adoption.
+
+## Takeaways
+
+1. **Check your routing type before trusting expert calibration**: When deploying MoE under distribution shift, if you use hard routing, calibrating each expert is sufficient for aggregate calibration (provided assignment boundaries don't shift). If you use soft routing, you must take additional steps.
+
+2. **Adversarial reweighting is a general recipe for robustifying any weighted ensemble**: You can apply the same min-max logic to any model that combines multiple predictors with data-dependent weights — not just MoE, but also attention mechanisms, mixture density networks, etc.
+
+3. **Empirical insight**: In their experiments, soft-routed MoE often _outperforms_ hard-routed in accuracy but _underperforms_ in calibration under shift. This tradeoff is not inherent — their method nearly closes the gap.
+:::
+
+:::zh
+**论文**: [2606.20544](https://arxiv.org/abs/2606.20544)
+**作者**: Gina Wong, Drew Prinster, Suchi Saria, Rama Chellappa, Anqi Liu
+**分类**: cs.AI, cs.LG
+
+## 缺口
+
+此前关于深度集成和混合专家模型（MoE）校准的研究表明，在_单个预测器_层面强制校准能提高整体的校准性和准确率（Tran等，2022；Popordanoska等，2024）。
+但在独立同分布（i.i.d.）场景或简单偏移下，这些结论成立。
+_路由_（MoE如何将样本分配给专家）与校准在分布偏移下的相互作用则未被探索。
+具体来说，当输入分布发生偏移时，专家级的校准是否足以保证聚合后的校准？这个保证是否依赖于路由机制（硬路由 vs 软路由）？这些都是未知的。
+论文将此确定为缺口。
+
+```
+[ASCII 逻辑拓扑]
++-------------------------------+
+|  前序工作：在独立同分布下      |
+|  校准每个专家对 MoE 有效       |
++-------+-----------------------+
+        |
+        | 分布偏移 ↓
+        v
++-----------------+   +-----------------+   +-----------------+
+| 假设：专家校准    |   | 方法：           |   | 证据：           |
+| 在任意偏移下      |-->| 1) 理论分析      |-->| 1) 硬路由的定理   |
+| 是否仍足够？      |   |    路由类型      |   | 2) 软路由反例    |
++-----------------+   | 2) 对抗重加权    |   | 3) 真实数据提升   |
+                        +--------+--------+   +--------+--------+
+                                 |                      v
+                                 v              +-------------------+
+                        +-------------+         | 结论：硬路由       |
+                        | 方法示意     |         | 校准安全；软路由   |
+                        | 见下文       |         | 需要显式分布偏移   |
+                        +-------------+         | 感知校准           |
+                                                  +-------------------+
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，我们知道校准专家在独立同分布下对 MoE 有帮助；
+之后，我们知道了在分布偏移下，仅靠专家校准只在_硬路由_ MoE 中足够，
+对于_软路由_ MoE，需要显式地对最坏偏移下的聚合校准误差施加惩罚。
+
+### 核心机制
+
+论文首先证明了一个定理：对于硬路由 MoE（每个输入只分配给一个专家），
+如果每个专家在其分布支持集上是校准的，那么在_不改变专家分配边界_的边际偏移下，
+整体模型仍然是校准的。
+对于软路由 MoE（每个输入得到多个专家的加权组合），即使专家本身完美校准，
+路由权重本身也会扭曲聚合置信度，导致偏移下的误校准。
+
+为了解决软路由 MoE 的问题，他们提出了**对抗校准重加权（ACR）**。
+思路：在训练过程中，模拟一种最坏情况的分布偏移——通过扰动路由权重或输入特征，
+使得_聚合输出_的校准误差最大化。
+然后，联合标准损失函数最小化这个最坏情况下的校准误差。
+这实现为极小极大优化：内循环找到一种放大误校准的权重重分配，
+外循环更新模型以减少该误差。
+
+```
+[ASCII 方法内部图]
+
+           软分配
+   输入 x ---->+----------+--> 门控网络 -> 权重 w_i(x)
+               | 专家      |     +---> 加权求和 -> p_agg = sum w_i * p_i
+               | f_1...f_k |     |
+               +----------+     +---> 对手扰动 w_i 以最大化 CalError(p_agg)
+                        |             |
+                        v             v
+                   分布内损失 + lambda * CalError_adv
+```
+
+**核喻**：想象一个专家委员会（每个个体模型），每位成员对某个话题给出一个置信度。
+在硬路由委员会中，只有一个人做决定——如果这个人校准良好（即当他 80% 确信时实际正确率也是 80%），
+那么委员会的最终回答自动校准，因为没有其他人的意见被混入。
+现在考虑软路由委员会：每个人给出置信度，然后一个“主持人”（门控网络）取加权平均。
+即使每个专家在自己的数据上各自校准，加权平均也可能偏离——因为主持人的权重依赖于输入，
+在分布偏移下，主持人可能出于错误的原因过度信任或低估某些专家。
+这篇论文的 ACR 方法增加了一个“怀疑审计员”，在看到加权平均后，
+审计员试图寻找一种会使预测最误校准的权重重分配（对手），
+然后委员会被训练得能够抵抗这种最坏情况下的重分配。
+这样，委员会就学会了不让主持人的偏见导致校准崩溃。
+
+### 关键概念
+
+- **校准（Calibration）**：如果一个模型在所有说“p 置信”的预测中，实际正确比例正好是 p，
+  那么该模型是校准的。例如，在所有输出 0.8 概率为类别 A 的样本中，正好 80% 是类别 A。
+  通常用期望校准误差（ECE）衡量。
+  在分布偏移下，模型可能变得系统性过度自信（例如预测 0.8 但只有 60% 正确）或缺乏自信。
+
+- **硬路由 vs 软路由**：MoE 中每个样本被路由到专家。
+  硬路由：只选择一个专家（例如门控权重最高的那个，忽略其他）。
+  软路由：所有专家按门控权重比例贡献。
+  硬路由更简单、可解释性更强，但可能浪费专家容量；软路由能共享信息但会引入校准不稳定性。
+
+- **对抗重加权（ACR）**：一种极小极大优化。
+  “对手”可以扰动路由权重（或输入特征）来最大化最终聚合预测的校准误差。
+  模型则被训练以最小化这个最坏情况下的校准误差。
+  这使得最终的 MoE 对对手可能利用的分布偏移具有鲁棒性。
+
+## 框架转变
+
+```
+之前（主流方法）：                 之后（本文方法）：
++-- 分别校准每个专家              +-- 分别校准每个专家
+|   (例如温度缩放)                 |   (相同步骤)
+|   然后用门控固定组合              |   然后用门控固定组合
++-- 假设校准可跨分布迁移           +-- 但增加：训练时进行对抗重加权
+                                    |   以强制在偏移下聚合校准
+                                    +-- 认识到：硬路由安全，
+                                        软路由危险
+```
+
+从“校准专家，求好运”到“校准专家，再显式地对偏移下最坏聚合误校准施加惩罚”，
+核心转变在于认识到路由机制决定了专家校准在分布偏移下是否足以保证整体校准，
+并且软路由需要分布感知的正则化。
+
+## 专家评审
+
+**选题眼光**：真实的缺口。
+分布偏移下的校准对于在生产环境中部署 MoE（例如推荐系统、医疗诊断）至关重要。
+论文巧妙地将路由机制作为关键变量分离出来。
+处于理论与实践之间的理想位置。
+
+**方法成熟度**：巧劲。
+对抗重加权是现有的极小极大校准方法（例如用于校准的分布鲁棒优化）的自然扩展，
+但新颖之处在于将其_专门应用于路由权重_。
+理论分析（硬 vs 软）优雅且推动了理解。
+有没有更简单的方法？可能有——例如，对每个专家使用偏移鲁棒温度进行事后再校准——但本文的方法更理论化地解决了分布偏移问题。
+
+**实验诚意**：基线公平。
+他们与标准校准技术（温度缩放、等渗回归）以及没有校准的 MoE 变体进行了比较。
+在合成偏移和真实偏移（CIFAR-10-C, ImageNet-C 等）上测试。
+数字显示准确率-校准帕累托边界有持续改进。
+一个值得警惕之处：对抗重加权增加了计算开销（内循环），他们没有完全报告训练时间。
+但鉴于声称的收益，这是可以接受的。
+
+**写作功力**：论文结构良好但密集。
+理论部分（定理1、推论）可以通过直观解释变得更加易读。
+实验部分详尽但表格拥挤。
+如果增加一个图显示硬路由与软路由在他们方法下的 ECE 对准确率的权衡曲线，将大大提升清晰度。
+
+**判决**：弱接收——
+一个扎实的贡献，澄清了一个重要的概念边界，并提供了一个实用的修复方法，
+尽管方法的复杂性可能限制其采用。
+
+## 要点总结
+
+1. **先检查你的路由类型，再相信专家校准**：在分布偏移下部署 MoE 时，
+   如果使用硬路由，校准每个专家对于聚合校准是足够的（前提是分配边界不发生偏移）。
+   如果使用软路由，必须采取额外措施。
+
+2. **对抗重加权是鲁棒化任何加权集成的通用配方**：
+   你可以将同样的极小极大逻辑应用于任何结合多个预测器且权重依赖数据的模型——
+   不仅仅是 MoE，还有注意力机制、混合密度网络等。
+
+3. **实证洞察**：在他们的实验中，软路由 MoE 在准确率上往往优于硬路由，
+   但在偏移下的校准上则不如。这种权衡并非固有——他们的方法几乎消除了这个差距。
+:::
