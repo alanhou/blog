@@ -1,0 +1,295 @@
+---
+title:
+  en: "AIR: Adaptive Interleaved Reasoning with Code in MLLMs"
+  zh: "AIR：多模态大模型中自适应交错代码推理"
+description:
+  en: "Existing MLLMs use code only for tool-based visual operations, failing at numerical computation. AIR adds reinforcement learning to teach MLLMs when and how to interleave reasoning with Python execution for complex visual math problems."
+  zh: "现有MLLMs仅将代码用于视觉工具操作，无法处理数值计算。AIR通过强化学习教会MLLM在复杂视觉数学问题中何时以及如何交错进行推理和代码执行。"
+date: 2026-06-23
+tags: ["arxiv", "ai", "cs.cv", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+
+---
+
+:::en
+**Paper**: [2606.23678](https://arxiv.org/abs/2606.23678)
+**Authors**: Cong Han, Xiaolan Lan, Haibo Qiu, Yujie Zhong
+**Categories**: cs.CV, cs.AI
+
+## The Gap
+
+Existing multimodal LLMs treat code as an external tool—they have a fixed set of "visual operations" (e.g., `crop`, `resize`, `segment`) and call them via predefined heuristics. This works for perception tasks like object detection but completely fails on tasks that require **numerical computation** from visual data. For example, given a photo of a geometry diagram, asking "what is the ratio of the shaded area to the total area?" triggers only visual parsing, no arithmetic reasoning. The community has been stuck on the tool-use paradigm from earlier papers like ViperGPT and CodeVQA.
+
+This paper identifies the gap: **adaptive interleaving**—the model must decide **when* to reason in natural language, *when* to execute Python, and *how to combine* them in a single trajectory—and then closes it with RL training.
+
+```
+[Problem] -> [Assumption] -> [Method] -> [Evidence] -> [Conclusion]
+  |              |              |            |              |
+  | MLLMs fail   | Code is only | Train MLLMs| Accuracy     | Adaptive
+  | on visual    | for fixed    | with RL on  | +6.1pp on   | interleaving
+  | numerical    | tool calls   | interleaved | benchmarks   | is learnable
+  | computation  | (heuristic)  | reasoning   | Tool use>95% |
+  v              v              v            v              v
+ [Limitation]  [False premise] [RL + reward] [Empirical]  [Claim accepted]
+```
+
+## The Increment
+
+**One sentence**: Before this paper, MLLMs could only call code for predefined visual operations; after this paper, MLLMs learn via RL to autonomously interleave natural-language reasoning with Python computation for any visual numerical task.
+
+### Core Mechanism
+
+The method (AIR) has three components chained together:
+
+1. **Cold-start data construction** (two-stage): First, collect image-question pairs from visual math datasets (e.g., geometry, charts). Second, use an LLM to generate a reasoning trajectory that **mixes** natural language steps with Python code snippets (e.g., "First, detect the radius from the image using tool-X, then `r = 5; area = math.pi ** r**2`"). Each trajectory is a chain of interleaved steps. These become the initial supervised fine-tuning data.
+
+2. **RL training with group-constrained reward**: A standard PPO variant is used, but the reward function is critical. For each generated trajectory, the model gets:
+   - +points for correct final answer.
+   - +points for each code execution that runs without error.
+   - **Group constraint**: if the model tries to skip code or hallucinate results, the group of related reasoning steps gets penalized. This prevents the model from faking arithmetic.
+
+3. **Adaptive tool invocation**: During inference, the model treats code execution as a "special token" that, when emitted, triggers the Python interpreter. The model learns when to use it—not via a fixed policy, but via the RL reward. So for a simple lookup question, it might skip code; for a complex calculation, it inserts code.
+
+```
+[Image] -> [MLLM Decoder] -> [step tokens] ---> [Python Executor] -> [Output]
+                |                   |                     ^
+                v                   v                     |
+          [Visual Features]   [Code Tokens] <---[Adapter/Reward]
+                              +[Text Tokens]          |
+                                                      v
+                                          [Group-Constrained Reward
+                                           computed after full trajectory]
+```
+
+**Structural metaphor**: Think of this as a **chef learning to cook a recipe that requires both taste judgment and precise measurements**.
+
+- The **MLLM** is the chef. The **image** is the dish on the counter.
+- Earlier methods (fixed tool-use) are like a chef who can only use a pre-set set of kitchen gadgets (blender, knife, oven) but never a measuring cup or scale. They can chop and blend visually, but if the recipe says "add 3.14 grams of salt", they guess.
+- **Cold-start data** is a cookbook with example recipes that show **when* to use the measuring cup (Python). The chef studies these.
+- **RL training** is the chef practicing the recipe while a mentor (reward function) watches. The mentor gives a thumbs-up if the dish tastes right (correct answer) **and* if every time the chef guessed a measurement instead of using the cup, the mentor points out the error. The **group constraint** means the mentor doesn't just check the final dish; they check that **each step* with a number was done with the cup, not by eye.
+- **Adaptive invocation** emerges: after enough practice, the chef automatically reaches for the cup when numbers are involved, and doesn't waste time when only visual properties matter.
+
+### Key Concepts
+
+- **Interleaved reasoning**: A sequence of steps where each step is either a natural-language statement or a Python code snippet. The model outputs both intermixed. Example: Step 1: "The rectangle's width is 12 cm." Step 2: `w = 12`. Step 3: "Height is 8 cm." Step 4: `h = 8`. Step 5: `area = w ** h`. Step 6: "So area is 96 cm²." The key is that code is not behind a special tool call; it's inline.
+
+- **Group-constrained reward**: A reward function that evaluates **subtrajectories* (groups of consecutive steps) rather than only the final answer. If the model generates code that tries to use a variable before defining it, the group containing that step gets a penalty. If the model writes a numeric answer without code for a computation that requires it, the group gets zero reward. This prevents the model from learning shortcuts that look like reasoning but skip real computation.
+
+- **Cold-start data**: Training data that bootstraps the model into the interleaved behavior before RL. Without it, the model never generates code interleaved with text (it has no such examples in its pretraining). The authors build it by using an LLM to "translate" existing visual reasonings into code-augmented versions.
+
+## Framework Shift
+
+```
+Before (mainstream approach):         After (this paper):
++---------------------+              +-----------------------+
+| Input image         |              | Input image           |
++----------+----------+              +----------+------------+
+           |                                    |
+           v                                    v
++---------------------+              +---------------------+
+| Visual Encoder      |              | Visual Encoder      |
++----------+----------+              +----------+------------+
+           |                                    |
+           v                                    v
++---------------------+              +---------------------+
+| Heuristic Scheduler |              | RL-trained Decoder  |
+| (always calls tool  |              | (decides per step)  |
+|  if visual task)    |              +----------+----------+
++----------+----------+                         |
+           |                           +---------+---------+
+           v                           |                   |
++---------------------+        +-------+--+         +------+------+
+| Fixed Visual Tool   |        | Text     |         | Python      |
+| (crop/segment etc)  |        | Reasoning|         | Execution   |
++----------+----------+        +----------+         +-------------+
+           |
+           v
++---------------------+
+| Text-only answer    |
++---------------------+
+```
+
+From a **fixed pipeline** (always code = visual operation, no computation) to an **adaptive interleaving** (code = arbitrary Python, invoked per step when needed for computation). The core shift is **from reactive tool use to proactive, learned orchestration** of reasoning and computation.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Numerical comprehension in visual input is a well-known weakness of current MLLMs, and the interleaving solution is timely after o3's paradigm shift. However, the paper limits itself to pure numerical computation tasks—what about tasks needing both visual and numerical reasoning? That's still a frontier, but the paper's scope is appropriately narrow.
+
+**Method maturity**: Clever insight, moderate engineering. The two-stage cold start is straightforward but effective. The group-constrained reward is the novel piece—it elegantly prevents lazy imitation. That said, the RL training details are vanilla PPO with minimal innovation; the real novelty is in the data and reward design. No simpler approach exists that achieves the same effect.
+
+**Experimental integrity**: Baselines are fair—they compare against a variety of prior tool-use methods (ViperGPT, CodeVQA) and also a zero-shot baseline. The 6.1 pp average improvement is statistically significant given the benchmark sizes. One red flag: all evaluation tasks are derived from the same family of visual math datasets used for cold-start data. Could the method overfit to the data distribution? The authors do not test on out-of-distribution tasks (e.g., OCR-based math). That limits confidence in generalization.
+
+**Writing quality**: The paper is clearly structured but dense. The "adaptive interleaving" concept is explained well. The biggest weakness: Section 4 (experiments) lacks ablation on the group-constrained reward—how much does it contribute compared to a simpler binary reward? Without that, the reader cannot judge whether the magic is in the reward or in the cold start. A single sentence added in the conclusion would solve this.
+
+**Verdict**: weak accept — the gap is real, the method is plausible, but the evaluation scope and missing ablation leave room for stronger evidence.
+
+## Takeaways
+
+- **Cold-start data recipe**: Use a strong LLM (GPT-4) to "translate" natural-language reasoning traces into interleaved code+text trajectories. This technique transfers to any domain where you want to teach a model to use code inline (e.g., chemistry question solving, legal computation).
+- **Group-constrained reward**: Instead of rewarding only the final answer, chunk the trajectory into logical groups and reward each group for consistency. This can be applied to other multi-step reasoning tasks (e.g., tool use, multi-hop QA) to prevent the model from skipping steps.
+- **Adaptive invocation**: Your model doesn't need a separate "tool selector" module; RL can learn when to invoke code as a token-level decision. This simplifies architectures.
+
+:::
+
+:::zh
+**论文**: [2606.23678](https://arxiv.org/abs/2606.23678)
+**作者**: Cong Han, Xiaolan Lan, Haibo Qiu, Yujie Zhong
+**分类**: cs.CV, cs.AI
+
+## 缺口
+
+当前多模态大模型（MLLM）把代码当作外部工具，只通过固定启发式规则调用预设的视觉操作（如裁剪、分割）。
+这在目标检测等感知任务中尚可，但遇到**需要从图像中提取数值并进行计算**的任务（例如几何图中求阴影面积比）就完全失灵。
+之前的 ViperGPT、CodeVQA 等工作停留在"代码=工具调用"的范式上，从未想过让模型在推理过程中自主切换文字推理和代码执行。
+
+本文指出的缺口很明确：模型缺少**自适应交错**能力——即何时用语言推理、何时执行Python、如何将两者串联成一个连贯轨迹。
+作者通过强化学习训练填补了这个缺口。
+
+```
+[问题] -> [假设] -> [方法] -> [证据] -> [结论]
+  |          |         |         |         |
+  | MLLM 在   | 代码只   | 用强化学  | 准确率   | 自适应交
+  | 视觉数值  | 用于固   | 习训练   | 提升     | 错可达
+  | 计算上    | 定工具   | 交错推理 | 6.1个    | 成可训
+  | 失败      | 调用     | 轨迹    | 百分点   | 练技能
+  v          v         v         v         v
+ [局限]    [错误前提]  [RL+奖励]   [实证]   [主张被认可]
+```
+
+## 增量
+
+**一句话**：在这篇论文之前，MLLM 只能调用代码做固定的视觉操作；在这篇论文之后，MLLM 通过强化学习学会自主地在自然语言推理和 Python 计算之间交错切换，解决任何视觉数值问题。
+
+### 核心机制
+
+AIR 方法包含三个串联组件：
+
+1. **冷启动数据构建（两阶段）**：首先从视觉数学数据集（几何、图表）中收集图像-问题对。
+   然后用一个强LLM把每个问题的自然语言推理轨迹**翻译**成交替出现文本和Python代码的轨迹
+   （例如："第一步，从图像中检测半径；第二步，`r = 5; area = math.pi * r**2`"）。
+   这些轨迹成为初始的有监督微调数据。
+
+2. **组约束奖励的强化学习训练**：采用标准 PPO 变体，但奖励函数是关键。
+   每个生成的轨迹会获得：
+   - 最终答案正确加分。
+   - 每次代码执行无错误加分。
+   - **组约束**：如果模型试图跳过代码或凭空编算数值，它所在的推理步组会受惩罚。
+   这防止模型假装做了计算。
+
+3. **自适应工具调用**：推理时，模型把"执行代码"当作一个特殊 token——一旦输出这个 token，就触发 Python 解释器。
+   模型通过 RL 学会何时使用，而不是靠固定规则。
+   简单查图问题可能不用代码，复杂计算则插入代码。
+
+```
+[图像] -> [MLLM 解码器] -> [步 token] ---> [Python 执行器] -> [输出]
+                |                   |                     ^
+                v                   v                     |
+          [视觉特征]          [代码 token] <---[适配器/奖励]
+                            +[文本 token]                |
+                                                         v
+                                            [组约束奖励在整条轨迹
+                                             生成后计算]
+```
+
+**结构性比喻（核喻）**：把这想象成一位**厨师学习做一道既需要味觉判断又需要精确称量的菜**。
+
+- **MLLM** 是厨师，**图像**是台上的菜。
+- 之前的方法（固定工具调用）就像一位只会用固定厨房设备（搅拌机、刀、烤箱）但从不碰量杯或台秤的厨师。
+  他能切、能搅拌，但食谱说“加3.14克盐”时，他只能凭感觉猜。
+- **冷启动数据**就是一本菜谱例子，展示了**何时*该用量杯（Python）。
+  厨师照着学。
+- **强化学习训练**是厨师实际练习，一位导师（奖励函数）在旁边看。
+  导师在最后菜味道对了（正确答案）时给赞，**而且**如果厨师在需要用量杯的步骤选择了凭感觉估计，导师会指出错误。
+  **组约束**意为导师不只检查最终菜，还要检查**每一步*涉及数值的时候是否用了量杯。
+- **自适应调用**自然涌现：经过充分练习，厨师一遇到数字就自动去拿量杯，而只涉及视觉特征时就跳过。
+
+### 关键概念
+
+- **交错推理**：由自然语言语句和 Python 代码片段交替组成的一串步骤。
+  模型同时输出两种内容。
+  例子：步骤1："矩形的宽是12厘米。"
+  步骤2：`w = 12`
+  步骤3："高是8厘米。"
+  步骤4：`h = 8`
+  步骤5：`area = w * h`
+  步骤6："所以面积是96平方厘米。"
+  关键是代码不是通过专门的工具调用接口，而是内联嵌入。
+
+- **组约束奖励**：一种奖励函数，它评估**子轨迹*（连续步骤组成的组）而不是只评估最终答案。
+  如果模型生成的代码使用了未定义的变量，包含该步骤的组被扣分。
+  如果模型在需要计算的步骤直接写出数值而没有对应代码，该组得分为零。
+  这防止模型学会看起来像推理实则跳过真实计算的捷径。
+
+- **冷启动数据**：在 RL 之前用来引导模型进入交错行为模式的数据。
+  没有它，模型从没在训练中见过代码与文本交错（预训练中没有）。
+  作者用一个LLM把现有的视觉推理过程"翻译"成代码增强版本。
+
+## 框架转变
+
+```
+之前（主流方法）：               之后（本文方法）：
++---------------------+         +-----------------------+
+| 输入图像            |         | 输入图像               |
++----------+----------+         +----------+------------+
+           |                              |
+           v                              v
++---------------------+         +-----------------------+
+| 视觉编码器          |         | 视觉编码器             |
++----------+----------+         +----------+------------+
+           |                              |
+           v                              v
++---------------------+         +-----------------------+
+| 启发式调度器        |         | RL 训练的解码器       |
+| (如果是视觉任务     |         | (每步自主决策)        |
+|  就总是调用工具)    |         +----------+------------+
++----------+----------+                    |
+           |                      +--------+--------+
+           v                      |                  |
++---------------------+    +-----+----+     +------+------+
+| 固定视觉工具        |    | 文本推理  |     | Python      |
+| (裁剪/分割等)        |    |         |     | 执行         |
++----------+----------+    +---------+     +-------------+
+           |
+           v
++---------------------+
+| 纯文本答案          |
++---------------------+
+```
+
+从**固定流水线**（代码=视觉操作，不做计算）到**自适应交错**（代码=任意Python，按需每步调用进行计算的）。
+核心转变是**从反应式的工具使用到主动的、学习到的推理-计算编排**。
+
+## 专家评审
+
+**选题眼光**：真缺口。视觉输入中的数值理解是当前 MLLM 的明显弱点，而且在 o3 的范式转变后交错方案正当时。
+不过论文只限定在纯数值计算任务——需要同时视觉和数值推理的任务呢？
+这仍是前沿，但论文的范围适当地窄。
+
+**方法成熟度**：巧劲与中等工程。两阶段冷启动直截了当有效。
+组约束奖励是新颖点——优雅地防止了懒惰模仿。
+然而，RL 训练细节是标准 PPO，创新不多；真正的创新在数据和奖励设计。
+没有其他更简单的方法能达到同样效果。
+
+**实验诚意**：基线公平——与 ViperGPT、CodeVQA 等多种前期工具使用方法以及零样本基线比较。
+给定基准规模，6.1 个百分点的平均提升在统计上显著。
+一个警示：所有评估任务都来自与冷启动数据同一家族的视觉数学数据集。
+方法可能过拟合该数据分布？
+作者没有测试分布外任务（例如基于 OCR 的数学题）。
+这限制了对泛化能力的信心。
+
+**写作功力**：结构清晰但密集。"自适应交错"概念解释得好。
+最大弱点：实验部分缺少对组约束奖励的消融——相比简单二元奖励贡献了多少？
+没有这个，读者无法判断魔力在奖励还是冷启动。
+结论中加一句话就能解决。
+
+**判决**：弱接收 — 缺口真实，方法合理，但评估范围和数据缺失的消融使证据力度不足。
+
+## 要点总结
+
+- **冷启动数据配方**：用一个强LLM（如GPT-4）把自然语言推理轨迹"翻译"成交错代码+文本轨迹。
+  这个技巧可迁移到任何你想教模型内联使用代码的领域（如化学问题求解、法律计算）。
+- **组约束奖励**：不要把奖励只放在最终答案上；把轨迹分成逻辑组并对每组的一致性给予奖励。
+  这可以应用于其他多步推理任务（如工具使用、多跳问答）以防止模型跳过步骤。
+- **自适应调用**：你的模型不需要单独的"工具选择器"模块；RL 可以在 token 级别学会何时调用代码。
+  这简化了架构。
+:::

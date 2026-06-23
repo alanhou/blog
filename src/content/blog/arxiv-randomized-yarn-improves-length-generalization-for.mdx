@@ -1,0 +1,303 @@
+---
+title:
+  en: "Randomized YaRN: Teaching LLMs to Reason Over Lengths They've Never Seen"
+  zh: "随机YaRN：让大语言模型学会在未见过的超长文本中推理"
+description:
+  en: "A training trick that combines randomized positional encoding with a length curriculum, letting short-context models generalize to 16x longer sequences without extra long-data training."
+  zh: "一种把随机位置编码和长度课程结合起来的训练技巧，让短上下文模型在没有长文本训练的情况下，也能在16倍长的序列上推理。"
+date: 2026-06-23
+tags: ["arxiv", "ai", "cs.cl"]
+image: "/arxiv-visuals/randomized-yarn-improves-length-generalization-for/HeroScene.png"
+---
+
+![Hero diagram](/arxiv-visuals/randomized-yarn-improves-length-generalization-for/HeroScene.png)
+
+
+
+:::en
+**Paper**: [2606.23687](https://arxiv.org/abs/2606.23687)
+**Authors**: Manas Mehta, Fangcong Yin, Greg Durrett
+**Categories**: cs.CL
+
+## The Gap
+
+Existing work on length generalization has a ceiling problem.  Standard fine-tuning with rotary positional encoding (RoPE) works well on training-length sequences, but fails catastrophically on longer ones because the model never sees out-of-distribution (OOD) position values.  YaRN (a RoPE extension) improves extrapolation by simply scaling position frequencies, but still: if you only train on 8K contexts, the model's attention patterns have never needed to handle positions beyond that range.  Post-training methods like positional interpolation compress positions back into the training range, losing high-frequency (local) detail.  The community has been stuck between "train on long data (expensive)" and "accept degrading performance on long sequences (bad)".
+
+This paper asks: *What if we could expose a model to long-range position signals while still training on cheap short data?*  Their answer: randomize the position assignments within each training batch, so a 4K-length input might get positions sampled from a 64K range, forcing the model to learn robust attention patterns that work for arbitrary sequence lengths.
+
+```
+[Problem: LLMs fail on long contexts]                  [Assumption: OOD positions are the bottleneck]
+         |                                                          |
+         v                                                          v
+[Mainstream: train on short, fail on long]         [YaRN: scale positions linearly, still fails beyond ~2x]
+         |                                                          |
+         +-------------------[Gap: no method teaches OOD position robustness without long data]---+
+                                                     |
+                                                     v
+                                          [Method: Randomized YaRN]
+                                          - assign random positions from large range to short inputs
+                                          - use length curriculum to gradually increase the range
+                                                     |
+                                                     v
+                                          [Evidence: 2 benchmarks, 16K-128K, outperforms FT & YaRN]
+                                                     |
+                                                     v
+                                          [Conclusion: training with randomized positional distribution is a recipe for length generalization]
+```
+
+## The Increment
+
+**One sentence**: Before this paper, length generalization required either expensive long-sequence training or accepting degraded performance at >2x extrapolation; after this paper, you can train on 8K data and get non-trivial reasoning performance at 128K by exposing the model to randomized OOD positions during training.
+
+### Core Mechanism
+
+The method has three components that work together: a **position sampling scheme**, a **length curriculum**, and a **YaRON base position encoding**.
+
+First, during training, each input sequence of actual length L is assigned a "virtual length" V sampled from a uniform range [L, M], where M is the maximum virtual length for that training stage.  The token positions are then scaled by (V / L) and fed into YaRON's position encoding.  This means a 4K-token input might get positions that span 0 to 32K, forcing the attention mechanism to handle distances it has never seen.
+
+Second, a **length curriculum** gradually increases M across training steps.  Early in training, M might be set to 8K; later, it increases to 64K or 128K.  This prevents the model from being overwhelmed by extreme OOD positions before it has learned basic attention patterns.
+
+Third, the YaRON base frequency scaling is kept constant throughout, providing the backbone for extrapolation.  The randomization essentially acts as a data augmentation that forces the model to learn position-agnostic attention patterns—patterns that depend only on relative distances, not on absolute position magnitudes.
+
+```
+[Training Data: short sequences, L=2K to 8K]
+         |
+         v
+[Position Sampler: sample V ~ Uniform(L, M)]
+   - M starts small (e.g., 8K), grows via curriculum to 128K
+   - scale: positions *= V / L
+         |
+         v
+[YaRON Encoding: apply base-scaled RoPE to scaled positions]
+   - base frequency scaling fixed (e.g., 1/10000^(2i/d))
+         |
+         v
+[Transformer: processes position-scaled sequence]
+   - attention patterns forced to handle OOD distances
+   - gradients update weights towards length-robust representations
+         |
+         v
+[Loss: standard cross-entropy on short-context labels]
+         |
+         v
+[Gradually increase M: length curriculum]
+   - schedule: step-wise or cosine decay of "how far out to sample"
+```
+
+Think of it like **training a pilot in a flight simulator before letting them fly a real plane**.  A traditional pilot learns to fly only within the training airport's airspace (say, a 10 km radius).  When sent to a different airport, they panic because the landmarks are all different and way farther apart.  YaRN is like giving them a map that stretches the old landmarks to cover the new airport—helpful, but the relative positions are still confusing.  The randomized training in this paper is like running the simulator with randomly generated landscapes: mountains, oceans, deserts, all at different scales.  By forcing the pilot (model) to land safely in randomly scaled virtual environments (OOD position ranges), they learn to focus on **relative navigation cues* (relative attention patterns) rather than memorized landmark positions (absolute position biases).  The length curriculum is the training schedule: start with landscapes that are only slightly larger than the familiar airport, then gradually increase to alien worlds.
+
+### Key Concepts
+
+- **Length Generalization**: A model's ability to perform reasoning on sequences longer than those seen during training.  This is not about memorization; it's about the underlying attention and position mechanisms being robust enough to handle unseen distances.  Example: a model trained on 8K-long Wikipedia articles should be able to answer a question that requires looking at token #10,000 and token #12,000 (a 2K relative distance it has seen, but an absolute position >8K it hasn't).  Most models fail here because they overfit to absolute position ranges, using them as "breadcrumbs" rather than learning general relative distance computations.
+
+- **YaRON (Yet Another RoPE NTK-aware scaling)**: A variant of Rotary Position Encoding (RoPE) that adjusts the frequency of position basis functions.  Standard RoPE assigns each dimension a base frequency (like 1/10000^(2i/d)), and positions are computed as rotations.  YaRON modifies these frequencies to "stretch" the encoding space, so that a position value of, say, 64000 maps to the same rotation angle that 8000 would have in standard RoPE.  This lets the model reinterpret unseen large positions as "compressed" versions of known small positions.  Think of it like switching a ruler from centimeters to kilometers: the physical distance might be huge, but the number of ticks the model sees stays manageable.  The key insight in this paper is that YaRON provides a good **basis* for extrapolation, but still needs the *training exposure* to OOD positions that randomized sampling provides.
+
+- **Length Curriculum**: A training schedule where the maximum virtual length M is gradually increased.  This is analogous to how you learn a new language: start with single words (short context), then short sentences (medium), then paragraphs (long).  The curriculum prevents "catastrophic forgetting" of short-range patterns while slowly expanding the model's comfort zone.  In this paper, M starts at 8K (the max training length) and increases to 128K over a few hundred training steps.  The rate of increase is a hyperparameter—too fast, and the model gets confused; too slow, and training time grows.
+
+## Framework Shift
+
+```
+Before (mainstream approach):                    After (this paper):
+[Train on short data]                            [Train on short data, but...]
+   |                                                  |
+   v                                                  v
+[Standard RoPE/YaRON on actual positions]        [Randomized YaRON on scaled positions]
+   |                                                  |
+   v                                                  v
+[Attention sees only L-length positions]         [Attention sees positions up to M, M >> L]
+   |                                                  |
+   v                                                  v
+[Test on long data: OOD positions trigger        [Test on long data: model has seen scattered
+ catastrophic failure]                             OOD positions, generalizes better]
+                                                      |
+                                                      v
+                                                  [Length curriculum gradually increases M]
+```
+
+**From static position assignment to randomized position exposure**, the core shift is: don't let the model memorize "normal" absolute positions; instead, force it to learn position-agnostic attention by seeing randomly scaled versions of the same short inputs.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap with high practical relevance.  The "train short, test long" scenario is the default for most LLM applications—few teams can afford to pre-train on 128K sequences.  The paper sits at the intersection of position encoding research (YaRN, PI, etc.) and length generalization, which is one of the hottest topics in LLM deployment.  The approach is timely, not manufactured.
+
+**Method maturity**: It's a clever insight wrapped in a straightforward implementation—randomized position scaling during training is something any team with a few GPUs could try.  There's no complex architecture change.  That said, the paper doesn't deeply explore **why* randomization works (is it the diversity of absolute positions?  The relative distance variety?  Something else?).  There are simpler alternatives (e.g., random scaling of attention logits) that might achieve similar effects and are worth considering.  Overall, the method is a neat trick but not a breakthrough—it's "good engineering" more than "deep science."
+
+**Experimental integrity**: The baselines are fair: standard fine-tuning, YaRON only, and a length-curriculum-only ablation.  The choice of benchmarks (BABILong for synthetic reasoning, MRCR for realistic coreference) covers both controlled and realistic evaluation.  The numbers are clean: for BABILong, Randomized YaRON improves accuracy from ~30% to ~60% at 128K compared to YaRON alone.  That's a big delta.  However, I have two concerns: (1) they only test on two benchmarks—is this robust across diverse tasks like long-document QA or summarization? (2) the 8K training limit means the model never sees true long-range dependencies; the improvement might be from better local pattern generalization rather than true long-range reasoning.  No red flags, but the experimental scope is narrow.
+
+**Writing quality**: The paper is clearly written, but the "related work" section is thin—almost no discussion of why other interpolation methods (e.g., Positional Interpolation, NTK-aware scaling) fail where this succeeds.  The ablation study on curriculum schedule is good, but the analysis of **why* randomization works is shallow.  If the authors added a section on "attention pattern analysis" showing that randomized training makes attention heads more uniformly distributed across positions, the paper would jump from "good" to "great."  As it stands, the paper is a solid empirical contribution but leaves mechanistic understanding as future work.
+
+**Verdict**: weak accept — a practical, well-executed idea that fills a clear gap, but lacks deep mechanistic insight and narrow experimental scope.
+
+## Takeaways
+
+1. **Randomized position scaling is a cheap drop-in augmentation**: If you're training an LLM with RoPE or YaRON, just add a random position scaling factor during training.  It requires no data changes (same short inputs) and minimal code changes (one line of position scaling before the encoding layer).  This should generalize beyond the specific method here—try it for any sequence model that needs length robustness.
+2. **Length curriculum matters more than scaling factor**: The paper shows that a curriculum (gradually increasing M) is essential; a fixed large M from the start hurts performance.  This principle—don't shock the model with OOD signals too early—applies broadly to any form of data augmentation that extends the input distribution.
+3. **The "short data, long generalization" framing is a blueprint**: For practitioners, the key insight is that you don't need long-sequence data to achieve length generalization; you need to simulate the **positional statistics* of long sequences within your short-data training.  This idea could be extended to other distribution shifts (e.g., simulating OOD vocabulary distributions by randomly masking tokens).
+:::
+
+:::zh
+**论文**: [2606.23687](https://arxiv.org/abs/2606.23687)
+**作者**: Manas Mehta, Fangcong Yin, Greg Durrett
+**分类**: cs.CL
+
+## 缺口
+
+现有关于长度泛化的研究遇到了一个天花板问题。
+标准的旋转位置编码（RoPE）微调在训练长度上效果很好，但一旦遇到更长的序列就彻底崩溃，因为模型从未见过超出训练范围的位置值。
+YaRN（一种RoPE的延伸）通过缩放位置频率改善了外推能力，但依然存在核心问题：如果你只在8K上下文的训练数据上训练，模型的注意力模式就从未需要处理超过这个范围的位置。
+后训练方法如位置插值，把超出范围的位置压缩回训练区间，但这会丢失高频（局部）细节。
+社区长期以来陷入两难：要么用昂贵的超长序列训练，要么接受在长序列上性能下降。
+
+这篇论文问了另一个问题：*我们在用廉价短数据训练时，能不能提前让模型看到远距离的位置信号？*
+答案是：在每批训练数据中随机分配位置值，让一个4K长度的输入可能用64K范围内的位置编码，强迫模型学会对任意序列长度都有效的稳健注意力模式。
+
+```
+[问题：LLMs在长文本上表现崩溃]                       [假设：OOD位置是瓶颈]
+          |                                                        |
+          v                                                        v
+[主流：短训练，长测试失败]                       [YaRN：线性缩放位置，但超2倍仍失败]
+          |                                                        |
+          +------------------[缺口：没有方法能在无长数据下教授OOD位置鲁棒性]---+
+                                                      |
+                                                      v
+                                           [方法：Randomized YaRN]
+                                           - 从大范围随机分配位置给短输入
+                                           - 用长度课程逐步扩大范围
+                                                      |
+                                                      v
+                                           [证据：2个基准测试，16K到128K，优于FT和YaRN]
+                                                      |
+                                                      v
+                                           [结论：用随机位置分布训练是实现长度泛化的有效配方]
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，实现长度泛化要么需要昂贵的超长序列训练，要么接受在超过训练长度2倍后性能急剧下降；
+这篇论文之后，你可以在8K的短数据上训练，通过在训练时随机暴露OOD位置，获得在128K长度上仍有意义的推理性能。
+
+### 核心机制
+
+该方法由三个协同工作的组件构成：一个**位置采样方案**、一个**长度课程**和基础的**YaRON位置编码**。
+
+首先，在训练时，每个实际长度为L的输入序列会被赋予一个"虚拟长度"V，从均匀范围[L, M]中采样，其中M是该训练阶段的最大虚拟长度。
+然后，token的位置按(V / L)的比例缩放，输入到YaRON的位置编码中。
+这意味着一个4K token的输入，其位置可能遍布0到32K的范围，强迫注意力机制处理它从未见过的距离。
+
+其次，**长度课程**在整个训练过程中逐步增加M。
+训练早期M可能设为8K，后期增加到64K或128K。
+这防止了模型在学会基本注意力模式之前就被极端的OOD位置淹没。
+
+第三，YaRON的基础频率缩放在整个过程中保持恒定，为外推提供主干。
+随机化相当于一种数据增强，迫使模型学到与位置无关的注意力模式——这些模式只依赖相对距离，而非绝对位置的大小。
+
+```
+[训练数据：短序列，L=2K到8K]
+         |
+         v
+[位置采样器：采样 V ~ Uniform(L, M)]
+   - M从小开始(如8K)，通过课程增长到128K
+   - 缩放：位置 *= V / L
+         |
+         v
+[YaRON编码：对缩放后的位置应用基频缩放的RoPE]
+   - 基频缩放固定(如 1/10000^(2i/d))
+         |
+         v
+[Transformer：处理位置缩放后的序列]
+   - 注意力模式被迫处理OOD距离
+   - 梯度更新权重，朝向长度鲁棒的表示
+         |
+         v
+[损失：短上下文标签的标准交叉熵]
+         |
+         v
+[逐步增大M：长度课程]
+   - 调度：逐步或余弦衰减"采样多远"的程度
+```
+
+我们可以把这种方法比作**让飞行员先在模拟器中驾驶各种随机地形，再开真实飞机**。
+传统飞行员只在训练机场的空域（比如半径10公里）内学习飞行。
+被派到另一个机场时，他们会因为地标完全不同且距离更远而慌乱。
+YaRN相当于给他们一张把旧地标拉伸到覆盖新机场的地图——有帮助，但相对位置仍然混乱。
+这篇论文的随机训练，相当于用随机生成的地形（山川、海洋、沙漠、不同尺度）运行模拟器。
+通过在随机缩放的虚拟环境（OOD位置范围）中强迫飞行员（模型）安全着陆，他们学会了聚焦于*相对导航线索*（相对注意力模式），而不是记住的地标位置（绝对位置偏差）。
+长度课程就是训练计划：从略微大于熟悉机场的地形开始，逐步扩展到异星世界。
+
+### 关键概念
+
+- **长度泛化**：模型对训练期间未见过的更长序列进行推理的能力。
+这不关乎记忆，而是底层的注意力和位置机制是否足够稳健，能处理未见的距离。
+举例：一个在8K长的维基百科文章上训练的模型，应该能回答需要查看第10000个token和第12000个token的问题（相对距离2000是见过的，但绝对位置超过8000是没见过的）。
+大多数模型在这里失败，因为它们过度拟合了绝对位置范围，把位置当作"面包屑"来记忆，而不是学习通用的相对距离计算。
+
+- **YaRON (Yet Another RoPE NTK-aware scaling)**：旋转位置编码（RoPE）的一种变体，调整位置基函数的频率。
+标准RoPE给每个维度分配一个基频（比如 1/10000^(2i/d)），位置通过旋转角度计算。
+YaRON修改这些频率来"拉伸"编码空间，使位置值64000映射成标准RoPE中8000的旋转角度。
+这让模型把未见过的大位置重新解释为已知小位置的"压缩版"。
+想象一下把尺子从厘米换成公里：物理距离可能很大，但模型看到的刻度数量仍然是可管理的。
+这篇论文的关键洞察是：YaRON提供了外推的*基础*，但仍然需要随机采样提供的OOD位置*训练暴露*。
+
+- **长度课程**：一种训练调度，逐步增大最大虚拟长度M。
+这类似于学习语言的过程：从单个词（短上下文）开始，到短句（中等），再到段落（长）。
+课程防止"灾难性遗忘"短距离模式，同时逐步扩展模型的舒适区。
+本文中，M从8K（最大训练长度）开始，在几百个训练步内增加到128K。
+增大速率是一个超参数——太快会让模型困惑，太慢则增加训练时间。
+
+## 框架转变
+
+```
+之前（主流方法）：                               之后（本文方法）：
+[短数据训练]                                      [短数据训练，但是...]
+   |                                                  |
+   v                                                  v
+[标准RoPE/YaRON用于实际位置]                    [随机YaRON用于缩放后的位置]
+   |                                                  |
+   v                                                  v
+[注意力只看到L长度的位置]                       [注意力看到M位置，M >> L]
+   |                                                  |
+   v                                                  v
+[长数据测试：OOD位置导致灾难性失败]            [长数据测试：模型见过散布的OOD位置，泛化更好]
+                                                      |
+                                                      v
+                                                  [长度课程逐步增加M]
+```
+
+**从静态位置分配到随机位置暴露**，核心转变是：不让模型记忆"正常"的绝对位置，而是通过让同一个短输入看到随机缩放的不同版本，强迫它学习与位置无关的注意力。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实的、有高度实际意义的缺口。
+"短训练、长测试"是大多数LLM应用的默认场景——很少有团队能在128K序列上预训练。
+该论文处于位置编码研究（YaRN、PI等）和长度泛化的交叉点，后者是LLM部署中最热门的话题之一。
+方法及时，非人造。
+
+**方法成熟度**: 巧思包装在简单的实现里——在训练时做随机位置缩放，任何有几张GPU的团队都可以尝试。
+不需要复杂的架构改动。
+但是，论文没有深入探索*为什么*随机化有效（是绝对位置的多样性？相对距离的多样性？还是别的？）。
+存在更简单的替代方案（如随机缩放注意力logits），可能达到类似效果，值得考虑。
+总体上，这是一个精巧的技巧而非突破——是"好工程"而非"深科学"。
+
+**实验诚意**: 基线设置公平：标准微调、仅YaRON、仅长度课程（消融实验）。
+基准选择合理：BABILong用于合成推理，MRCR用于现实核心指代消解，覆盖了受控和真实评估两种场景。
+数字干净：在BABILong上，Randomized YaRON在128K时准确率从~30%提升到~60%（相比纯YaRON），差异显著。
+但有两个隐忧：(1) 只测了两个基准——在不同任务（如长文档问答或摘要）上是否同样鲁棒？(2) 8K训练限制意味着模型从未看到真正的长距离依赖，性能提升可能来自更好的局部模式泛化而非真正的长距离推理。
+没有红旗，但实验范围偏窄。
+
+**写作功力**: 文章写得清晰，但"相关工作"部分薄弱——几乎没有讨论为什么其他插值方法（如Positional Interpolation、NTK-aware scaling）无效而本方法有效。
+课程调度的消融实验做得好，但关于随机化*为何*有效的分析较浅。
+如果作者能加一个"注意力模式分析"部分，展示随机化训练使注意力头在位置上分布更均匀，论文会从"好"升到"优秀"。
+目前，文章是扎实的实证贡献，但把机制理解留给了未来工作。
+
+**判决**: 弱接收 — 实用、执行不错的想法，填补了清晰缺口，但缺乏深入的机制洞察，实验范围偏窄。
+
+## 要点总结
+
+1. **随机位置缩放是一种廉价即插即用的增强**：如果你在用RoPE或YaRON训练LLM，只需在训练时加一个随机位置缩放因子。
+不需要改变数据（同一个短输入）且只需最少的代码改动（在编码层前加一行位置缩放）。
+这应该能推广到本文方法之外——任何需要长度鲁棒性的序列模型都值得一试。
+2. **长度课程比缩放因子更重要**：论文表明课程（逐步增大M）是关键的；从一开始就用大的固定M会损害性能。
+这个原则——不要太早用OOD信号冲击模型——适用于任何扩展输入分布的增强方法。
+3. **"短数据、长泛化"的框架是一个蓝图**：对从业者来说，关键洞察是：你不需要长序列数据来实现长度泛化；你只需要在短数据训练中**模拟长序列的位置统计特性*。
+这个思路可以扩展到其他分布偏移（比如通过随机掩码token来模拟未见过的词汇分布）。
+:::
