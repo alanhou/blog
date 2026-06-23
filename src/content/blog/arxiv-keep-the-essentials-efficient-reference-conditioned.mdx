@@ -1,0 +1,296 @@
+---
+title:
+  en: "Keep The Essentials: Efficient Reference Conditioned Generation via Token Dropping"
+  zh: "守住精华：基于Token丢弃的高效参考条件生成"
+description:
+  en: "This paper introduces Sparse Context, a method that drops redundant reference tokens during diffusion image generation, achieving 2-4x speedup without quality loss."
+  zh: "本文提出Sparse Context方法，通过丢弃冗余参考令牌实现扩散图像生成加速，可提升2-4倍速度且不损失质量。"
+date: 2026-06-23
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.23682](https://arxiv.org/abs/2606.23682)
+**Authors**: Rishubh Parihar, Ayush Raina, R. Venkatesh Babu, Or Patashnik
+**Categories**: cs.CV
+
+## The Gap
+
+Reference-based diffusion models (e.g. IP-Adapter, ReferenceNet) allow highly controllable image generation by injecting tokens from a reference image into the diffusion process. However, they treat reference features as dense token grids (e.g. 16x16 = 256 tokens per image) and feed all tokens into cross-attention layers. This makes inference cost scale linearly with the number of references—a 2-reference generation costs twice as much as a single-reference one. While prior work has extensively studied efficiency for text-conditioned diffusion (e.g. pruning, distillation), the unique setting of reference-based generation has been largely ignored. The key oversight is that most reference tokens carry redundant or irrelevant information for the target generation, especially in tasks like subject-driven generation where only the object region matters. This paper identifies that dropping a large fraction of reference tokens (up to 75%) barely hurts quality, and builds a practical method around this observation.
+
+```
++-----------------------+       +----------------------------+
+| Problem: Linear cost  | ----> | Assumption: Most ref       |
+| growth with number of |       | tokens are redundant;      |
+| reference images in   |       | dropping them preserves    |
+| cross-attention       |       | generation capability      |
++-----------------------+       +----------------------------+
+          |                              |
+          v                              v
++-----------------------+       +----------------------------+
+| Method: Sparse Context| ----> | Evidence: 4x speedup for   |
+| (random drop training |       | multi-ref generation, 2x   |
+| + task-aware selection|       | for single ref, no quality |
+| at inference)         |       | degradation in metrics     |
++-----------------------+       +----------------------------+
+          |
+          v
++-----------------------+
+| Conclusion: Reference |
+| token redundancy can  |
+| be exploited to make  |
+| generation efficiency |
+| scale sub-linearly    |
++-----------------------+
+```
+
+## The Increment
+
+**One sentence**: Before this paper, every generation with reference images paid the full token cost; after this paper, we can routinely drop 75% of reference tokens with a simple fine-tuning step, maintaining quality while cutting inference time by 2-4x, and adapt the token budget to the task on the fly.
+
+### Core Mechanism
+
+Sparse Context operates in two phases: training and inference. During training, the entire diffusion model (including cross-attention layers) is fine-tuned with random token dropping at different ratios. For each training step, a random subset of reference tokens (e.g. 25%–100% of the original grid) is retained, and the model learns to predict the noise conditioned on this partial context. This forces the cross-attention mechanism to become robust to missing tokens—it cannot rely on any specific token always being present.
+
+At inference time, the user can choose a token budget (e.g., keep only 64 out of 256 tokens) and a selection strategy. The selection strategy is task-aware: for spatially-aligned editing (e.g., face swapping), tokens are chosen based on their spatial location in the reference image (e.g., keep tokens inside a mask); for subject-driven generation (e.g., "a dog wearing that sweater"), tokens are selected by the highest cross-attention scores from the original full-token run (a cheap pre-pass). These selected tokens are then used as the sole context for cross-attention in the denoising U-Net, drastically reducing the key/value sequence length.
+
+```
+Reference Image
+       |
+       v
+Image Encoder -> Dense Token Grid (256 x D)
+       |
+       v
++-----------------------------------------+
+| Token Dropping Module                   |
+|    Training: random mask (ratio r)      |
+|    Inference: task-aware selection      |
++-----------------------------------------+
+       |
+       v (only kept tokens, e.g. 64)
+       |
+       v
++-----------------------------------------+
+| Cross-Attention Layers                  |
+| Q from UNet features                    |
+| K, V from sparse reference tokens      |
+| (sequence length 64 vs 256)            |
++-----------------------------------------+
+       |
+       v
+Denoising U-Net (rest of diffusion steps)
+       |
+       v
+Generated Image
+```
+
+Think of it like packing for a trip. The reference image is a **closet full of clothes** (all tokens). Normally you dump the entire closet into your suitcase—that’s the dense grid approach. It’s heavy, slow, and most of it won't be used. Sparse Context is like a **smart packing algorithm**. Before the trip, you practice packing randomly (training): sometimes you forget your coat, sometimes your socks. You learn to survive with whatever you grab. On the actual trip (inference), you pick only what you need for that specific destination: for a beach vacation (subject-driven), you take swimwear; for a business meeting (spatial editing), you take formal wear. The key insight is that the item-level granularity (each token) is fine enough that you never need the full closet. The model (the traveller) has been trained to make do with less, and the task-aware selection (the destination guide) ensures the right subset is chosen.
+
+### Key Concepts
+
+- **Token Dropping**: In neural networks, input features are often arranged as a grid (e.g., patches from an image). Token dropping means deliberately removing some of these grid entries before feeding them into subsequent layers. For a 16×16=256 token grid, dropping 75% leaves only 64 tokens. The remaining tokens still carry enough information because visual features are spatially redundant—neighbouring patches look similar, and many patches (e.g., background) are irrelevant. Training the model with random dropping makes it robust to missing neighbours, so generation quality stays high.
+
+- **Task-aware Token Selection**: Random dropping works well when the model has been fine-tuned, but not all tokens are equally informative for a given task. Task-aware selection uses task-specific heuristics to pick the best tokens. For example, in image editing with a mask, only tokens inside the mask region are kept. In subject-driven generation (e.g., “a corgi wearing a red hat”), you can run a quick forward pass with all tokens (cheap because it's one step) and record which tokens get the highest attention from the text prompt; then keep only those. This gives better quality than random dropping at the same token budget.
+
+- **Sparse Context**: The core idea of representing the reference condition as a sparse set of tokens rather than a dense grid. The sparsity is not fixed—it can vary per reference image and per task. Sparse Context reduces the cross-attention complexity from O(UNet_tokens ** reference_tokens) to O(UNet_tokens * sparse_tokens). Since cross-attention is a major bottleneck in diffusion, slashing the reference tokens by 4× yields a near-4× speedup in those layers, and in practice the overall inference time improves by 2–4× depending on the ratio of time spent in cross-attention vs other components.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+Reference images                     Reference images
+       |                                  |
+       v                                  v
++--------------------+              +--------------------+
+| Dense Token Grid   |              | Task-aware Selector|
+| (all tokens kept)  |              | (keep only ~25%)   |
++--------------------+              +--------------------+
+       |                                  |
+       v                                  v
++--------------------+              +--------------------+
+| Cross-Attention    |              | Cross-Attention    |
+| K,V len = 256*tok  |              | K,V len = 64*tok   |
+| (slow)             |              | (fast)             |
++--------------------+              +--------------------+
+```
+
+From "treat all reference tokens as equally important" to "selectively keep only the most informative tokens," the core shift is recognizing that redundancy is a feature to exploit, not a bug to ignore. The training strategy (random dropping) makes the model compatible with sparse inputs, transforming an efficiency gain from a hack into a principled approach.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The efficiency of reference-based generation was genuinely underexplored, and the observation that tokens can be dropped so aggressively without quality loss is surprising and useful. However, the problem is more engineering than science—it's about optimization, not new modeling.
+
+**Method maturity**: Clever combination of known tricks (random dropping, attention-based selection) plus fine-tuning. Not a breakthrough algorithm, but the systematic study and practical recipe are solid. Simpler alternatives (e.g., just using a fixed low-resolution feature map) might also work but are not compared.
+
+**Experimental integrity**: Baselines are fair (IP-Adapter, etc.) and metrics (FID, CLIP score, user study) support claims. One red flag: the 4x speedup for multi-reference generation is only achieved when using a very high drop ratio (75%), and the paper should report the trade-off curve more granularly. Also, the task-aware selection overhead (pre-pass) is not fully accounted for in the speedup numbers.
+
+**Writing quality**: Clear and well-structured, but the experimental section feels rushed—ablation studies are there, but discussion of failure cases or limitations (e.g., when token selection fails) is missing. A dedicated "Limitations" subsection would elevate the paper.
+
+**Verdict**: **weak accept** — The contribution is practical and the speedups are impressive, but the scientific novelty is modest and the analysis could be deeper.
+
+## Takeaways
+
+- **Random dropping as a regularizer**: If you have a model that consumes variable-length conditioning tokens (e.g., multiple references, video frames, etc.), fine-tuning with random token masking can make it robust to token loss at inference, enabling straightforward efficiency gains.
+
+- **Task-aware selection beats generic pruning**: The paper shows that the same token budget yields better results when tokens are selected based on task-specific cues (mask, attention) rather than uniformly. This principle transfers to any token-based conditioning (e.g., text tokens, audio tokens).
+
+- **Measure redundancy before optimizing**: The key enabler was first verifying that dropping 75% of tokens barely hurts quality. Before applying aggressive pruning, check your own data/modality for similar redundancy; it's often there.
+:::
+
+:::zh
+**论文**: [2606.23682](https://arxiv.org/abs/2606.23682)
+**作者**: Rishubh Parihar, Ayush Raina, R. Venkatesh Babu, Or Patashnik
+**分类**: cs.CV
+
+## 缺口
+
+现有参考条件扩散模型（如IP-Adapter、ReferenceNet）需要把参考图像编码成密集的令牌网格（例如16×16=256个令牌），
+然后全部送入交叉注意力层。
+这导致计算量随参考图像数量线性增长——两张参考图的代价是单张的两倍。
+虽然扩散模型的效率优化在文本条件生成中已有大量研究（如剪枝、蒸馏），
+但参考条件生成这一特殊场景却被忽视了。
+关键盲点在于：对于目标生成任务，大多数参考令牌携带的是冗余或不相关的信息，
+尤其是在主体驱动生成（subject-driven generation）中，只有物体区域才有用。
+本文发现，丢弃高达75%的参考令牌几乎不影响生成质量，
+并以此为基础构建了一套实用的效率优化方法。
+
+```
++-----------------------+       +----------------------------+
+| Problem: 线性成本     | ----> | Assumption: 多数参考令牌   |
+| 随参考图像数量增长     |       | 是冗余的，丢弃它们不       |
+| 交叉注意力计算       |       | 影响生成能力               |
++-----------------------+       +----------------------------+
+          |                              |
+          v                              v
++-----------------------+       +----------------------------+
+| Method: Sparse Context| ----> | Evidence: 多参考加速4倍   |
+| (随机丢弃训练 +        |       | 单参考加速2倍，质量无损    |
+| 任务感知选择推理)       |       | FID/CLIP指标不变          |
++-----------------------+       +----------------------------+
+          |
+          v
++-----------------------+
+| Conclusion: 参考令牌   |
+| 的冗余性可用于使       |
+| 生成效率亚线性增长     |
++-----------------------+
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，每次参考条件生成都要支付完整的令牌计算成本；
+这篇论文之后，只需一次简单的微调就可以在推理时丢弃75%的参考令牌，
+在保持质量的同时将速度提升2-4倍，并且可以根据任务动态调整令牌预算。
+
+### 核心机制
+
+Sparse Context 分为训练和推理两个阶段。
+训练时，对整个扩散模型（包括交叉注意力层）进行微调，在每次迭代中随机丢弃一定比例（如25%～100%）的参考令牌。
+模型被迫在部分上下文条件下预测噪声，从而学会对缺失令牌具有鲁棒性——它不能依赖任何固定令牌一定存在。
+
+推理时，用户可以选择令牌预算（如保留64个而不是256个）和选择策略。
+选择策略是任务感知的：对于空间对齐编辑（如换脸），根据参考图像中的空间位置选择令牌（例如只保留掩膜内的区域）；
+对于主体驱动生成（如"一只穿着那件毛衣的狗"），先以全集令牌做一次快速前向（一个去噪步），记录交叉注意力分数最高的令牌。
+选出的令牌作为唯一的上下文输入交叉注意力层，大幅缩短键/值序列长度。
+
+```
+参考图像
+       |
+       v
+图像编码器 -> 密集令牌网格 (256 x D)
+       |
+       v
++-----------------------------------------+
+| 令牌丢弃模块                            |
+|    训练: 随机掩膜 (比例 r)              |
+|    推理: 任务感知选择                   |
++-----------------------------------------+
+       |
+       v (仅保留令牌，如64)
+       |
+       v
++-----------------------------------------+
+| 交叉注意力层                            |
+| 查询来自UNet特征                        |
+| 键、值来自稀疏参考令牌                  |
+| (序列长度 64 vs 256)                    |
++-----------------------------------------+
+       |
+       v
+去噪UNet (剩余扩散步)
+       |
+       v
+生成图像
+```
+
+把这个过程想象成**打包行李**。
+参考图像是一个**装满衣服的衣柜**（全部令牌），通常做法是把整个衣柜塞进行李箱——这就是密集网格方法，笨重、缓慢，而且大部分衣服不会用到。
+Sparse Context 就像一个**智能打包算法**。
+旅行前，你练习随机打包（训练）：有时忘了带外套，有时忘了带袜子，
+你学会了用手头有限的物品活下去。
+真正旅行时（推理），你只根据目的地挑必需品：去海滩（主体驱动）带泳装，去开会（空间编辑）带正装。
+关键在于，每个物品（令牌）的粒度足够细，你永远不需要整个衣柜。
+模型（旅行者）已被训练成只用少量物品也能完成任务，
+而任务感知选择（目的地指南）确保你挑了正确的子集。
+
+### 关键概念
+
+- **Token Dropping（令牌丢弃）**：在神经网络中，输入特征通常排列成网格（如图片的图块）。令牌丢弃意味着在送入后续层之前，故意移除一部分网格条目。以16×16=256的令牌网格为例，丢弃75%后只剩64个。保留的令牌仍然携带足够信息，因为视觉特征在空间上是冗余的——相邻图块相似，且很多图块（如背景）与任务无关。用随机丢弃训练模型后，模型不再依赖相邻令牌的存在，生成质量得以保持。
+
+- **任务感知令牌选择（Task-aware Token Selection）**：随机丢弃在微调后效果不错，但并非所有令牌对特定任务同样重要。任务感知选择利用任务特定的启发式方法挑选最佳令牌。例如，在有掩膜的图像编辑中，只保留掩膜区域内的令牌；在主体驱动生成（如"一只戴红帽子的柯基"）中，可以先用全集令牌做一个快速前向（只一步），记录文本提示对应的注意力分数最高的令牌，然后只保留这些。在相同令牌预算下，这比随机丢弃效果更好。
+
+- **稀疏上下文（Sparse Context）**：核心思想是将参考条件表示为一组稀疏令牌，而非密集网格。稀疏度不是固定的——可以随参考图像和任务变化。Sparse Context将交叉注意力复杂度从O(UNet令牌数×参考令牌数)降为O(UNet令牌数×稀疏令牌数)。由于交叉注意力是扩散的主要瓶颈，将参考令牌缩小4倍即可在这些层获得近4倍加速，整体推理速度提升2-4倍（取决于交叉注意力占总时间的比例）。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+参考图像                          参考图像
+       |                              |
+       v                              v
++--------------------+          +--------------------+
+| 密集令牌网格       |          | 任务感知选择器     |
+| (保留所有令牌)     |          | (只保留约25%)      |
++--------------------+          +--------------------+
+       |                              |
+       v                              v
++--------------------+          +--------------------+
+| 交叉注意力         |          | 交叉注意力         |
+| K,V长度=256*tok    |          | K,V长度=64*tok     |
+| (慢)               |          | (快)               |
++--------------------+          +--------------------+
+```
+
+从"所有参考令牌同等重要"到"只保留信息量最大的令牌"——核心转变是认识到冗余可以被利用，而不是被忽视。
+训练策略（随机丢弃）使模型兼容稀疏输入，将效率提升从一种trick变为一种规律性的方法。
+
+## 专家评审
+
+**选题眼光**：真缺口。
+参考条件生成的效率问题确实被忽视了，且令牌可被大量丢弃且质量不降这个观察本身就是有价值的。
+但该问题偏向工程优化，而非基础模型创新。
+
+**方法成熟度**：巧妙但非突破。
+组合了已知技巧（随机丢弃、注意力选择）和微调，系统性的实验和实用配方是扎实的。
+简单替代方案（如固定使用低分辨率特征图）未被对比，可能也有效。
+
+**实验诚意**：基线公平（IP-Adapter等），指标（FID、CLIP分数、用户研究）支持结论。
+一个值得注意的问题是：多参考4倍加速只在极高丢弃率（75%）下获得，
+论文应更细致地报告速度-质量折衷曲线。
+另外，任务感知选择的预计算开销在加速数字中没有完全体现。
+
+**写作功力**：清晰，但实验部分略显仓促。
+消融研究有，但缺少失败案例或局限性的讨论。
+增加一个"局限性"小节会使论文更完善。
+
+**判决**：**弱接收** —— 实用贡献明确，加速效果显著，但科学新颖性有限，分析深度可以更强。
+
+## 要点总结
+
+- **用随机丢弃作为正则项**：如果你的模型消费可变长度的条件令牌（如多参考、视频帧、音频片段），用随机令牌掩膜微调可以使模型在推理时容忍令牌缺失，从而直接获得效率收益。
+
+- **任务感知选择优于通用剪枝**：本文证明相同令牌预算下，基于任务特化指标（掩膜、注意力分数）选择令牌比均匀选择效果更好。这一原则可推广到任何基于令牌的条件（如文本令牌、音频令牌）。
+
+- **优化之前先测量冗余度**：本文的关键前提是验证了丢弃75%令牌几乎不损失质量。在对自己数据/模态做激进剪枝前，先检查冗余程度——通常都存在。
+:::
