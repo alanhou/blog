@@ -1,0 +1,300 @@
+---
+title:
+  en: "InSight: Making VLAs Steerable for Self-Guided Skill Acquisition"
+  zh: "InSight：让视觉-语言-动作模型具备可控性，实现自主技能获取"
+description:
+  en: "A framework that gives Vision-Language-Action models the ability to discover and learn new manipulation primitives on their own, without any human demonstrations of the target skills."
+  zh: "一种使视觉-语言-动作模型能够自主发现并学习新操作原语的框架，无需任何目标技能的人类演示。"
+date: 2026-06-24
+tags: ["arxiv", "ai", "cs.ro", "cs.ai", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.24884](https://arxiv.org/abs/2606.24884)  
+**Authors**: Maggie Wang, Lars Osterberg, Stephen Tian, Ola Shorinwa, Jiajun Wu, Mac Schwager  
+**Categories**: cs.RO, cs.AI, cs.LG
+
+## The Gap
+
+Existing Vision-Language-Action (VLA) models are trained end-to-end on fixed sets of demonstrations. Once trained, they can only reproduce the skills present in that data. If you want a robot to do something new — twist a bottle cap, pour liquid, sweep with a broom — you need to collect new human demonstrations, label them, and retrain. This is a dead end for open-world deployment: you cannot exhaustively demonstrate every possible skill. Prior work like RT-2 and Octo simply treats the VLA as a monolithic policy; hierarchical approaches like SayCan or Code as Policies decompose tasks but still rely on pre-programmed or prompt-engineered skill libraries. No one has tackled the problem of *automatically expanding that library* from the robot’s own experience.
+
+This paper asks: can a VLA itself identify what primitive skills it is missing, attempt to acquire them autonomously, and integrate them into its own policy representation — all without human supervision of the target skill? The logical progression is:
+
+```
+Problem: VLA stuck with fixed skill set from training demonstrations
+    |
+    v
+Assumption: If we decompose demonstrations into steerable primitives at a lower level,
+            the model can reason about which primitives are missing for a new task
+    |
+    v
+Method: InSight = (1) automated segmentation of demos into labeled primitives
+                  + (2) VLM-guided data flywheel that detects gaps, attempts primitives,
+                  + (3) automatically labels and integrates successful attempts
+    |
+    v
+Evidence: Simulated block flipping, drawer closing, sweeping, twisting, pouring
+           -- none of these target skills were shown in the original training demos
+    |
+    v
+Conclusion: Primitive steerability enables continual skill acquisition in VLAs
+```
+
+## The Increment
+
+**One sentence**: Before InSight, VLAs could only execute skills seen in demonstrations; after InSight, they can self-discover and learn new primitives and compose them into novel long-horizon tasks with zero human demonstrations of the target skills.
+
+### Core Mechanism
+
+InSight has two stages. Stage 1 makes the VLA steerable at the primitive level. Given a set of demonstration trajectories (end-effector poses + task descriptions), a Vision-Language Model (VLM, e.g., GPT-4V) reasons about the high-level plan and segments each demonstration into temporally ordered primitives. Each primitive gets a natural language label (e.g., "move gripper to bowl") and a corresponding end-effector trajectory snippet. The VLA is then fine-tuned to accept a primitive label as input conditioning — essentially making each primitive a "subroutine" you can call by name. That’s the *steerable* part.
+
+Stage 2 is the autonomous flywheel. When a new task instruction arrives, the robot first tries to execute it by composing known primitives. If it fails, a VLM analyzes the failure and hypothesizes which primitive is missing (e.g., "pour bottle" does not exist). The robot then autonomously attempts variations of control (using the VLM for low-level motion proposals) to perform that missing primitive. Successful attempts are automatically labeled by checking task success criteria (vision-based outcome detectors). The successful trajectory is added to the demonstration buffer, and the VLA is updated via continual fine-tuning. This loop repeats until the new task is solvable.
+
+```
+                          +-------------------+
+                          |  Demo trajectories|
+                          +--------+----------+
+                                   |
+                                   v
+                        +----------+----------+
+                        |VLM Plan Decomposer  |
+                        |+ end-effector poses |
+                        +----------+----------+
+                                   |
+                        labels + snippets per primitive
+                                   |
+                                   v
+                        +----------+----------+
+                        | Fine-tune VLA to be |
+                        | primitive-conditional|
+                        +----------+----------+
+                                   |
+              +--------------------+-------------------+
+              |                                        |
+              v                                        v
+    +---------+--------+                   +-----------+----------+
+    | Known primitives |                   | New task instruction  |
+    | library          |                   +-----------+----------+
+    +---------+--------+                               |
+              |                                        v
+              | Failed? ---> VLM identifies missing primitive
+              |                    |
+              |                    v
+              |         +----------+----------+
+              |         | Robot autonomously  |
+              |         | tries control to    |
+              |         | approximate missing |
+              |         | primitive           |
+              |         +----------+----------+
+              |                    |
+              |                   success? (vision check)
+              |                    |           |
+              |                   yes         no (iterate)
+              |                    v
+              |         +----------+----------+
+              |         | Add demo & label    |
+              |         | to data buffer      |
+              |         +----------+----------+
+              |                    |
+              +---------+----------+
+                        v
+              +---------+----------+
+              | Continual fine-tune|
+              | VLA on updated set |
+              +--------------------+
+```
+
+**Metaphor**: Think of InSight as a **line cook learning a new recipe**. The cook already knows basic cuts, sautéing, boiling — these are the **primitives*. The head chef (VLM) hands over a recipe for a dish never cooked before. The cook tries to follow the recipe using only known moves, but at one step the recipe says "flambe" and the cook has never done that. Instead of calling the head chef, the cook’s training system (InSight) automatically detects that "flambe" is missing. The system then lets the cook experiment: pour some alcohol into a hot pan, try to ignite it, observe if flame appears (success signal). The first few tries may fail or singe the eyebrows; when a safe, successful flambe is achieved, the system records the exact motions and declares a new primitive "flambe" is now in the cook’s repertoire. Next time, the cook can flambe without thinking. The key is that the system itself decided what was missing and how to practice, without the head chef demonstrating even one flambe.
+
+### Key Concepts
+
+- **Primitive steerability**: A VLA is "steerable" at the primitive level when you can invoke a specific sub-behavior (e.g., "move left") by feeding in a text token. Without steerability, the VLA is a black box that may reproduce whole-task sequences. The paper achieves this by training the VLA to predict actions conditioned on a prefix that is the primitive label, essentially turning each primitive into a learnable subroutine with a name. Example: after training, the VLA can be prompted with "open gripper" and it executes exactly that motion regardless of context.
+
+- **VLM-guided data flywheel**: A self-supervised loop where a VLM (which is a large language model with vision) reasons about task decomposition and failure modes. The VLM is not doing the fine-grained control — it’s too slow and imprecise — but it serves as a "task analyst" that decides **what* to practice next. The low-level control trials are generated by the VLA itself with random or heuristic variations. The flywheel is crucial because it replaces human annotation and human demonstrations of novel skills.
+
+- **Continual fine-tuning for VLAs**: Typically, fine-tuning a large VLA on new data causes catastrophic forgetting of old skills. InSight mitigates this by (1) keeping the primitive-conditioned architecture, so each primitive’s weights only need small updates, and (2) using a replay buffer of older demos. The paper shows that after learning new primitives, the model still executes old primitives correctly.
+
+## Framework Shift
+
+```
+Before (mainstream approach):
+  Human demos of task A --> Train VLA on task A --> VLA can do task A only
+  Human demos of task B --> Retrain VLA on A+B --> VLA can do A+B
+  (Each new skill requires new human demos and retraining)
+
+After (this paper):
+  Generic demos (any tasks) --> InSight decomposes into primitive library --> VLA is steerable by primitive name
+  New task given --> VLM detects missing primitive --> Robot self-practices primitive with auto-labeling -->
+  Primitive added to library, VLA updated --> VLA can now do new task (and still do old ones)
+  (No human demos of the target skill needed ever again)
+```
+
+**One sentence**: From "skill collection requires human demonstration" to "skill collection is an autonomous, closed-loop process driven by VLM analysis and self-practice," the core shift is **making primitive-level steerability the substrate for continual learning**.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The boundedness of VLA skills is the central obstacle to practical deployment. This paper targets a fundamental bottleneck (skill acquisition) rather than a marginal increment. It sits squarely in the "lifelong learning for robots" trajectory, which the community acknowledges as urgent but has few working systems.
+
+**Method maturity**: Clever insight — the idea of using VLM to suggest missing primitives and then having the robot brute-force its own demos is not elegant but practical. The automated segmentation pipeline relies heavily on the VLM’s ability to parse demonstrations, which can be fragile (e.g., cluttered scenes, occluded grippers). The low-level control proposal for missing primitives is essentially random shooting with a VLM prior, which works for simple motions but may not scale to high-precision skills (e.g., inserting a peg). Simpler approaches like manual primitive engineering were deliberately avoided, and the paper argues they don’t scale. Fair point.
+
+**Experimental integrity**: The paper claims zero human demonstrations of the five target skills (block flipping, drawer closing, sweeping, twisting, pouring). However, the **original* demos used to build the primitive library likely come from *some* tasks — those demos are human-collected. So the "zero demo" claim is only about the target skills, not about all skills. This is honest but limits the impressiveness. Baselines are missing: they compare only against a non-steerable VLA (which obviously fails) but not against say, a purely VLM-driven robot without VLA fine-tuning. The simulated results show success rates, but we don’t see ablations on the flywheel (e.g., what if you skip the VLM analysis and just try random primitives?). The real-world experiments appear qualitative (videos), which is standard for robotics papers but weakens the quantitative claim. No red flags, but the evidence is thin on repeatability.
+
+**Writing quality**: The paper is well-structured and the core contribution is clear. The weakest section is the experimental reporting: they list success rates but don’t show how many attempts were needed for the flywheel, nor do they analyze failures (e.g., what if the VLM misses a primitive?). Rewriting the experiments section with per-trial histories and convergence curves would elevate the paper significantly.
+
+**Verdict**: **weak accept** — The idea is important and the system works in principle, but the experimental validation is too sparse and lacks strong baselines. It opens a promising direction rather than fully delivering a mature solution.
+
+## Takeaways
+
+1. **Primitive-level conditioning is a cheap way to add steerability.** Practitioners can take this idea and apply it to any VLA: simply append a primitive token to the input during training and inference, then use VLM to segment demonstrations. This alone enables easy composition of skills.
+
+2. **Use a VLM as a failure analyzer, not a controller.** The paper shows that a large VLM can be reliably used to diagnose **what* primitive is missing from a task description, even if it cannot control the robot. This pattern (VLM as analyst, VLA as executor) generalizes: any task where you can segment actions into named blocks can benefit from this hybrid.
+
+3. **Data flywheel with automatic success detectors can replace human annotation for simple outcomes.** If you have clear success criteria (e.g., drawer is closed, bottle is poured), you can auto-label attempts. This removes a major bottleneck in robotics. The key is to define success detection tightly — the paper uses vision-based checks (camera after action). This can be stolen for any repetitive skill acquisition in controlled environments.
+
+If you have a VLA model and want it to learn new behaviors without collecting demos, InSight gives you a concrete architecture and loop. The limitations (fragile VLM segmentation, low-precision control proposal) mean you’ll need to adapt it, but the blueprint is sound.
+:::
+
+:::zh
+**论文**: [2606.24884](https://arxiv.org/abs/2606.24884)  
+**作者**: Maggie Wang, Lars Osterberg, Stephen Tian, Ola Shorinwa, Jiajun Wu, Mac Schwager  
+**分类**: cs.RO, cs.AI, cs.LG
+
+## 缺口
+
+现有的视觉-语言-动作（VLA）模型在固定的演示数据集上端到端训练。训练完成后，它们只能复现训练数据中存在的技能。如果你想让机器人做新的事情——比如拧瓶盖、倒液体、用扫帚扫地——你需要收集新的人类演示、标注并重新训练。这对于开放世界部署来说是死胡同：你不可能穷举所有可能的技能。此前的工作（如 RT-2 和 Octo）将 VLA 作为单一策略处理；层次化方法（如 SayCan 或 Code as Policies）将任务分解但依然依赖预编程或提示工程化的技能库。没有人解决过 *自动从机器人自身经验扩展技能库* 的问题。
+
+这篇论文问：VLA 能否自己识别缺少哪些原语技能，自主尝试获取它们，并将其整合到自己的策略表示中——全程无需人对目标技能进行监督？逻辑路径如下：
+
+```
+问题：VLA 被训练演示的固定技能集限制
+    |
+    v
+假设：如果我们将演示分解为更低层的可控原语，
+       模型就能为新任务推理哪些原语缺失
+    |
+    v
+方法：InSight = (1) 自动将演示分割为带标签的原语
+                + (2) VLM 引导的数据飞轮：检测缺口、尝试原语、
+                + (3) 自动标注并整合成功的尝试
+    |
+    v
+证据：模拟环境中的翻转方块、关闭抽屉、扫地、拧转、倾倒
+       ——这些目标技能均未出现在原始训练演示中
+    |
+    v
+结论：原语可控性使 VLA 能够持续习得技能
+```
+
+## 增量
+
+**一句话**: InSight 之前，VLA 只能执行演示过的技能；InSight 之后，VLA 可以自主发现并学习新原语，并组合成全新的长时延任务，全程无需目标技能的人类演示。
+
+### 核心机制
+
+InSight 分为两个阶段。阶段一让 VLA 在原语层面变得可控制。给定一组演示轨迹（末端执行器位姿 + 任务描述），一个视觉-语言模型（VLM，例如 GPT-4V）推理高层规划，将每个演示分割为按时间顺序排列的原语。每个原语得到一个自然语言标签（如"移动夹爪到碗"）以及对应的末端执行器轨迹片段。然后对 VLA 进行微调，使其接受原语标签作为输入条件——本质上，每个原语成为一个可以通过名字调用的"子程序"。这就是*可控制*的部分。
+
+阶段二是自主数据飞轮。当新任务指令出现时，机器人先尝试用已知原语组合执行。如果失败，VLM 分析失败原因并假设缺失哪个原语（例如"倾倒瓶子"不存在）。机器人随后自主尝试控制量的变体（VLM 提供低层级控制建议），以执行那个缺失的原语。成功的尝试通过视觉任务成功检测器自动标注。成功的轨迹加入演示缓冲区，VLA 通过持续微调更新。这个循环重复直到新任务可解。
+
+```
+                          +-------------------+
+                          |  演示轨迹数据     |
+                          +--------+----------+
+                                   |
+                                   v
+                        +----------+----------+
+                        | VLM 规划分解器      |
+                        | + 末端执行器位姿    |
+                        +----------+----------+
+                                   |
+                        每个原语：标签 + 片段
+                                   |
+                                   v
+                        +----------+----------+
+                        | 微调 VLA 使其       |
+                        | 以原语为条件        |
+                        +----------+----------+
+                                   |
+              +--------------------+-------------------+
+              |                                        |
+              v                                        v
+    +---------+--------+                   +-----------+----------+
+    | 已知原语库       |                   | 新任务指令           |
+    +---------+--------+                   +-----------+----------+
+              |                                        |
+              |                                        v
+              | 失败？--> VLM 识别缺失原语
+              |                    |
+              |                    v
+              |         +----------+----------+
+              |         | 机器人自主尝试      |
+              |         | 控制量以逼近缺失   |
+              |         | 原语               |
+              |         +----------+----------+
+              |                    |
+              |                   成功？(视觉检测)
+              |                    |           |
+              |                  是           否（继续迭代）
+              |                    v
+              |         +----------+----------+
+              |         | 将演示与标签        |
+              |         | 加入数据缓冲区      |
+              |         +----------+----------+
+              |                    |
+              +---------+----------+
+                        v
+              +---------+----------+
+              | 在更新数据集上      |
+              | 持续微调 VLA       |
+              +--------------------+
+```
+
+**核喻**：把 InSight 想象成一个**学习新菜谱的厨师**。厨师已经知道基本切菜、炒、煮——这些就是**原语*。主厨（VLM）递过来一份从未做过的菜谱。厨师尝试只用已知动作按菜谱做，但有一道步骤要求"火焰灼烧"，厨师从未做过。厨房的培训系统（InSight）自动检测出"火焰灼烧"缺失。系统让厨师做实验：往热锅里倒一点酒，试着点燃，观察是否出现火焰（成功信号）。前几次可能失败或者烧到眉毛；当安全的成功火焰灼烧实现后，系统记录精确动作，宣布新原语"火焰灼烧"加入技能库。下一次，厨师无需思考就能完成火焰灼烧。关键点是系统自己决定缺少什么以及如何练习，完全无需主厨亲自演示一次火焰灼烧。
+
+### 关键概念
+
+- **原语可控性 (Primitive steerability)**：当一个 VLA 能够通过输入文本标记调用特定的子行为（如"向左移动"）时，它就在原语层面可控制了。没有可控性，VLA 是一个黑箱，只能复现整个任务序列。这篇论文通过在训练时让 VLA 预测的动作以原语标签前缀为条件来实现可控性，本质上将每个原语变成一个带有名字的可学习子程序。例：训练后，你可以提示 VLA "打开夹爪"，它就会精确执行那个动作而不管上下文。
+
+- **VLM 引导的数据飞轮 (VLM-guided data flywheel)**：一个自监督循环，其中 VLM（一个带视觉能力的大语言模型）推理任务分解和失败模式。VLM 不执行精细控制（太慢且不精确），而是充当"任务分析师"，决定下一步练习什么。低层级控制尝试由 VLA 本身生成，使用随机或启发式变体。飞轮之所以关键，是因为它取代了人类标注和对新技能的人类演示。
+
+- **VLA 的持续微调 (Continual fine-tuning for VLAs)**：通常在大 VLA 上微调新数据会导致灾难性遗忘旧技能。InSight 通过 (1) 保持原语条件架构，使每个原语的权重只需小幅更新，以及 (2) 使用旧演示的回放缓冲区来缓解。论文显示，学习新原语后，模型仍能正确执行旧原语。
+
+## 框架转变
+
+```
+之前（主流方法）：
+    任务A的人类演示 --> 在任务A上训练VLA --> VLA只能做任务A
+    任务B的人类演示 --> 在A+B上重新训练VLA --> VLA能做A+B
+    （每个新技能都需要新的人类演示和重新训练）
+
+之后（本文方法）：
+    通用演示（任何任务） --> InSight分解为原语库 --> VLA可被原语名控制
+    给定新任务 --> VLM检测缺失原语 --> 机器人自主练习原语并自动标注 -->
+    原语加入库，VLA更新 --> VLA现在能做新任务（且仍能做旧任务）
+    （再不需要目标技能的人类演示）
+```
+
+**一句话**：从"技能获取需要人类演示"到"技能获取是自闭环过程，由 VLM 分析和自我练习驱动"，核心转变是**将原语级别的可控性作为持续学习的基础**。
+
+## 专家评审
+
+**选题眼光**: 真缺口。VLA 技能受限于演示是实际部署的核心障碍。这篇论文瞄准的是根本性的瓶颈（技能习得）而非边际增量。它处于"机器人终身学习"轨迹的关键位置，社区公认紧迫但缺乏可行系统。
+
+**方法成熟度**: 巧思——用 VLM 建议缺失原语然后让机器人暴力尝试自己的演示，这个想法虽然不优雅但很实用。自动分割管道严重依赖 VLM 解析演示的能力，这在杂乱场景或遮挡夹爪时可能脆弱。缺失原语的低层控制建议本质上是带 VLM 先验的随机搜索，对简单动作有效，但对高精度技能（如插销）可能无法扩展。更简单的手动原语工程被刻意回避，论文认为那无法扩展——这一论点合理。
+
+**实验诚意**: 论文声称五个目标技能（翻转方块、关闭抽屉、扫地、拧转、倾倒）均为零人类演示。但原始用于构建原语库的演示**本身*来自某些任务——那些演示是人为收集的。所以"零演示"声明仅针对目标技能而非所有技能。这是诚实的，但也降低了震撼力。缺少基线比较：他们只对比了不可控的 VLA（显然失败），但未对比纯 VLM 驱动的机器人（不加 VLA 微调）。模拟结果给出了成功率，但我们看不到对飞轮的消融实验（例如，跳过 VLM 分析而随机尝试原语会怎样？）。真实世界实验看起来是定性的（视频），这在机器人论文中虽常规但削弱了定量支持。没有红旗，但证据在可复现性上偏薄弱。
+
+**写作功力**: 论文结构良好，核心贡献清晰。最弱的部分是实验报告：他们列出了成功率，但没有展示飞轮需要的尝试次数，也没有分析失败（例如 VLM 漏掉原语时怎么办）。重写实验部分，增加每次试验的历史和收敛曲线，会让论文提升一个档次。
+
+**判决**: **弱接收** — 这个想法很重要，系统原则上可行，但实验验证过于稀疏且缺少强基线。它开启了一个有前景的方向，而非完全交付一个成熟方案。
+
+## 要点总结
+
+1. **原语级别条件化是增加可控性的廉价方式**。实践者可将此想法应用于任何 VLA：只需在训练和推理时在输入上追加一个原语标记，然后用 VLM 分割演示。这本身就支持技能轻松组合。
+
+2. **将 VLM 用作失败分析器而非控制器**。论文表明，即使无法控制机器人，大 VLM 也可以可靠地用于诊断任务描述中缺失了**哪个*原语。这种模式（VLM 分析 + VLA 执行）可以泛化：任何可以将动作分割为命名块的任务都能受益于这种混合。
+
+3. **带自动成功检测器的数据飞轮可以替代简单结果的人类标注**。如果你有清晰的成功标准（例如抽屉已关闭、瓶子已倾倒），就可以自动标注尝试。这移除了机器人学中的一个主要瓶颈。关键在于严格定义成功检测——论文使用动作后的视觉检查。这一思路可在受控环境中用于任何重复性技能获取。
+
+如果你有一个 VLA 模型，并希望它无需收集演示就能学习新行为，InSight 提供了一个具体的架构和循环。局限性（脆弱的 VLM 分割、低精度控制建议）意味着你需要进行调整，但蓝图是可靠的。
+:::
