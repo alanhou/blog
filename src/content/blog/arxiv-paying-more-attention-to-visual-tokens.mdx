@@ -1,0 +1,312 @@
+---
+title:
+  en: "VISE: Teaching Large Multimodal Models to Actually Look at Images"
+  zh: "VISE：教大模型多看图像少猜答案"
+description:
+  en: "Current self-evolving multimodal models learn to produce consistent answers, but they often ignore the image and just guess from language patterns. VISE fixes this by adding two invariance rewards that force the model to condition on visual evidence."
+  zh: "现有的自演化多模态模型学会了生成一致的答案，却常常忽略图像本身，只管从语言模式中瞎猜。VISE通过两个不变性奖励强制模型依赖视觉证据，从根本上解决了这一缺陷。"
+date: 2026-06-26
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.27373](https://arxiv.org/abs/2606.27373)
+**Authors**: Shravan Venkatraman, Ritesh Thawkar, Omkar Thawakar, Rao Muhammad Anwer, Hisham Cholakkal, Salman Khan, Fahad Khan
+**Categories**: cs.CV
+
+## The Gap
+
+Self-evolving large multimodal models (LMMs) use multi-role self-play and self-consistency rewards to improve visual reasoning without labeled data. The problem? These methods optimize answer agreement — that is, they make the model produce the same answer regardless of how the training process is framed. But agreement with itself is *not* the same as looking at the image. The decoder quickly learns statistical regularities in language (e.g., "a cat sits on a mat" is a safe response for any indoor scene) and uses those priors to generate self-consistent outputs. The model becomes a language guesser that doesn't bother verifying against visual content. The authors term this failure *visual under-conditioning*: the attention weights on visual tokens are low, and the decoder effectively bypasses visual evidence. Prior work implicitly assumed that self-consistency would force visual grounding; this paper shows otherwise.
+
+```
+                                    +-------------------+
+                                    | Problem: Visual   |
+                                    | Under-Conditioning|
+                                    | (low attn to img)|
+                                    +-------------------+
+                                             |
+                                             v
++-------------------------+    +----------------------------+
+| Assumption: Self-       |    | Reality: Decoder exploits  |
+| consistency -> visual   | -> | language priors, ignores   |
+| grounding               |    | image. Self-consistency    |
+|                         |    | does NOT imply visual      |
++-------------------------+    +----------------------------+
+                                             |
+                                             v
++------------------------------------------+
+| Method: VISE                              |
+| -- Geometric Invariance Reward            |
+| -- Semantic Invariance Reward             |
+| (regularize visual conditioning directly) |
++------------------------------------------+
+                                             |
+                                             v
++---------------------------+    +----------------------------+
+| Evidence: COCO +16.85     |    | Conclusion: Regularizing   |
+| CIDEr, TextCaps +19.66,   | -> | visual attention improves |
+| Hallucination -5.0 Chair-I|    | LMMs across families      |
++---------------------------+    +----------------------------+
+```
+
+## The Increment
+
+**One sentence**: Before VISE, self-evolving LMMs optimized answer agreement at the cost of visual attention; after VISE, we can directly regularize visual conditioning using unsupervised invariance rewards, achieving large gains across 18 benchmarks.
+
+### Core Mechanism
+
+VISE replaces the standard self-consistency reward with two invariance-based signals. Both are computed within a single model — no specialist roles, no external reward models, no annotations. The pipeline: (1) feed a raw unlabeled image through the model's visual encoder and decoder to get a generated text (e.g., a caption). (2) Apply a known geometric transformation to the image (e.g., rotation, scaling, crop). Feed the transformed image through the same model. The geometric invariance reward penalizes discrepancies between the outputs of the original and transformed images. (3) For semantic invariance: take the model's output, extract predicted regions (objects or bounding boxes), and perturb (e.g., mask or blur) those regions. Feed the perturbed image through the model. If the model still outputs the same text despite the region being perturbed, it was relying on language priors rather than visual evidence — the reward penalizes that. Both rewards are used to update the model parameters.
+
+```
++---------+         +----------------+         +-----------+
+| Image   | ------> | Visual Encoder | ------> | Decoder   | ------> Text T
++---------+         +----------------+         +-----------+
+       |                                              |
+       | (a) Geometric Transform                      | (b) Semantic Perturb
+       v                                              v
++---------+         +----------------+         +-----------+
+| Transf. | ------> | Visual Encoder | ------> | Decoder   | ------> Text T'
+| Image   |         +----------------+         +-----------+
++---------+                                        |
+                                                   v
++-------------------------------------------------------------+
+| Reward Calculation                                          |
+| Geom Reward = d(T, T') [low if consistent under transform]  |
+| Sem Reward = d(T, T'') [low if consistent under perturbation|
+|             + penalty if T still says "there is X" when     |
+|             region X is perturbed]                          |
++-------------------------------------------------------------+
+                                              |
+                                              v
++-------------------------------------------------------------+
+| Model Update: minimize combined reward                      |
+| (gradient flows through encoder and decoder)                |
++-------------------------------------------------------------+
+```
+
+Here's a load-bearing metaphor: think of training a security guard to write incident reports. The guard (the decoder) watches a monitor (the visual encoder) and writes a report. Before VISE, the guard is evaluated on whether they write the same report every shift for the same location — consistency. But the guard can be consistent by just writing "All quiet in corridor" every time, never actually looking at the monitor. The geometric invariance reward is like having two monitors at different angles: if the guard's report changes after switching to the other camera, they weren't actually watching the scene. The semantic invariance reward is like covering a suspicious package in the video: if the guard *still* writes "Suspicious package detected" after the package is removed from the frame, they're clearly hallucinating. VISE penalizes both behaviors, forcing the guard to look at the monitor.
+
+### Key Concepts
+
+- **Visual under-conditioning**: The decoder's attention mechanism assigns low weight to visual tokens (pixels or patch features) and high weight to textual tokens (language priors). Intuitively, the model "reads the prompt and guesses" instead of "looking at the image and describing." Concrete example: given an image of a kitchen with no cat, a visually under-conditioned model still outputs "A cat sits on the counter" because that phrase is statistically common in its training corpus for kitchen scenes. The test: if you blank out the image and get the same output, the model is under-conditioned.
+
+- **Invariance reward**: A training signal that enforces a specific property of the model's output. Instead of rewarding agreement with a label, VISE rewards: (a) **geometric invariance* — output should be similar under common image transformations (rotation, crop) because the *semantic content* of the scene doesn't change; (b) *semantic invariance* — output should change when predicted visual evidence is perturbed, because if the evidence is gone the model should say "I don't know" or adjust its description. The key insight: invariance is a proxy for visual conditioning. You can't accidentally satisfy both rewards by just being good at language.
+
+- **Self-evolution without self-play**: Prior self-evolving LMMs require multi-role self-play (the model plays "teacher" and "student" roles) and self-consistency rewards (rewarding the student for agreeing with the teacher). VISE replaces this entire multi-agent setup with a single model, two forward passes (original + transformed/perturbed), and two simple distance metrics. This is much simpler to implement and directly targets the problem rather than an indirect proxy.
+
+## Framework Shift
+
+```
+Before (standard self-evolving LMM):        After (VISE):
+
+[Image] + [Language Prompt]                 [Image] + [Language Prompt]
+         |                                            |
+         v                                            v
+   [Visual Encoder]                             [Visual Encoder]
+         |                                            |
+         v                                            v
+   [Decoder]                                       [Decoder]
+         |                                            |
+   +-----+-----+                              +-------+-------+
+   |           |                              |               |
+[Self-Play] [Self-Consistency]          [Geom Transform] [Sem Perturb]
+   |           |                              |               |
+   +-----+-----+                              +-------+-------+
+         |                                            |
+         v                                            v
+   [Updated Model:                          [Updated Model:
+    optimized for                          optimized for
+    answer agreement]                      visual conditioning]
+         |                                            |
+         v                                            v
+   [Output: "A cat on mat"                 [Output: "A cat on mat"
+    (but maybe no cat in image)]            (only if cat actually there)]
+```
+
+One sentence: From optimizing answer agreement (self-consistency) to optimizing visual conditioning (invariance under geometric and semantic perturbations), the core shift is *direct regularization of visual attention* via rewards that cannot be gamed by language priors.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Visual under-conditioning is a known failure mode in LMMs, but prior self-evolving methods overlooked it because they assumed self-consistency implied grounding. This paper cleanly identifies and isolates the issue. Situated at the right spot in the field's trajectory — after several self-evolving LMM papers but before anyone systemically addressed visual attention in that setup.
+
+**Method maturity**: Clever insight wrapped in straightforward implementation. The invariance rewards are cheap to compute (two forward passes) and require no external models. However, the method depends on: (1) being able to apply meaningful geometric transformations to the image (requires spatial grounding), and (2) being able to perturb predicted regions (requires the model to output bounding boxes or segmentation). The authors use Qwen3-VL-2B which provides bounding boxes. For models without explicit region prediction, semantic invariance would require a different implementation.
+
+**Experimental integrity**: Baselines are fair. The paper compares against several state-of-the-art self-evolving LMMs (including prior self-play methods) and reports gains on 18 benchmarks. Gains are large (+16.85 CIDEr on COCO, +19.66 on TextCaps) and consistent across four model families (Qwen, LLaVA, InternVL, and Phi-3-V). The hallucination reduction (-5.0 Chair-I points) is significant. One limitation: the paper does not isolate the contribution of geometric vs. semantic rewards separately in all benchmarks — it lists an ablation but only on COCO. Would like to see on other tasks. Also, all experiments use the same base model (Qwen3-VL-2B) for the main results; generalization across families is shown but with smaller models.
+
+**Writing quality**: The paper is well-structured but the abstract and introduction could be clearer about **how* geometric and semantic rewards are computed. The reader has to dive into Section 3 to get exact formulas. Section 3 itself is dense but complete. The paper would benefit from a single figure showing the two reward branches in one diagram (the current figures are split). A minor quibble: the acronym "VISE" isn't explained until Section 3, despite being in the title.
+
+**Verdict**: weak accept — The paper identifies a genuine oversight in self-evolving LMMs, proposes a clean and effective fix, and demonstrates solid empirical gains. Not a breakthrough, but a well-executed contribution that should influence how future self-evolving methods design reward functions.
+
+## Takeaways
+
+- **Direct visual conditioning reward**: The idea of using invariance under geometric transformations and semantic perturbations as a training signal for visual grounding can be ported to any multimodal task that requires visual attention (e.g., VQA with spatial reasoning, referring expression comprehension). If your model is ignoring visual input, try this: pick a transformation that preserves semantics (crop, rotate, color jitter) and penalize output changes.
+
+- **Bypassing self-play**: One of the most practical takeaways is that you don't need multi-role self-play to self-evolve. Single-model, multi-pass training with carefully designed invariance rewards is simpler and directly targets the problem. This simplifies engineering and reduces the risk of training instability from role-switching.
+
+- **Hallucination diagnostic**: The semantic invariance reward (perturb predicted regions and check if output changes) can be used as a **diagnostic* for hallucination without needing a separate hallucination detector. If a model's output doesn't change after deleting predicted visual evidence, it's hallucinating. This is a cheap, unsupervised sanity check for deployment.
+
+:::
+
+:::zh
+**论文**: [2606.27373](https://arxiv.org/abs/2606.27373)
+**作者**: Shravan Venkatraman, Ritesh Thawkar, Omkar Thawakar, Rao Muhammad Anwer, Hisham Cholakkal, Salman Khan, Fahad Khan
+**分类**: cs.CV
+
+## 缺口
+
+自演化多模态模型（LMMs）通过多角色自对弈和自我一致性奖励来提升视觉推理能力，且完全不依赖标注数据。
+问题在于：这些方法优化的是"答案之间的一致性"——也就是让模型在训练过程中无论怎么变，都输出同样的答案。
+但模型和自己一致，不等于它真的看了图像。
+解码器很快就学会了语言的统计规律，比如对任何室内场景都输出"一只猫坐在垫子上"，因为这在训练语料中是很安全的回答。
+模型变成了一个"语言猜谜者"，根本不拿图像来验证。
+作者把这种现象称为"视觉欠条件化"（visual under-conditioning）：视觉标记上的注意力权重很低，解码器直接绕过了视觉信息。
+之前的工作隐含假设了"自我一致性等于视觉锚定"，这篇论文证明了那是错的。
+
+```
+                                    +-------------------+
+                                    | 问题：视觉欠条件化  |
+                                    |（注意力不在图像上）|
+                                    +-------------------+
+                                             |
+                                             v
++-------------------------+    +----------------------------+
+| 假设：自我一致性 ->     |    | 现实：解码器利用          |
+| 视觉锚定                | -> | 语言先验，忽略图像。      |
+|                         |    | 自我一致性 != 视觉锚定    |
++-------------------------+    +----------------------------+
+                                             |
+                                             v
++------------------------------------------+
+| 方法：VISE                                |
+| -- 几何不变性奖励                         |
+| -- 语义不变性奖励                         |
+| （直接约束视觉条件化）                    |
++------------------------------------------+
+                                             |
+                                             v
++---------------------------+    +----------------------------+
+| 证据：COCO +16.85 CIDEr,  |    | 结论：正则化视觉注意力    |
+| TextCaps +19.66,          | -> | 可提升多模型家族性能      |
+| 幻觉降低 5.0 Chair-I     |    |                            |
++---------------------------+    +----------------------------+
+```
+
+## 增量
+
+**一句话**: 在VISE之前，自演化多模态模型在优化答案一致性时牺牲了视觉注意力；VISE之后，我们可以通过无监督的不变性奖励直接正则化视觉条件化，在18个基准上取得大幅提升。
+
+### 核心机制
+
+VISE用两个基于不变性的信号替换了标准的自我一致性奖励。
+所有计算都在一个模型内完成——没有专家角色、没有外部奖励模型、没有标注。
+流程是这样的：(1) 将一张原始无标签的图像送入视觉编码器和解码器，生成一段文本（比如画面描述）。
+(2) 对图像施加一个已知的几何变换（旋转、缩放、裁剪等），然后把变换后的图像送入同一个模型。
+几何不变性奖励会惩罚原始输出和变换后输出之间的差异——如果变换了图像，文本却不变，说明模型没看图像。
+(3) 对于语义不变性奖励：先提取模型输出的预测区域（物体或边界框），然后扰动这些区域（比如遮挡或模糊），再把扰动后的图像送入模型。
+如果区域被扰动后模型依然输出相同的文本，说明它依赖的是语言先验而非视觉证据——奖励会惩罚这种行为。
+这两个奖励共同用于更新模型参数。
+
+```
++---------+         +----------------+         +-----------+
+| 原始图像  | ------> | 视觉编码器     | ------> | 解码器    | ------> 文本 T
++---------+         +----------------+         +-----------+
+       |                                              |
+       | (a) 几何变换                                | (b) 语义扰动
+       v                                              v
++---------+         +----------------+         +-----------+
+| 变换后   | ------> | 视觉编码器     | ------> | 解码器    | ------> 文本 T'
+| 图像    |         +----------------+         +-----------+
++---------+                                        |
+                                                   v
++-------------------------------------------------------------+
+| 奖励计算                                                   |
+| 几何奖励 = d(T, T')  [变换后一致则低]                      |
+| 语义奖励 = d(T, T'') [扰动后一致则低]                      |
+|           + 惩罚：如果区域 X 已被遮挡，T 仍写"有 X"         |
++-------------------------------------------------------------+
+                                              |
+                                              v
++-------------------------------------------------------------+
+| 模型更新：最小化组合奖励                                     |
+|（梯度回传到编码器和解码器）                                 |
++-------------------------------------------------------------+
+```
+
+接下来用一个结构性比喻：想象训练一个保安写值班报告。
+保安（解码器）看着监控屏幕（视觉编码器），写一份报告。
+VISE之前，评估标准是：同一个位置，每次值班写出来的报告要一致——这是一致性。
+但保安可以不看屏幕，每次都写"走廊一切正常"——也能满足一致性要求。
+几何不变性奖励相当于：装两个不同角度的摄像头。
+如果换了摄像头之后保安的报告变了，说明他没看画面。
+语义不变性奖励相当于：在画面里放一个可疑包裹，然后把包裹从画面中移除。
+如果包裹没了，保安还写"发现可疑包裹"，那他显然在胡编。
+VISE同时惩罚这两种行为，迫使保安必须盯着屏幕。
+
+### 关键概念
+
+- **视觉欠条件化**: 解码器的注意力机制给视觉标记（像素或补丁特征）的权重很低，给文本标记（语言先验）的权重很高。
+直观地说，模型在"读提示词+瞎猜"，而不是"看图像+描述"。
+具体例子：一张厨房的照片里根本没有猫，视觉欠条件化的模型仍然输出"一只猫坐在台面上"，因为这个短语在训练语料中对于厨房场景来说统计上很常见。
+检验方法：如果把图像完全遮住，模型还是输出相同的文本，那么它就是欠条件化的。
+
+- **不变性奖励**: 一种训练信号，强制模型输出满足某个特定性质。
+VISE不奖励与标签的一致性，而是奖励：(a) *几何不变性*——在常见的图像变换（旋转、裁剪）下输出应该相似，因为场景的语义内容没有变化；
+(b) *语义不变性*——当预测的视觉证据被扰动时，输出应该改变，因为证据没了，模型应该说"不知道"或调整描述。
+关键洞察：不变性是视觉条件化的一个代理指标——你没法仅靠擅长语言就同时满足两个奖励。
+
+- **免自对弈自演化**: 之前的自演化LMM需要多角色自对弈（模型同时扮演"老师"和"学生"）和自我一致性奖励（奖励学生与老师保持一致）。
+VISE用一个模型、两次前向传播（原始+变换/扰动）、两个简单的距离度量，彻底取代了这套多智能体设置。
+实现起来更简单，而且直接针对问题本身，而不是一个间接的代理目标。
+
+## 框架转变
+
+```
+之前（标准自演化LMM）：                之后（VISE）：
+
+[图像] + [语言提示]                     [图像] + [语言提示]
+         |                                        |
+         v                                        v
+   [视觉编码器]                             [视觉编码器]
+         |                                        |
+         v                                        v
+   [解码器]                                   [解码器]
+         |                                        |
+   +-----+-----+                          +-------+-------+
+   |           |                          |               |
+[自对弈] [自我一致性]               [几何变换]     [语义扰动]
+   |           |                          |               |
+   +-----+-----+                          +-------+-------+
+         |                                        |
+         v                                        v
+   [更新模型：                              [更新模型：
+    优化目标是答案一致性]                    优化目标是视觉条件化]
+         |                                        |
+         v                                        v
+   [输出："一只猫在垫子上"                [输出："一只猫在垫子上"
+    （但图像里可能没有猫）]                 （只有猫真正在时才输出）]
+```
+
+一句话：从优化答案一致性（自我一致性）到优化视觉条件化（几何和语义扰动下的不变性），核心转变是*直接正则化视觉注意力*，使用语言先验无法糊弄的奖励信号。
+
+## 专家评审
+
+**选题眼光**: 真缺口。视觉欠条件化是LMMs的一个已知失效模式，但之前的自演化方法因为认为自我一致性会自动锚定视觉，所以忽略了它。这篇论文干净地识别并孤立了这个问题。在领域的发展轨迹上位置合适——几篇自演化LMM论文之后，但还没有人系统化处理该设置下的视觉注意力问题。
+
+**方法成熟度**: 巧劲而非蛮力。不变性奖励计算代价低（两次前向传播），不需要外部模型。但方法依赖于：(1) 能对图像施加有意义的几何变换（需要空间锚定能力），(2) 能扰动预测区域（要求模型输出边界框或分割）。作者用的Qwen3-VL-2B支持边界框输出。对于没有显式区域预测的模型，语义不变性需要不同的实现方式。
+
+**实验诚意**: 基线选择公平。论文与多个最先进的自演化LMM进行对比，包括之前的主流的自对弈方法，并在18个基准上报告了结果。增益很大（COCO +16.85 CIDEr, TextCaps +19.66），且四个模型家族（Qwen、LLaVA、InternVL、Phi-3-V）结果一致。幻觉降低（-5.0 Chair-I点）显著。一个局限：论文没有在所有基准上单独消融几何奖励和语义奖励的贡献——只在COCO做了消融。希望看到在其他任务上的单独效果。此外，主要实验都使用了同一个基座模型（Qwen3-VL-2B），跨家族泛化使用更小的模型。
+
+**写作功力**: 论文结构清晰，但摘要和引言对**如何*计算几何和语义奖励的说明不够清楚，读者需要深入第3节才能找到精确公式。第3节信息密度很高但内容完整。论文的图是分开画的，如果能用一个图展示两个奖励分支会更好。小问题：缩略词"VISE"在第3节才解释，但标题中已经出现。
+
+**判决**: 弱接收——论文指出了一个自演化LMM中的真实盲点，提出了一个干净且有效的修复方案，并有扎实的实验证据支持。不是突破性工作，但执行得很好，应该会影响未来自演化方法设计奖励函数的方式。
+
+## 要点总结
+
+- **直接视觉条件化奖励**: 将几何变换和语义扰动下的不变性作为训练信号来强制视觉锚定，这个思路可以移植到任何需要视觉注意力的多模态任务中（空间推理型VQA、指代表达理解等）。如果你的模型无视视觉输入，试试这个方法：选一个保持语义的变换（裁剪、旋转、颜色抖动），然后惩罚输出变化。
+
+- **绕过自对弈**: 最实用的一个收获是：做自演化不一定要多角色自对弈。单模型、多前向传播、精心设计的不变性奖励，更简单，而且直接针对问题。这简化了工程实现，也降低了角色切换带来的训练不稳定风险。
+
+- **幻觉诊断工具**: 语义不变性奖励（扰动预测区域后检查输出是否变化）可以作为**诊断*幻觉的工具，不需要单独的幻觉检测器。如果模型在删除预测的视觉证据后输出不变，那它就是在胡编乱造。这是一个廉价、无监督的部署前合理性检查。
+
+:::
