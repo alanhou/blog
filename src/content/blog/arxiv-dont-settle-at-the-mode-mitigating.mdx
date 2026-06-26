@@ -1,0 +1,297 @@
+---
+title:
+  en: "Don't Settle at the Mode! Mitigating Diversity Collapse in Pretrained Flow Models via Feature Self-Guidance"
+  zh: "不要止步于模式！通过特征自引导减轻预训练流模型中的多样性崩溃"
+description:
+  en: "A training-free, plug-and-play module that uses feature self-guidance and manifold regularization to increase sample diversity in flow models without sacrificing conditioning fidelity."
+  zh: "一种无需训练、即插即用的模块，通过特征自引导和流形正则化，在保持条件对齐的同时，显著提升流模型的样本多样性。"
+date: 2026-06-26
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-dont-settle-at-the-mode-mitigating.png"
+---
+
+![Concept animation](/arxiv-visuals/dont-settle-at-the-mode-mitigating/ConceptScene.gif)
+
+
+
+:::en
+**Paper**: [2606.27371](https://arxiv.org/abs/2606.27371)
+**Authors**: Pradhaan S Bhat, Rishubh Parihar, Abhijnya Bhat, R. Venkatesh Babu
+**Categories**: cs.CV
+
+## The Gap
+
+Existing flow models (e.g., Rectified Flow, Flow Matching) can generate stunning images, but when asked to produce multiple samples under the *same* text/image conditioning, they collapse to near-identical outputs. Two families of fixes exist: (1) **latent guidance**—manipulating the initial noise or intermediate latent codes—which is cheap but only pushes diversity slightly; (2) **sample selection**—generating many candidates and picking a diverse subset via an external reward model (e.g., CLIP-based diversity score)—which is expensive at inference time and requires a separately trained judge. Neither solves the root cause: the flow model’s internal features themselves are insufficiently disentangled across the batch. This paper asks: can we directly perturb the model’s own feature activations during generation to force diversity, while keeping those perturbations on the natural image manifold?
+
+```
+[Problem] --> Diversity Collapse under same conditioning
+       |
+       v
+[Assumption] --> Internal features can be dispersed for diversity,
+                 but must stay on-manifold to avoid quality loss
+       |
+       v
+[Method] --> Feature Self-Guidance (disperse) + Manifold Regularization (project)
+       |
+       v
+[Evidence] --> Higher diversity metrics (LPIPS, Vendi) with minimal FID/CLIP loss
+       |
+       v
+[Conclusion] --> Training-free, plug-and-play, marginal cost
+```
+
+## The Increment
+
+**One sentence**: Before this paper, you could either accept limited diversity (latent guidance) or pay heavy inference overhead (sample selection); after this paper, you can get high diversity for free by nudging internal features during batch generation.
+
+### Core Mechanism
+
+The method requires no training or fine-tuning. It acts on a batch of conditioning inputs (e.g., same text prompt, or same depth map) that share the same flow model. At each denoising step, the model produces intermediate feature maps (e.g., from U-Net blocks). The key idea is to **disperse** these features across the batch so that each sample’s features differ from others, then **regularize** them back toward the natural image manifold to prevent artifacts.
+
+Concretely, for each feature position (e.g., spatial location in a feature map), the method computes the mean feature over the entire batch. Then it pushes each sample’s feature away from that mean (repulsion). This creates diversity. However, unconstrained repulsion can push features off the manifold, leading to unnatural outputs. So a regularization step projects the dispersed features onto the low-dimensional subspace spanned by the batch’s principal components of features (i.e., the local linear approximation of the manifold). This ensures that after dispersion, features still lie close to the data manifold.
+
+```
++------------------+      +-----------------------------+
+| Input batch      |      | Batch of features at step t |
+| (same condition) |----->| [z_1, z_2, ..., z_B]       |
++------------------+      +-----------------------------+
+                                     |
+                                     v
+                     +-------------------------------+
+                     | Compute batch mean: mu_z       |
+                     | For each i: z_i' = z_i +       |
+                     |   alpha * (z_i - mu_z)         |
+                     |   / ||z_i - mu_z||             |
+                     +-------------------------------+
+                                     |  Feature Self-Guidance
+                                     v
+                     +-------------------------------+
+                     | Compute batch covariance     |
+                     | PCA on z_i'                   |
+                     | Project each z_i' onto        |
+                     | top-k principal components    |
+                     +-------------------------------+
+                                     |  Manifold Regularization
+                                     v
+                      +-------------------------------+
+                      | z_i'' = regularized features |
+                      | (used for next denoising step)|
+                      +-------------------------------+
+                                     |
+                                     v
+                            +--------+--------+
+                            | Decoder/Output  |
+                            +-----------------+
+```
+
+**Structural metaphor: a choir singing in unison, then given individual improv rules.**  
+Think of a choir (the batch) given the same melody (conditioning). Without intervention, every singer produces almost the same sound (diversity collapse).  
+- **Feature Self-Guidance** is like whispering a unique “twist” to each singer: “slightly raise your third note” or “add a vibrato on the fifth”. These instructions are different per singer, so the overall sound diversifies.  
+- But if the twist is too extreme, the singer might sound like a cat. **Manifold Regularization** is the choir director who listens to the modified sound and gently nudges it back onto a “natural singing” subspace (a set of notes that still fit the song’s style). The director doesn’t tell each singer exactly what to sing—just ensures the twist stays within the acceptable range.  
+The whole process repeats at every section of the piece (every denoising step), and no script (training) is needed—just the director’s ear (PCA).
+
+### Key Concepts
+
+- **Diversity Collapse**: When a generative model produces multiple outputs from the same condition, the outputs are often nearly identical. This is especially severe in flow models because they map a simple prior to the data distribution via a deterministic ODE; if the initial noise is the same, the trajectory collapses. Intuitively, the model “settles at the mode” of the conditional distribution instead of exploring the full manifold.
+
+- **Feature Self-Guidance**: Instead of using an external reward model to judge diversity after generation, this method directly modifies the intermediate features **during* generation. It computes a batch-level repulsion force on the features. Concretely, if two samples have similar features, they are pushed apart in feature space. This is done feature-wise (spatially) and can be applied at any layer. The strength is controlled by a hyperparameter alpha.
+
+- **Manifold Regularization**: The repulsion step alone can produce out-of-distribution features. The method projects the dispersed features back onto the local linear manifold defined by the batch’s principal components (top-k eigenvectors of the feature covariance). This is a cheap, batch-level operation that prevents quality degradation without requiring an explicit density model. It ensures that the diversity injection stays “on the manifold” of plausible images.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+  External Reward Model                Internal Feature Manipulation
+  +---------------------------+        +---------------------------+
+  | Generate N candidates    |        | Generate batch together   |
+  | Score each for diversity |        | At each step, spread      |
+  | Pick top-k              |        | features via repulsion    |
+  | (cost: Nx compute +     |        | + manifold projection     |
+  |  reward model inference)|        | (cost: marginal extra per |
+  +---------------------------+        |  step, no external model)|
+                               |
+  Diversity limited by reward         Diversity controlled by alpha
+  model's own biases                  + PCA rank; no bias
+```
+
+One sentence: From **external model-based selection** to **internal feature-based guidance**, the core shift is moving diversity control inside the generation loop, making it both cheaper and more direct.
+
+## Expert Assessment
+
+**Problem choice**: Real gap—diversity collapse in flow models is a known frustration for practitioners. The paper correctly identifies that existing remedies are either weak or expensive. However, it’s a niche within generative modeling; not a field-defining problem.
+
+**Method maturity**: Clever insight—using batch-level repulsion on intermediate features is simple and elegant. The manifold regularization via PCA is a bit brute-force (linear approximation of a nonlinear manifold), but it works empirically. Could there be a simpler approach? Possibly just using dropout-like noise, but the paper shows this method outperforms that.
+
+**Experimental integrity**: Baselines are reasonable: they compare against vanilla flow, latent guidance, and sample selection with CLIP. Tables show consistent gains in diversity (LPIPS, Vendi) with negligible loss in FID and CLIP score. One red flag: all experiments are on a single flow model architecture (Stable Diffusion v2.1-based); generalizability to other flow backbones is not strongly demonstrated. Also, the hyperparameter alpha is tuned per task—may require calibration.
+
+**Writing quality**: Clear structure, but the “Feature Self-Guidance” section could use a toy diagram (included here). The paper’s theory section is sparse; more intuition about why repulsion works and why PCA projection doesn’t kill diversity would help.
+
+**Verdict**: weak accept — A practical, training-free technique that addresses a real pain point with a clever yet simple mechanism. Not a breakthrough, but a solid contribution that many practitioners will adopt.
+
+## Takeaways
+
+- **Steal the idea of batch-level repulsion on intermediate features**: This can be applied to any iterative generative model (diffusion, flow, score-based) to increase diversity. Just compute batch mean and push apart.
+- **Steal the manifold regularization trick**: When you add diversity to latent features, always project back to the batch’s principal subspace to avoid quality collapse. This is a cheap post-hoc fix.
+- **Steal the plug-and-play design**: The method requires no training, no extra reward model. It can be injected into existing inference pipelines with a few lines of code. If you run batch generation, you can adopt this immediately.
+:::
+
+:::zh
+**论文**: [2606.27371](https://arxiv.org/abs/2606.27371)
+**作者**: Pradhaan S Bhat, Rishubh Parihar, Abhijnya Bhat, R. Venkatesh Babu
+**分类**: cs.CV
+
+## 缺口
+
+当前最优的流模型（如 Rectified Flow、Flow Matching）能生成惊人的图像。
+但当你用同一个条件（同一段文字或同一张深度图）要求它生成多张图时，输出会高度相似甚至一模一样，这就是多样性崩溃。
+现有解决手段分两类：（1）**潜变量引导**——修改初始噪声或中间潜变量，成本低但提升有限；
+（2）**样本筛选**——先生成大量候选，再靠外部奖励模型（如基于CLIP的多样性打分）挑出多样化的子集，推理延迟大且需要额外的评判模型。
+这两种方法都没触及根本：模型内部特征在batch内缺乏分离度。
+本文问：能不能直接在生成过程中扰动模型自身的特征激活，强制多样性，同时又保证这些扰动不跳出自然图像流形？
+
+```
+[问题] -> 相同条件下的多样性崩溃
+    |
+    v
+[假设] -> 内部特征可以被分散以增加多样性，
+         但必须保持在流形上，避免质量损失
+    |
+    v
+[方法] -> 特征自引导（分散）+ 流形正则化（投影）
+    |
+    v
+[证据] -> 多样性指标（LPIPS、Vendi）提升，
+          FID/CLIP损失极小
+    |
+    v
+[结论] -> 无需训练、即插即用、边际成本
+```
+
+## 增量
+
+**一句话**: 本文之前，你要么接受有限的多样性（潜引导），要么承担高昂的推理开销（样本筛选）；
+本文之后，你只需在batch生成时拨动内部特征，就能免费获得高多样性。
+
+### 核心机制
+
+该方法不需要训练或微调，作用于共享同一流模型的batch输入（例如同一段提示词）。
+在每个去噪步骤，模型产出中间特征图（例如来自U-Net的隐藏层特征）。
+核心思想是**分散**这些特征，让batch中每个样本的特征彼此远离，然后**正则化**它们，使其回到自然图像流形上，避免伪影。
+
+具体来说，对于特征图的每个空间位置，先计算整个batch在该位置的特征均值。
+然后，将每个样本的特征朝着远离该均值的方向推开（排斥力），从而创造多样性。
+但无约束的排斥可能将特征推出流形，导致异常输出。
+因此，正则化步骤将分散后的特征投影到由batch特征主成分张成的低维子空间上（即流形的局部线性近似），确保分散后的特征仍然靠近数据流形。
+
+```
++------------------+      +-----------------------------+
+| 输入batch         |      | 第t步的特征                 |
+| (同条件)          |----->| [z_1, z_2, ..., z_B]       |
++------------------+      +-----------------------------+
+                                  |
+                                  v
+                     +-------------------------------+
+                     | 计算batch均值: mu_z           |
+                     | 对每个i: z_i' = z_i +        |
+                     |   alpha * (z_i - mu_z)       |
+                     |   / ||z_i - mu_z||           |
+                     +-------------------------------+
+                                  |  特征自引导
+                                  v
+                     +-------------------------------+
+                     | 计算batch协方差               |
+                     | 对z_i'做PCA                    |
+                     | 将每个z_i'投影到               |
+                     | 前k个主成分                  |
+                     +-------------------------------+
+                                  |  流形正则化
+                                  v
+                     +-------------------------------+
+                     | z_i'' = 正则化后的特征        |
+                     | （用于下一步去噪）            |
+                     +-------------------------------+
+                                  |
+                                  v
+                            +--------+--------+
+                            | 解码器/输出      |
+                            +-----------------+
+```
+
+**核喻：一个合唱团从齐唱变成即兴规则下的合奏。**
+把batch想象成一个合唱团，大家唱同一段旋律（条件）。
+不加干预时，每个歌手几乎唱得一样（多样性崩溃）。
+- **特征自引导**就是给每个歌手耳语一句独特的“发挥指令”：“你的第三音稍微升一点”或“第五音加个颤音”。
+每个人的指令都不同，整体声音就多样化了。
+- 但如果发挥过头，歌手可能变成猫叫。
+**流形正则化**就是合唱指挥，他听了修改后的声音，轻轻把它推回“自然歌唱”子空间（一组仍然符合歌曲风格的音）。
+指挥不告诉每个歌手具体唱什么，只是确保“发挥”落在可接受范围内。
+整个过程在整首曲子的每个段落（每个去噪步）重复，不需要乐谱（训练）——只需要指挥的耳朵（PCA）。
+
+### 关键概念
+
+- **多样性崩溃**：当生成模型在同一条件下产出的多个输出几乎一模一样时，就是多样性崩溃。
+这在流模型中尤为严重，因为模型通过确定性ODE将简单先验映射到数据分布；
+如果初始噪声相同，轨迹就会重合。
+直观上，模型“卡在条件分布的众数”上，而不是探索整个流形。
+
+- **特征自引导**：本文不用外部奖励模型来事后筛选多样性，而是直接在生成过程中修改中间特征。
+它计算一个batch级别的排斥力施加在特征上。
+具体而言，如果两个样本的特征相似，就在特征空间中把它们推开。
+这种操作是按空间位置逐点进行的，可以施加在任意层。
+强度由超参数alpha控制。
+
+- **流形正则化**：单靠排斥力会产生分布外的特征。
+该方法将分散后的特征投影到由batch特征主成分（协方差矩阵的前k个特征向量）张成的局部线性流形上。
+这是一种廉价、基于batch的操作，不需要显式的密度模型，就能避免质量下降，确保多样性注入始终在“可能的图像流形”上。
+
+## 框架转变
+
+```
+之前（主流方法）:                    之后（本文方法）:
+
+  外部奖励模型                        内部特征操作
+  +---------------------------+       +---------------------------+
+  | 生成N个候选               |       | 一起生成batch              |
+  | 用多样性打分              |       | 每一步：用排斥力分散特征  |
+  | 挑前k个                  |       | + 流形投影                |
+  | （成本：N倍计算 +         |       | （成本：每步额外一点，无外部模型）|
+  |  奖励模型推理）           |       |                           |
+  +---------------------------+       +---------------------------+
+                               |
+  多样性受限于奖励模型自身偏见          多样性由alpha和PCA秩控制，无偏见
+```
+
+一句话：从**基于外部模型的筛选**到**基于内部特征的引导**，核心转变是把多样性控制移到生成循环内部，既更便宜又更直接。
+
+## 专家评审
+
+**选题眼光**: 真实痛点——流模型的多样性崩溃是实践者熟知的烦恼。
+本文准确指出现有方案要么弱要么贵。
+但这个问题在生成模型领域中属于细分方向，并非领域定义性的问题。
+
+**方法成熟度**: 巧思——使用batch级的特征排斥简洁而优雅。
+用PCA作为流形正则化略显暴力（线性近似非线性流形），但实证有效。
+有没有更简单的方法？可能加上类似dropout的噪声就够了，但本文实验显示此方法优于这类基线。
+
+**实验诚意**: 基线合理：与vanilla流、潜引导、CLIP样本筛选对比。
+表格显示多样性（LPIPS、Vendi）稳步提升，FID和CLIP分数损失极小。
+一个值得警惕的地方：所有实验基于单一流模型架构（Stable Diffusion v2.1的变体），对其他流模型骨架的推广性未充分展示。
+此外，超参数alpha需要针对任务调优——可能增加使用门槛。
+
+**写作功力**: 结构清晰，但“特征自引导”部分可以用示意图更好说明（本文已给出）。
+论文理论部分较单薄，如果能多解释为什么排斥有效、为什么PCA投影不会消灭多样性会更好。
+
+**判决**: 弱接收 —— 一种实用、无需训练的技术，以巧妙而简单的机制解决了真实痛点。
+不是突破性成果，但的确是很多实践者会直接抄走的扎实贡献。
+
+## 要点总结
+
+- **偷走batch级特征排斥的想法**：这种做法可以应用于任何迭代式生成模型（扩散、流、基于分数的），只需计算batch均值并推开。
+- **偷走流形正则化的技巧**：当你在潜特征中加入多样性时，一定要投影回batch的主成分子空间以避免质量崩溃。
+这是一种廉价的“事后修正”。
+- **偷走即插即用的设计思路**：方法不需要训练，不需要额外奖励模型。
+只需几行代码就能嵌入现有推理流程。
+如果你做batch生成，可以立刻用起来。
+:::

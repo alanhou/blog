@@ -1,0 +1,299 @@
+---
+title:
+  en: "RayPE: Ray-Space Positional Encoding for 3D-Aware Video Generation"
+  zh: "RayPE：面向3D感知视频生成的射线空间位置编码"
+description:
+  en: "Video diffusion transformers lack 3D geometric awareness because they position tokens only on the 2D+time sampling grid. This paper injects per-ray Plücker coordinates into self-attention, turning the attention score into a content term plus an explicit geometry term that mirrors the Plücker reciprocal product."
+  zh: "视频扩散Transformer仅在2D+时间采样网格上定位token，缺乏3D几何感知。本文通过将每条射线的Plücker坐标注入自注意力，使注意力分数分解为内容项+显式几何项，后者恰好与Plücker互易积同构。"
+date: 2026-06-26
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.27345](https://arxiv.org/abs/2606.27345)
+**Authors**: Minghao Yin, Jiahao Lu, Wenbo Hu, Wang Zhao, Shan Ying, Kai Han
+**Categories**: cs.CV
+
+## The Gap
+
+Existing video diffusion transformers (e.g., Video DiT, Open-Sora) parameterize token positions using RoPE on the (u,v,t) axes — essentially the camera’s 2D pixel grid plus frame index. This tells the model where a pixel sits on the image plane but nothing about the 3D ray that generated it. Two pixels at the same (u,v,t) from different cameras can correspond to completely different 3D points, so the model can’t reason about 3D geometry across views or over time.
+
+Earlier work tried grounding video tokens with 3D poses (e.g., camera conditioning, epipolar constraints), but these either required heavy per-frame annotations or were injected externally rather than baked into the attention mechanism itself. The core limitation is that the positional encoding in the attention layer has no access to ray geometry — it treats all tokens as points in a flat grid, not as the roots of 3D rays.
+
+RayPE fills this gap by reformulating positional encoding itself: instead of encoding grid coordinates, it encodes the **Plücker coordinates** of each ray, and uses the algebraic similarity between the Plücker reciprocal product and the dot product in attention to inject geometry directly into the attention score.
+
+```
+[ASCII logic topology]
+
+Problem:  RoPE on (u,v,t) ignores the 3D ray structure of each token
+              |
+              v
+Assumption:  Adding explicit ray geometry (Pluecker coords) into Q/K
+             yields 3D-aware attention scores
+              |
+              v
+Method:  For each token, compute ray direction d and moment m = r x d.
+         Form Q = (d, m) and K = (m, d) so that Q*K = d1*m2 + m1*d2
+         which equals the Pluecker reciprocal product.
+         Add this geometrically meaningful term to the content attention.
+         Stabilize across different camera scales via gating + RMSNorm.
+              |
+              v
+Evidence:  Experiments on 4-dataset mix show improved camera control,
+           cross-frame 3D consistency, and overall video quality.
+           (e.g., FVD gains, better pose-following in text-to-video)
+              |
+              v
+Conclusion:  Injecting ray-space geometry into positional encoding is
+             lightweight ( <0.1% parameter overhead ), zero-initialized,
+             and consistently 3D-aware.
+```
+
+## The Increment
+
+**One sentence**: Before RayPE, attention in video diffusion saw only flat grid coordinates; after RayPE, attention also “sees” the 3D geometric relationship between every pair of rays, encoded through the Plücker reciprocal product — and this costs almost no extra parameters.
+
+### Core Mechanism
+
+**Step 1: From pixels to rays.** Every video token sits at a pixel (u,v) in frame t. With known camera intrinsics and extrinsics for each frame, we can compute the 3D ray: a direction vector d (unit length) and a moment vector m = r × d, where r is the origin of the ray (camera center). The pair (d,m) is the **Plücker coordinate** of the ray — a 6D representation that fully captures its 3D position and orientation.
+
+**Step 2: Build geometry-aware Q and K.** Standard self-attention takes a token’s content embedding, adds positional encoding (RoPE), then projects to Q and K. RayPE adds an **additional* 6D vector to Q and K before the projection. Crucially, the paper arranges the Plücker components differently for Q and K:
+
+- For the query token: add the full vector (d, m)
+- For the key token: add the swapped vector (m, d)
+
+Why the swap? Because then the dot product between Q and K contains a term d_query · m_key + m_query · d_key, which is exactly the **Plücker reciprocal product** of the two rays. This product is zero when the two rays intersect (or are parallel) and grows as they move apart — a natural geometric distance.
+
+**Step 3: Decompose the attention score.** With the additive injection, the attention score becomes:
+
+`score = content_term + geometry_term + cross_terms(content, geometry)`
+
+where the geometry_term is precisely the Plücker reciprocal product, and the cross_terms are bilinear in content and geometry. All four terms are learned, but the paper ablates and finds each is necessary for best performance.
+
+**Step 4: Stabilize across camera scales.** Real-world video data comes from SfM, deep SLAM, or metric reconstructions — the magnitude of the moment vector m can vary wildly (e.g., if the camera is far from the scene vs. close). To prevent this heterogeneity from biasing attention, the authors decouple direction from magnitude: they use a learned gating function on the log-magnitude and apply RMSNorm to the geometry branch so its norm aligns with the QKNorm-normalized content branch. This ensures the geometric contribution doesn’t overpower or vanish.
+
+The whole module adds &lt;0.1% parameters (just a 6D linear layer and a scalar gate), is zero-initialized so pretrained weights are unchanged at start, and can be fine-tuned end-to-end.
+
+```
+[ASCII diagram of method internals]
+
+Input token (frame t, pixel u,v)
+   |
+   +---[Content embedding]------------------------------+
+   |                                                    |
+   |  Camera parameters                                 |
+   +---[ Ray computation: d, m = r x d ]               |
+   |                                                    |
+   |  d and m are 3D vectors                           |
+   |  +-- For Q: form vector v_q = (d, m) [6D]        |
+   |  +-- For K: form vector v_k = (m, d) [6D]        |
+   |                                                    |
+   |  Gating: scale v_q,v_k by sigmoid(MLP(log|m|))    |
+   |  RMSNorm to match content norm                    |
+   |                                                    |
+   +-------> [Add to Q_proj_raw and K_proj_raw] -------+
+                                    |
+                                    v
+   Q and K now contain           original content +  geometry embedding
+   (with RoPE still applied on content part separately? They add to proj raw, so RoPE on content stays unchanged.)
+   |
+   v
+Attention(Q,K,V)  =  softmax( Q*K / sqrt(dim) ) * V
+   where Q*K decomposes into content + geometry + cross terms
+```
+
+**Structural metaphor**: Think of each token as a **pointing laser pointer** held by a person at a certain location. The laser has a direction (the beam) and the person’s arm length times beam direction (roughly, the “moment” capturing where the beam originates in 3D). The usual position encoding (u,v,t) only tells you the pixel coordinate of the laser dot on the video frame — it says nothing about where the person is standing or which way they’re pointing. RayPE gives each person a **name tag** that contains two pieces of info: the direction they’re pointing (d) and their “arm-moment” (m). When two people (tokens) exchange information via attention, one reads the other’s tag in normal order (d,m), but the other reads their own tag in swapped order (m,d). Then the “dot product” of their tag reading yields a number that directly encodes whether the two laser beams intersect, how far apart they are, etc. — a geometric intuition that was completely absent before.
+
+### Key Concepts
+
+- **Plücker coordinates**: A way to represent an oriented line in 3D with 6 numbers: direction d (a unit vector) and moment m = r × d (where r is any point on the line, typically the origin of the ray). Unlike (point, direction) representations, the Plücker coordinate is homogeneous and doesn’t depend on which point on the line you choose. Example: two rays from different cameras that see the same 3D point have Plücker coordinates that satisfy d1·m2 + d2·m1 = 0 (i.e., reciprocal product zero). This property is exactly what the paper exploits to make the geometry term sparse for intersecting rays, and positive/negative for non-intersecting rays.
+
+- **Reciprocal product**: For two Plücker rays (d1,m1) and (d2,m2), the reciprocal product is π = d1·m2 + d2·m1. It’s bilinear and symmetric up to a sign. Geometrically, π = 0 means the rays either intersect or are parallel (in which case the signed distance times the sine of the angle? Actually, π = sin(θ)·(distance between rays) for normalized directions). So the attention can learn to use this value to attend to tokens whose rays are geometrically related.
+
+- **Gating and RMSNorm**: Since the magnitude of m depends on camera translation scale, the authors apply a learned sigmoid gate that scales the geometry injection: gate = σ(MLP(log||m||)). This prevents huge moments from dominating small ones. Additionally, they RMSNormalize the geometry embedding to match the content embedding’s norm — critical because the pretrained model expects Q/K entries to have roughly unit norm from QKNorm.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+                                       Token1                 Token2
+Token1 (u1,v1,t1)                    (d1,m1) Q               (d2,m2) K
+Token2 (u2,v2,t2)                      (M1,D1)                    (D2,M2)
+   |         |                          |      |              |      |
+RoPE only on 2D+T                     Additive Pluecker     Pluecker
+   |         |                         injection             injection
+   v         v                          |      |              |      |
+Content-based attention               Q*K = content_term
+  (geometric blind)                         + geometry_term (reciprocal product)
+                                            + cross_terms
+                                       The attention now sees 3D geometry
+```
+
+From encoding pixel-grid coordinates to encoding ray-space Plücker coordinates, the core shift is: **Positional encoding now carries geometric meaning directly derived from the physical camera ray, not just the image-plane sampling lattice.**
+
+## Expert Assessment
+
+**Problem choice**: Real gap. The video diffusion community has been aware that 3D consistency requires some form of geometrical grounding, but previous attempts (epipolar attention, camera embeddings) were either computationally heavy or didn’t play well with pretrained transformers. RayPE hits the sweet spot: minimal overhead, zero-initialization, and works out of the box with DiT. It sits at the intersection of 3D vision and generative models — a hot area.
+
+**Method maturity**: Clever insight, not brute force. The key intellectual move is recognizing that the Plücker reciprocal product has the same bilinear form as the dot product in attention, and then the asymmetric Q/K swap to make the identity hold. That’s elegant. The gating/normalization is well-motivated and practical. No simpler approach could achieve the same effect with such low cost — you could concatenate ray parameters to tokens, but that doesn’t give the explicit geometry term in the attention score.
+
+**Experimental integrity**: Fair baselines (they compare against vanilla DiT, camera conditioning baselines). Metrics include FVD, CLIP, user study, and camera controllability tests. One minor red flag: the paper uses a four-dataset mixture (RealEstate10K, DL3DV, etc.) but doesn’t ablate per-dataset performance — could be that improvements are driven by one dataset while others stagnate. Also, the reported parameter count &lt;0.1% is technically true but doesn’t account for training overhead; however, the method is equivalent to a small linear layer so it’s negligible. Overall, the evidence supports the claims.
+
+**Writing quality**: Clear and well-structured. The mathematical analogy (Plücker ↔ attention dot product) is explained nicely. The one weak section is the ablation of the cross-terms — they say “each is necessary” but only show two ablations; a full table would be more convincing. Rewriting the ablation section to include all 2^4 = 16 combinations (or at least contrast content-only, geometry-only, both, and full model) would elevate the paper.
+
+**Verdict**: strong accept — a simple, principled, and clearly effective geometric injection for video diffusion, with immediate practical utility.
+
+## Takeaways
+
+A practitioner can steal the following:
+
+1. **The Plücker reciprocal product as an attention geometry loss**: Any attention-based model operating on rays (e.g., NeRFs, event cameras, multi-view) could use a similar additive term to encode geometric awareness without extra network complexity.
+2. **Asymmetric Q/K injection**: The trick of swapping components between query and key is general — if you have a symmetric bilinear form that measures pairwise relationships, you can embed it into Q and K by splitting the features appropriately, so the dot product recovers that form.
+3. **Scale stabilization by gating log-magnitude**: Whenever input features have a wide dynamic range (e.g., depth, scale), use a learned gate on the log-magnitude and RMSNorm to keep the signal balanced. This is especially helpful when fine-tuning pretrained models whose internal norms are fixed.
+4. **Zero-initialization for preservation**: Adding new modules to pretrained models but zero-initializing them ensures the model starts from the pretrained behavior and gradually learns the new information — a good practice for incremental upgrades.
+
+:::
+
+:::zh
+**论文**: [2606.27345](https://arxiv.org/abs/2606.27345)
+**作者**: Minghao Yin, Jiahao Lu, Wenbo Hu, Wang Zhao, Shan Ying, Kai Han
+**分类**: cs.CV
+
+## 缺口
+
+现有视频扩散Transformer（如Video DiT、Open-Sora）使用RoPE在(u,v,t)轴上参数化token位置——本质上是相机的2D像素网格加帧索引。这告诉了模型像素在图像平面上的位置，但没有关于产生该像素的3D射线的任何信息。来自不同相机的两个像素在相同(u,v,t)可能对应完全不同的3D点，因此模型无法跨视角或跨时间推理3D几何。
+
+之前的工作试图将视频token与3D姿态（如相机条件、对极约束）相结合，但要么需要每帧的繁重标注，要么是外部注入而非内嵌到注意力机制本身。核心局限在于注意力层中的位置编码无法访问射线几何——它将所有token视为平面网格上的点，而非3D射线的根部。
+
+RayPE通过重新定义位置编码本身来填补这一空白：它编码每条射线的**Plücker坐标**，并利用Plücker互易积与注意力中点积在代数上的相似性，直接将几何注入注意力分数。
+
+```
+[ASCII 逻辑拓扑图]
+
+问题:  RoPE on (u,v,t) 忽略了每个 token 的 3D 射线结构
+              |
+              v
+假设:  将显式射线几何 (Pluecker 坐标) 加入到 Q/K 中
+        可以得到 3D 感知的注意力分数
+              |
+              v
+方法:  对每个 token, 计算射线方向 d 和矩 m = r x d。
+        令 Q = (d, m) 且 K = (m, d), 这样 Q*K = d1*m2 + m1*d2
+        等于 Pluecker 互易积。
+        将这个有几何意义的项加到内容注意力上。
+        通过门控 + RMSNorm 在不同相机尺度下稳定。
+              |
+              v
+证据:  在 4 个数据集混合训练上的实验显示: 相机可控性提升,
+        跨帧 3D 一致性增强, 整体视频质量改善 (如 FVD 增益,
+        text-to-video 中姿态跟随更好)。
+              |
+              v
+结论:  将射线空间几何注入位置编码是轻量级的 (<0.1% 参数开销),
+        零初始化, 且持续带来 3D 感知能力。
+```
+
+## 增量
+
+**一句话**: 在RayPE之前，视频扩散中的注意力只看平面网格坐标；在RayPE之后，注意力同时还“看到”每对射线之间的3D几何关系，通过Plücker互易积编码——而这几乎不增加参数。
+
+### 核心机制
+
+**第一步：从像素到射线。** 每个视频token位于帧t的像素(u,v)。已知每帧的相机内参和外参，我们可以计算出3D射线：方向向量d（单位长度）和矩向量m = r × d，其中r是射线起点（相机中心）。(d,m)对就是该射线的**Plücker坐标**——一个6D表示，完整捕捉了射线的3D位置和朝向。
+
+**第二步：构建几何感知的Q和K。** 标准自注意力将token的内容嵌入加上位置编码（RoPE），然后投影到Q和K。RayPE在投影前向Q和K**额外添加**一个6D向量。关键的是，论文对Q和K使用了不同的Plücker分量排列：
+
+- 对query token：添加完整向量 (d, m)
+- 对key token：添加交换后的向量 (m, d)
+
+为什么交换？因为这样Q和K的点积会包含一个项 d_query · m_key + m_query · d_key，这恰好就是两条射线的**Plücker互易积**。当两条射线相交时该项为零，离得越远数值越大——一种自然的几何距离。
+
+**第三步：分解注意力分数。** 通过加性注入，注意力分数成为：
+
+`score = 内容项 + 几何项 + 交叉项(内容, 几何)`
+
+其中几何项就是Plücker互易积，交叉项是内容和几何的线性组合。所有四项都是学习的，但论文通过消融实验发现每项都是最优性能所必需的。
+
+**第四步：跨相机尺度稳定。** 真实视频数据来自SfM、深度SLAM或度量重建——矩向量m的大小可能变化极大（例如相机离场景远 vs 近）。为防止这种异质性影响注意力，作者将方向与大小解耦：使用一个学习到的门控函数作用于log-大小，并对几何分支应用RMSNorm使其范数与经过QKNorm归一化的内容分支匹配。这确保了几何贡献不会压倒或消失。
+
+整个模块添加 &lt;0.1% 参数（仅一个6D线性层和一个标量门控），零初始化使得预训练权重开始时不变，可以端到端微调。
+
+```
+[方法内部 ASCII 图]
+
+输入 token (帧t, 像素u,v)
+   |
+   +---[内容嵌入]-------------------------------------------+
+   |                                                     |
+   |  相机参数                                             |
+   +---[ 射线计算: d, m = r x d ]                          |
+   |                                                     |
+   |  d 和 m 是 3D 向量                                   |
+   |  +-- 对 Q: 组成向量 v_q = (d, m) [6D]                |
+   |  +-- 对 K: 组成向量 v_k = (m, d) [6D]                |
+   |                                                     |
+   |  门控: 用 sigmoid(MLP(log|m|)) 缩放 v_q, v_k           |
+   |  RMSNorm 以匹配内容范数                                |
+   |                                                     |
+   +-------> [加到 Q_proj_raw 和 K_proj_raw 之上] ----------+
+                                    |
+                                    v
+   Q 和 K 现在包含          原始内容 + 几何嵌入
+  (RoPE 仍然单独加在内容部分上? 他们加在投影原始上，所以 RoPE 保持不变)
+   |
+   v
+Attention(Q,K,V)  =  softmax( Q*K / sqrt(dim) ) * V
+  其中 Q*K 分解为 内容 + 几何 + 交叉项
+```
+
+**核喻**: 把每个token想象成一个人举着一个**指示激光笔**，人站在某个位置。激光有方向（光束），以及人的臂长乘以光束方向（大致相当于“矩”，捕捉光束在3D中的起点）。通常的位置编码(u,v,t)只告诉你激光点在视频帧上的像素坐标——它完全不说人站在哪里、指向何方。RayPE给了每个人一个**姓名牌**，上面有两项信息：指向方向(d)和“臂矩”(m)。当两个人（token）通过注意力交换信息时，一个人按正常顺序读取另一个人的牌子(d,m)，但另一个人按交换顺序读取自己的牌子(m,d)。于是他们牌子读出的“点积”就产生一个数字，直接编码了两束激光是否相交、相距多远等——一种之前完全缺席的几何直觉。
+
+### 关键概念
+
+- **Plücker坐标**: 一种用6个数表示3D中有向直线的方式：方向d（单位向量）和矩m = r × d，其中r是直线上任意一点（通常取射线起点）。与(点,方向)表示不同，Plücker坐标是齐次的，不依赖于你选直线上的哪个点。例如：从不同相机出发、看到同一3D点的两条射线，其Plücker坐标满足d1·m2 + d2·m1 = 0（即互易积为零）。这个性质正是论文利用的，使几何项在相交射线处稀疏，在不相交时变得正或负。
+
+- **互易积**: 对两条Plücker射线(d1,m1)和(d2,m2)，互易积π = d1·m2 + d2·m1。它是双线性的，对称性仅差一个符号。几何上，π = sin(θ)·(两射线间距离)（当方向归一化时）。因此注意力可以学会使用这个值来关注几何相关的token。
+
+- **门控和RMSNorm**: 由于m的大小依赖于相机平移尺度，作者应用一个学习到的sigmoid门控来缩放几何注入：gate = σ(MLP(log||m||))。这防止了大量矩支配小量矩。此外，他们对几何嵌入做RMSNormalization以匹配内容嵌入的范数——这很关键，因为预训练模型期望通过QKNorm后Q/K条目大致具有单位范数。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+                                       Token1                 Token2
+Token1 (u1,v1,t1)                    (d1,m1) Q               (d2,m2) K
+Token2 (u2,v2,t2)                      (M1,D1)                    (D2,M2)
+   |         |                          |      |              |      |
+RoPE only on 2D+T                     Additive Pluecker     Pluecker
+   |         |                         injection             injection
+   v         v                          |      |              |      |
+基于内容的注意力                        Q*K = 内容项
+  (几何盲)                                    + 几何项 (互易积)
+                                             + 交叉项
+                                       注意力现在看到了 3D 几何
+```
+
+从编码像素网格坐标到编码射线空间Plücker坐标，核心转变是：**位置编码现在直接携带从物理相机射线推导出的几何含义，而不仅仅是图像平面采样格点。**
+
+## 专家评审
+
+**选题眼光**: 真正的缺口。视频扩散社区早已认识到3D一致性需要某种几何基础，但之前的尝试（对极注意力、相机嵌入）要么计算量大，要么与预训练Transformer不兼容。RayPE找到了甜点：几乎无开销、零初始化、即插即用于DiT。它处于3D视觉与生成模型的交叉点上——热门地带。
+
+**方法成熟度**: 巧思而非蛮力。关键智力跳跃是认识到Plücker互易积与注意力点积具有相同双线性形式，然后利用不对称Q/K交换使恒等式成立。这很优雅。门控/归一化的动机明确且实用。没有更简单的方法能在如此低代价下达到相同效果——你可以将射线参数拼接到token上，但那不会在注意力分数中产生显式的几何项。
+
+**实验诚意**: 基线公平（比较了vanilla DiT、相机条件基线）。指标包括FVD、CLIP、用户研究和相机可控性测试。一个小红旗：论文使用了四个数据集的混合（RealEstate10K、DL3DV等），但没有按数据集消融——可能改进是由某个数据集驱动的，其他数据集停滞。另外，报告的&lt;0.1%参数在技术上正确，但未考虑训练开销；不过方法等价于一个小线性层，可以忽略。总体而言，证据支持结论。
+
+**写作功力**: 清晰且结构良好。数学类比（Plücker ↔ 注意力点积）解释得很好。唯一较弱的章节是交叉项的消融——他们只说“每项都是必要的”，但只展示了两项消融；如果展示所有2^4=16种组合（或至少对比只有内容、只有几何、两者兼有和完整模型）会更有说服力。重写该消融章节能使整篇论文上一个档次。
+
+**判决**: 强接收——一个简洁、有原则且明显有效的视频扩散几何注入方法，具有直接实用价值。
+
+## 要点总结
+
+实践者可以从本文“偷”走以下内容：
+
+1. **将Plücker互易积用作注意力几何损失**: 任何操作射线的注意力模型（如NeRF、事件相机、多视图）都可以使用类似的加性项来编码几何意识，无需额外网络复杂度。
+2. **不对称Q/K注入**: 在query和key之间交换成分的技巧是通用的——如果你有一个度量成对关系的对称双线性形式，可以通过适当拆分特征将其嵌入到Q和K中，使得点积恢复该形式。
+3. **通过对数大小门控进行尺度稳定**: 当输入特征具有很大的动态范围（如深度、尺度）时，使用一个基于log-大小的学习门控和RMSNorm来保持信号平衡。这在微调预训练模型时尤其有用，因为其内部范数是固定的。
+4. **零初始化以保护预训练**: 向预训练模型添加新模块但零初始化，确保模型从预训练行为开始，逐步学习新信息——这是一种增量升级的好实践。
+:::
