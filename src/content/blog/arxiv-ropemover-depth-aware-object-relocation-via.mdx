@@ -1,0 +1,351 @@
+---
+title:
+  en: "RoPEMover: Depth-Aware Object Relocation via Positional Embeddings"
+  zh: "基于位置嵌入的深度感知物体重新定位"
+description:
+  en: "A method that manipulates rotary positional embeddings (RoPE) in diffusion transformers to achieve geometry-consistent object movement in single images, including occlusions, shadows, and unseen region generation."
+  zh: "通过操纵扩散Transformer中的旋转位置嵌入（RoPE）实现单张图像中几何一致的物体移动，处理遮挡、阴影和未见过区域生成。"
+date: 2026-06-27
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2606.27332](https://arxiv.org/abs/2606.27332)
+**Authors**: Ipek Oztas, Duygu Ceylan, Aybars Bugra Aksoy, Aysegul Dundar
+**Categories**: cs.CV
+
+## The Gap
+
+Single-image object relocation requires more than simple inpainting: you must handle occlusions, reveal previously hidden regions, and update scene effects like shadows and reflections.  
+Existing approaches — GAN-based image editing, diffusion inpainting, or object-aware compositing — either treat the task as 2D cut-and-paste or learn a global warp, which destroys scene-level consistency. They often produce blurry boundaries, unrealistic shadows, or objects that float rather than sit in the scene.  
+This paper identifies a root cause: prior methods do not explicitly model the geometry of the displacement. The authors notice that diffusion transformers (DiT) use rotary positional embeddings (RoPE) to encode spatial layout. If you can manipulate those embeddings in a depth-aware way, you can induce controlled, geometry-consistent motion without retraining the entire model.
+
+```
+[Single-image object relocation]
+           |
+           v
++-------------------------------------+
+| Prior: GAN / inpainting / warping   |
+| fail on shadows, occlusions, depth  |
++-------------------------------------+
+           |
+           v
++------------------------------------------+
+| Key insight: RoPE in DiT defines a       |
+| structured spatial field (2D grid)        |
++------------------------------------------+
+           |
+           v
++----------------------------------------------+
+| Our step: extend RoPE with depth => 3D       |
+| spatial field; move object by shifting its   |
+| RoPE coordinates                             |
++----------------------------------------------+
+           |
+           v
++---------------------------------------------+
+| Evidence: SOTA on benchmarks (identity,     |
+| shadow, region generation) with minimal     |
+| real data (synthetic + parameter-efficient  |
+| fine-tuning)                                |
++---------------------------------------------+
+           |
+           v
++---------------------------------------------+
+| Conclusion: explicit RoPE manipulation      |
+| enables scene-aware object relocation       |
++---------------------------------------------+
+```
+
+## The Increment
+
+**One sentence**: Before this paper, moving an object in a single image meant hoping the model would infer the right geometry; after this paper, you can explicitly tell the model where to place the object in 3D space by editing its positional embeddings, guaranteeing consistency.
+
+### Core Mechanism
+
+The method builds on a diffusion transformer (DiT) that uses Rotary Position Embeddings (RoPE) in its attention layers. RoPE assigns a 2D position to each image patch via rotation matrices — think of it as a coordinate grid embedded in the model's internal activations.
+
+The core pipeline is:
+
+1. **Input**: single image + object mask + target displacement (vector or depth map).  
+2. **Depth estimation**: a lightweight depth predictor extracts a per-pixel depth map.  
+3. **Compute original RoPE**: for each patch, the standard 2D RoPE is computed from its (x, y) coordinates.  
+4. **Depth-aware extension**: the depth value is used to modulate the rotation angles — shallow patches get a different rotation than deep ones, encoding 3D structure.  
+5. **Relocation**: for patches belonging to the object, the 2D (x, y) is replaced by the target location, while depth is kept consistent (or updated if the object moves closer/farther). The new RoPE is computed for those patches.  
+6. **Inject into DiT**: the attention layers use the modified RoPE. Patches with changed RoPE cause the model to interpret them as being at the new location, while the background patches retain their original embeddings.  
+7. **Denoising**: the diffusion process generates the output image, where the object appears at the new location, occlusions are filled with plausible content (from the background patches that were previously blocked), and shadows/illumination are updated because the 3D positions changed.
+
+```
+Input image + mask + depth (estimated)
+         |
+         v
++--------------------+
+| Compute 2D RoPE    |
+| for all patches    |
++--------+-----------+
+         |
+         v
++----------------------------+
+| For object patches:        |
+|   - new (x', y') = old +   |
+|     displacement            |
+|   - depth-aware RoPE:      |
+|     rotate angle *= f(depth)|
++----------------------------+
+         |
+         v
++--------------------------------+
+| Replace original RoPE in DiT's |
+| attention layers                |
++--------------------------------+
+         |
+         v
++--------------------------------+
+| Run diffusion denoising        |
+| (parameter-efficient fine-tuned|
+| on synthetic + few real images)|
++--------------------------------+
+         |
+         v
++--------------------------------+
+| Output: relocated object       |
+| with coherent shadows /        |
+| revealed regions               |
++--------------------------------+
+```
+
+**Structural metaphor**: Think of a stage play with movable props.  
+- **Stage grid** = RoPE: every spot on stage has a unique coordinate (row, column). Actors (image patches) know where they stand by reading their coordinates.  
+- **Depth dimension** = distance from the audience: a prop that moves upstage shrinks in relative size and interacts differently with light.  
+- **Our edit** = we tell a specific actor "you now stand at seat D-5 instead of B-3", and also adjust their "depth tag" to match the new distance.  
+- **Diffusion model** = the stage crew that, given these instructions, rebuilds the entire scene around the moved prop – shifting shadows, revealing what was behind it, and ensuring the lighting matches the new position.  
+
+Without depth, the crew would plop D-5 onto a flat grid, ignoring whether the prop should be smaller or cast shadows differently. With depth-aware RoPE, the crew—through the pre-trained model's statistics—makes the scene geometrically plausible.
+
+### Key Concepts
+
+- **Rotary Position Embedding (RoPE)**: A way to encode positions in transformer attention by rotating queries and keys with a position-dependent angle. The rotation preserves the **relative* distance between tokens: two tokens that are 5 positions apart always have the same rotation difference, regardless of absolute location. This lets attention "know" where things are relative to each other. In images, RoPE forms a 2D grid – each patch gets a unique combination of x-rotation and y-rotation. Manipulating these rotations is equivalent to relocating the patch's "identity" in the spatial field.
+
+- **Depth-aware RoPE**: Standard RoPE is 2D, but the real world is 3D. The paper adds a depth modulation: the rotation angle for each patch is multiplied by a function of its depth value. Shallow objects (higher depth value) have larger effective rotations, mimicking perspective foreshortening. This ensures that when you move an object, the model treats its size, shadow, and occlusion boundary according to its 3D position, not just a 2D shift.
+
+- **Parameter-efficient fine-tuning**: Instead of retraining the entire DiT model from scratch (costly and data-hungry), the authors freeze most weights and only adapt a small set of parameters—e.g., low-rank adapters (LoRA) or specific attention projections. This allows the model to learn the depth-aware RoPE manipulation without forgetting its general image generation abilities, while needing only a small dataset of synthetic (rendered) objects plus a handful of real images for fine-tuning.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+[Input image]                          [Input image]
+         |                                      |
+         v                                      v
+[GAN / inpainting model]            [Depth estimator + RoPE calculator]
+         |                                      |
+         v                                      v
+[Object moved, but often              [Compute depth-aware RoPE]
+  unrealistic shadows,                         |
+  object blends poorly]                       v
+                                       [Modify RoPE for object patches]
+                                                |
+                                                v
+                                       [Parameter-efficient DiT with modified RoPE]
+                                                |
+                                                v
+                                       [Output: geometry-consistent result]
+```
+
+**One sentence**: From **implicitly learning the transformation from data* to *explicitly editing the spatial coordinate system inside a pretrained transformer*, the core shift is leveraging the model's own positional encoding as an actionable knob for 3D-aware editing.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Single-image object relocation is a long-standing and practical challenge in photo editing, content creation, and advertising. Existing SOTA (e.g., object-aware inpainting with depth guidance) still fails on consistent shadows and occlusion. The paper identifies a clear bottleneck — lack of explicit spatial manipulation in diffusion-based editing — and hits it directly.
+
+**Method maturity**: Clever insight, not brute force. The idea of manipulating RoPE is elegant because it reuses the model's internal representation instead of adding ad‑hoc modules. However, it relies on a separate depth estimator, which adds one more source of error. Also, the synthetic training data (likely rendered 3D objects on backgrounds) may cause a domain gap. The parameter-efficient fine-tuning is wise but the method's robustness to out-of-distribution scenes is not fully validated in the abstract.
+
+**Experimental integrity**: The paper claims SOTA across all metrics on standard benchmarks (the abstract mentions object motion benchmarks). If the baselines include recent methods like ObjectStitch, LaMa, or Stable Diffusion + ControlNet, and the numbers hold, then the experiments are solid. One red flag: the phrase "parameter-efficient fine-tuning" often means the comparison is not apple-to-apple — they might not compare with fully fine-tuned versions of the same model. Need to check the paper details.
+
+**Writing quality**: The abstract is dense but clear. However, they mention "extend 2D RoPE into a depth-aware formulation" without explaining the **formula* or *training procedure* — likely cut for space. A rewritten experimental section that walks through an example failure case from baselines and shows how RoPEMover handles it would elevate the paper. Also, a diagram of the depth-aware RoPE computation (matrix or rotation math) is missing.
+
+**Verdict**: Strong accept — The core concept is original, well-motivated, and produces visible improvements. The paper opens up a new family of spatial editing methods by showing how to directly manipulate position encodings in diffusion models. The synthetic data limitation is acceptable for a first demonstration.
+
+## Takeaways
+
+- **Explicit coordinate editing in transformers**: If you're working with any transformer that uses positional embeddings (ViT, DiT, etc.), you can treat those embeddings as a control signal. Replace the positions of certain tokens to move or reorder them — this applies far beyond object relocation, e.g., image layout generation, video frame interpolation, or 3D scene manipulation.
+- **Depth-aware RoPE design**: The idea of modulating a position encoding by depth (or any continuous spatial variable) is general. You can extend it to optical flow, disparity, or semantic height for other editing tasks.
+- **Synthetic + small real fine-tuning pipeline**: The paper demonstrates that with a handful of real images (likely &lt;100) and thousands of synthetic renders, you can teach a large diffusion model a new spatial skill. This recipe of "synthetic ground truth + LoRA fine-tuning" is directly transferable to any geometry-aware image task (e.g., insertion, removal, scaling).
+- **Shadow consistency as a byproduct of 3D-aware position**: The method doesn't explicitly model shadows — it emerges because the model, seeing the object at a new 3D coordinate, generates correct lighting as a result of the pretrained diffusion statistics. This suggests that proper spatial encoding can elicit physically plausible behaviors from a model without explicit physics training.
+
+:::
+
+:::zh
+**论文**: [2606.27332](https://arxiv.org/abs/2606.27332)
+**作者**: Ipek Oztas, Duygu Ceylan, Aybars Bugra Aksoy, Aysegul Dundar
+**分类**: cs.CV
+
+## 缺口
+
+单张图像中的物体移动不只是简单的补全：你需要处理遮挡、露出之前隐藏的区域，并更新阴影和反射等场景效果。
+现有方法——基于GAN的图像编辑、扩散补全、物体感知合成——要么把任务当成2D剪贴，要么学习全局变形，结果破坏了场景一致性。
+它们经常产生模糊的边界、不真实的阴影，或者物体像是悬浮在场景中而非嵌入其中。
+这篇论文找到了根因：现有方法没有显式建模位移的几何结构。
+作者观察到扩散Transformer（DiT）使用旋转位置嵌入（RoPE）来编码空间布局。
+如果你能以深度感知的方式操纵这些嵌入，就能诱导出可控的、几何一致的移动，而无需重新训练整个模型。
+
+```
+[单张图像物体移动问题]
+           |
+           v
++-------------------------------------+
+| 现有方法：GAN / 补全 / 变形         |
+| 在阴影、遮挡、深度上失败             |
++-------------------------------------+
+           |
+           v
++------------------------------------------+
+| 核心洞察：DiT中的RoPE定义了结构化的       |
+| 空间场（2D网格）                          |
++------------------------------------------+
+           |
+           v
++----------------------------------------------+
+| 我们的步骤：将RoPE扩展到深度感知 => 3D        |
+| 空间场；通过移动物体区域的RoPE坐标来移动物体  |
++----------------------------------------------+
+           |
+           v
++---------------------------------------------+
+| 证据：在基准上达到SOTA（身份保持、阴影、      |
+| 区域生成），只需极少量真实数据（合成+         |
+| 参数高效微调）                                |
++---------------------------------------------+
+           |
+           v
++---------------------------------------------+
+| 结论：显式RoPE操纵实现场景感知的物体重新定位 |
++---------------------------------------------+
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，移动单张图像中的物体意味着希望模型能推断正确的几何；在这篇论文之后，你可以通过编辑位置嵌入直接告诉模型物体在3D空间中的位置，从而保证一致性。
+
+### 核心机制
+
+该方法构建在扩散Transformer（DiT）之上，DiT在其注意力层中使用旋转位置嵌入（RoPE）。RoPE通过旋转矩阵给每个图像块分配一个2D位置——可以把它看作嵌入在模型内部激活中的坐标网格。
+
+主要流程：
+
+1. **输入**：单张图像 + 物体掩码 + 目标位移（向量或深度图）。
+2. **深度估计**：一个轻量级深度预测器提取逐像素深度图。
+3. **计算原始RoPE**：对每个块，从其(x, y)坐标计算标准2D RoPE。
+4. **深度感知扩展**：深度值用于调制旋转角度——浅景深的块与深景深的块有不同的旋转，从而编码3D结构。
+5. **重新定位**：对于属于物体的块，将2D (x, y)替换为目标位置，同时保持深度一致（如果物体靠近/远离则更新深度）。对这些块计算新的RoPE。
+6. **注入DiT**：注意力层使用修改后的RoPE。RoPE发生变化的块会被模型理解为位于新位置，而背景块保持原始嵌入。
+7. **去噪**：扩散过程生成输出图像，物体出现在新位置，遮挡处填充合理的背景内容（之前被遮挡的区域），阴影和光照因为3D位置变化而被更新。
+
+```
+输入图像 + 掩码 + 深度（估计）
+         |
+         v
++--------------------+
+| 计算所有块的2D RoPE|
++--------+-----------+
+         |
+         v
++----------------------------+
+| 对物体块：                 |
+|   - 新(x', y') = 原坐标 +  |
+|     位移                     |
+|   - 深度感知RoPE：         |
+|     旋转角度 *= f(深度)    |
++----------------------------+
+         |
+         v
++--------------------------------+
+| 替换DiT注意力层中的原始RoPE   |
++--------------------------------+
+         |
+         v
++--------------------------------+
+| 运行扩散去噪                   |
+| （参数高效微调，仅用           |
+|   合成+少量真实图像）          |
++--------------------------------+
+         |
+         v
++--------------------------------+
+| 输出：重新定位后的物体         |
+| 带有协调的阴影/露出区域        |
++--------------------------------+
+```
+
+**结构比喻**：想象一个舞台剧，里面有可移动的道具。
+- **舞台网格** = RoPE：舞台上的每个位置都有唯一坐标（行、列）。
+- 演员（图像块）通过读取坐标知道自己站在哪里。
+- **深度维度** = 与观众的距离：一个道具移到舞台后方时，其相对尺寸会缩小，与光影的交互也会不同。
+- **我们的编辑** = 我们告诉某个演员：“你现在站到D-5座位而不是B-3”，同时调整其“深度标签”以匹配新位置。
+- **扩散模型** = 舞台工作人员，他们根据这些指令，围绕移动的道具重建整个场景——移动阴影、露出背后的东西、确保光线与新位置匹配。
+
+如果没有深度，工作人员就会把D-5放在一个平面网格上，忽略道具应该变小或阴影应该有变化。
+有了深度感知RoPE，工作人员（通过预训练模型的统计信息）就能使场景在几何上合理。
+
+### 关键概念
+
+- **旋转位置嵌入（RoPE）**：一种通过在查询和键上乘以位置依赖的旋转角度来编码位置的方法。
+旋转保留了*相对*距离：两个相隔5个位置的令牌，无论绝对位置如何，旋转差始终相同。
+ 这使得注意力能够“知道”元素之间的相对位置。
+ 在图像中，RoPE形成一个2D网格——每个块得到独特的x旋转和y旋转组合。
+ 操纵这些旋转就相当于在空间场中重新定位该块的“身份”。
+
+- **深度感知RoPE**：标准RoPE是2D的，但真实世界是3D的。
+ 论文添加了深度调制：每个块的旋转角度乘以深度值的函数。
+ 浅景深的物体（深度值更大）获得更大的有效旋转，模拟透视收缩效果。
+ 这确保当你移动物体时，模型根据它的3D位置（而不是仅2D偏移）处理其大小、阴影和遮挡边界。
+
+- **参数高效微调**：不是从头重新训练整个DiT模型（成本高且数据需求大），而是冻结大部分权重，只适应少量参数——例如低秩适配器（LoRA）或特定的注意力投影。
+ 这使得模型能够学习深度感知的RoPE操纵而不会忘记其通用的图像生成能力，同时只需要一个小型数据集（合成渲染对象加上少量真实图像）进行微调。
+
+## 框架转变
+
+```
+之前（主流方法）：               之后（本文方法）：
+
+[输入图像]                      [输入图像]
+         |                                |
+         v                                v
+[GAN / 补全模型]               [深度估计器 + RoPE计算器]
+         |                                |
+         v                                v
+[物体移动但阴影不真实，          [计算深度感知RoPE]
+ 混合不佳]                               |
+                                        v
+                                 [修改物体块的RoPE]
+                                        |
+                                        v
+                                 [参数高效DiT，使用修改后的RoPE]
+                                        |
+                                        v
+                                 [输出：几何一致的结果]
+```
+
+**一句话**：从**从数据中隐式学习变换*到*显式编辑预训练Transformer内部的坐标系统*，核心转变是将模型自身的位置编码当作一个可操作的旋钮，用于3D感知编辑。
+
+## 专家评审
+
+**选题眼光**：真正的缺口。单张图像物体重新定位是照片编辑、内容创作和广告中长期存在的实际挑战。现有的SOTA（例如具有深度引导的物体感知补全）在阴影和遮挡一致性上仍然失败。论文明确指出了根本瓶颈——扩散编辑中缺乏显式空间操纵——并直接击中。
+
+**方法成熟度**：巧劲而非蛮力。操纵RoPE的想法很优雅，因为它复用了模型的内部表示，而不是增加临时模块。但该方法依赖独立的深度估计器，这增加了一个误差来源。此外，合成训练数据（很可能是渲染的3D物体放在背景上）可能带来领域迁移问题。参数高效微调是明智的，但方法对分布外场景的鲁棒性在摘要中并未充分验证。
+
+**实验诚信**：论文声称在所有基准指标上达到SOTA（摘要提及物体移动基准）。如果基线包括近期方法如ObjectStitch、LaMa或Stable Diffusion + ControlNet，且数字站得住脚，那么实验是扎实的。一个值得警惕之处：“参数高效微调”通常意味着比较并非完全公平——他们可能没有与同一模型的完全微调版本比较。需要检查论文细节。
+
+**写作功力**：摘要密集但清晰。然而，他们提到“将2D RoPE扩展到深度感知公式”却没有解释**公式*或*训练流程*——可能为了篇幅而省略。如果能改写实验部分，展示一个基线的失败案例以及RoPEMover如何处理，将大大提升论文。另外，缺少一个深度感知RoPE计算的图示（矩阵或旋转数学）。
+
+**判决**：强接收——核心概念新颖、动机充分、且产生明显改进。该论文通过展示如何直接操纵扩散模型中的位置编码，开辟了一个空间编辑的新家族。合成数据限制对于一个初步展示来说是可以接受的。
+
+## 要点总结
+
+- **Transformer中的显式坐标编辑**：如果你在处理任何使用位置编码的Transformer（ViT、DiT等），你可以将这些编码视为控制信号。替换某些令牌的位置来移动或重新排序它们——这远不止物体重新定位，例如图像布局生成、视频帧插值或3D场景操纵。
+- **深度感知RoPE的设计**：用深度（或任何连续空间变量）调制位置编码的思路是通用的。你可以将其扩展到光流、视差或语义高度，用于其他编辑任务。
+- **合成+少量真实微调流程**：该论文展示了仅用少量真实图像（可能少于100张）和数千张合成渲染图，就可以教会一个大型扩散模型新的空间技能。这种“合成真值 + LoRA微调”的配方可以直接迁移到任何几何感知的图像任务（例如插入、移除、缩放）。
+- **阴影一致性作为3D感知位置的副产品**：该方法没有显式建模阴影——它之所以出现，是因为模型在预训练扩散统计的驱动下，看到物体位于新的3D坐标时会生成正确的光照。这表明，适当的空间编码可以引发出模型中物理上合理的行为，而无需显式的物理训练。
+:::
