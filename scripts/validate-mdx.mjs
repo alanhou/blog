@@ -200,10 +200,39 @@ function validateFile(filePath) {
   const lines = content.split('\n');
   const errors = [];
 
+  // Frontmatter must begin on line 1. gray-matter tolerates junk before the
+  // opening "---" (returning empty data), but Astro ignores such frontmatter
+  // entirely and then fails the build with "title/date Required". Mirror Astro.
+  if (!content.startsWith('---\n') && !content.startsWith('---\r\n')) {
+    errors.push({
+      file: filePath,
+      line: 1,
+      column: 1,
+      issue: 'FRONTMATTER_NOT_AT_TOP',
+      message: 'File must begin with the "---" frontmatter delimiter on line 1. Astro ignores frontmatter that is not at the very top of the file.',
+      match: JSON.stringify(lines[0]),
+      fix: null
+    });
+  }
+
   // Frontmatter YAML parse check (catches missing closing ---, bad colons, multiline key issues etc.)
   // This mirrors exactly what Astro's content collections + gray-matter do during `astro sync`/`build`.
   try {
-    matter(content);
+    const parsed = matter(content);
+    // Mirror the required fields of the blog collection schema (src/content/config.ts).
+    for (const key of ['title', 'date']) {
+      if (parsed.data[key] === undefined) {
+        errors.push({
+          file: filePath,
+          line: 1,
+          column: 1,
+          issue: 'MISSING_REQUIRED_FRONTMATTER',
+          message: `Frontmatter is missing required field "${key}" (required by the blog collection schema).`,
+          match: '--- ... ---',
+          fix: null
+        });
+      }
+    }
   } catch (e) {
     errors.push({
       file: filePath,

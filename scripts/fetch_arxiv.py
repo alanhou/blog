@@ -21,6 +21,12 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
 
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+
 from manim_prompts import (
     CONCEPT_GIF_SYSTEM,
     CONCEPT_GIF_USER,
@@ -462,31 +468,126 @@ def _yaml_double_quote(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _fix_frontmatter_quotes(frontmatter: str) -> str:
-    """Re-quote title/description en/zh values in frontmatter safely.
+_FM_TOP_KEYS = ("title", "description", "date", "tags", "image", "series", "seriesOrder")
+_FM_BODY_MARKERS = (":::", "![", "# ", "## ")
 
-    Handles values that contain quotes, colons, or other YAML-special chars
-    by extracting the raw value and re-wrapping with proper escaping.
+
+def _clean_fm_value(raw: str) -> str:
+    """Normalize a frontmatter scalar: collapse whitespace, strip surrounding
+    quotes (ASCII or smart), and drop stray LLM escape backslashes."""
+    raw = re.sub(r"\s+", " ", raw).strip()
+    while raw and raw[0] in '"\u201c\u201d\'':
+        raw = raw[1:]
+    while raw and raw[-1] in '"\u201c\u201d\'':
+        raw = raw[:-1]
+    raw = raw.replace('\\"', '"').replace("\\\\", "\\").replace("\\", "")
+    return raw.strip()
+
+
+def _parse_frontmatter_fields(fm_lines):
+    """Tolerantly extract known fields from frontmatter lines, joining
+    multi-line values (a value the LLM split across several lines)."""
+    fields = {}
+    parent = None
+    i, n = 0, len(fm_lines)
+    top_re = re.compile(r"^(%s)\s*:\s*(.*)$" % "|".join(_FM_TOP_KEYS))
+    while i < n:
+        line = fm_lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        top = top_re.match(line)
+        if top and not line[0].isspace():
+            key, val = top.group(1), top.group(2)
+            if key in ("title", "description"):
+                parent = key
+            elif key == "date":
+                fields["date"] = val.strip().strip("\"'")
+            elif key == "tags":
+                fields["tags"] = val.strip()
+            elif key == "image":
+                fields["image"] = _clean_fm_value(val)
+            i += 1
+            continue
+        nested = re.match(r"^\s+(en|zh)\s*:\s*(.*)$", line)
+        if nested and parent:
+            sub, val = nested.group(1), nested.group(2)
+            collected, j = [val], i + 1
+            while j < n:
+                nxt = fm_lines[j]
+                if re.match(r"^\s+(en|zh)\s*:", nxt) or (top_re.match(nxt) and not nxt[0].isspace()):
+                    break
+                collected.append(nxt)
+                j += 1
+            fields[("title_" if parent == "title" else "desc_") + sub] = _clean_fm_value(" ".join(collected))
+            i = j
+            continue
+        i += 1
+    return fields
+
+
+def _render_frontmatter(f):
+    out = ["---", "title:"]
+    out.append("  en: " + _yaml_double_quote(f.get("title_en", "")))
+    out.append("  zh: " + _yaml_double_quote(f.get("title_zh", "")))
+    out.append("description:")
+    out.append("  en: " + _yaml_double_quote(f.get("desc_en", "")))
+    out.append("  zh: " + _yaml_double_quote(f.get("desc_zh", "")))
+    out.append("date: " + f.get("date", ""))
+    out.append("tags: " + f.get("tags", "[]"))
+    out.append("image: " + _yaml_double_quote(f.get("image", ARXIV_IMAGE)))
+    out.append("---")
+    return "\n".join(out)
+
+
+def rebuild_frontmatter(content: str) -> str:
+    """Rebuild the leading frontmatter into canonical, valid YAML.
+
+    Robust against the LLM's common mistakes: a missing closing '---',
+    values split across multiple lines, and over-escaped quotes. The body is
+    preserved verbatim. Returns content unchanged if no frontmatter is found.
     """
-    def _requote(m):
-        prefix = m.group(1)  # e.g. "  en: " or "  zh: "
-        raw = m.group(2)
-        # Strip surrounding quotes (ASCII or smart quotes) if present
-        if len(raw) >= 2:
-            first, last = raw[0], raw[-1]
-            if (first == '"' and last == '"') or \
-               (first == '\u201c' and last == '\u201d') or \
-               (first == "'" and last == "'"):
-                raw = raw[1:-1]
-        return prefix + _yaml_double_quote(raw)
+    lines = content.split("\n")
+    # Drop any stray leading lines before the opening '---' (LLM leakage such
+    # as a stray ':' or blank lines); Astro requires '---' on line 1.
+    if lines and lines[0].strip() != "---":
+        for k, ln in enumerate(lines):
+            if ln.strip() == "---":
+                lines = lines[k:]
+                break
+        else:
+            return content  # no frontmatter delimiter found at all
+    fm_lines, body_start = [], None
+    for i in range(1, len(lines)):
+        s = lines[i].strip()
+        if s == "---":
+            body_start = i + 1
+            break
+        if any(s.startswith(m) for m in _FM_BODY_MARKERS):
+            body_start = i  # closing delimiter omitted by the LLM
+            break
+        fm_lines.append(lines[i])
+    if body_start is None:
+        return content
+    body = "\n".join(lines[body_start:])
+    fields = _parse_frontmatter_fields(fm_lines)
+    return _render_frontmatter(fields) + "\n" + body.lstrip("\n")
 
-    # Match indented en:/zh: lines under title: or description:
-    return re.sub(
-        r'^(  (?:en|zh):\s+)(.+)$',
-        _requote,
-        frontmatter,
-        flags=re.MULTILINE,
-    )
+
+def frontmatter_is_valid(content: str) -> bool:
+    """Final guard: confirm the frontmatter is parseable YAML with the
+    required fields, so a malformed post is never committed (a single bad
+    post fails `npm run build` and freezes the GitHub Pages deploy)."""
+    m = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+    if not m:
+        return False
+    if not YAML_AVAILABLE:
+        return True  # rebuild_frontmatter already normalized the structure
+    try:
+        data = yaml.safe_load(m.group(1))
+    except Exception:
+        return False
+    return isinstance(data, dict) and "title" in data and "date" in data
 
 
 def sanitize_mdx(content):
@@ -501,13 +602,9 @@ def sanitize_mdx(content):
     - Wrap LaTeX-style subscripts x_{y} in inline code to prevent JSX parsing
     - Escape curly braces in mathematical set notation to prevent JSX parsing
     """
-    # Fix frontmatter quoting before anything else
-    fm_match = re.match(r'^---\n(.*?\n)---', content, re.DOTALL)
-    if fm_match:
-        original_fm = fm_match.group(1)
-        fixed_fm = _fix_frontmatter_quotes(original_fm)
-        if fixed_fm != original_fm:
-            content = "---\n" + fixed_fm + "---" + content[fm_match.end():]
+    # Rebuild frontmatter into canonical valid YAML before anything else
+    # (handles missing closing ---, multi-line values, over-escaped quotes)
+    content = rebuild_frontmatter(content)
 
     # Collapse multi-line $$ blocks onto single lines
     def _collapse_math(m):
@@ -844,6 +941,12 @@ def main():
         except Exception:
             print(f"  Visual generation failed, continuing with text-only post:")
             traceback.print_exc()
+
+        # Final guard: never commit a post with malformed frontmatter, since
+        # one bad post fails `npm run build` and freezes the Pages deploy.
+        if not frontmatter_is_valid(content):
+            print(f"  Skipping {filename}: frontmatter still invalid after sanitize")
+            continue
 
         filepath.write_text(content + "\n")
         print(f"Wrote {filepath}")
