@@ -1,0 +1,364 @@
+---
+title:
+  en: "Embodied.cpp: A Portable C++ Runtime That Unifies Embodied AI Model Deployment Across Heterogeneous Robots"
+  zh: "Embodied.cpp：统一异构机器人上具身AI模型部署的可移植C++运行时"
+description:
+  en: "Embodied AI models suffer from fragmented Python-based deployment stacks. This paper introduces a unified C++ inference runtime with five-layer architecture that enables portable, latency-first deployment across diverse robots and simulators."
+  zh: "具身AI模型的部署长期受困于碎片化的Python技术栈。本文提出一种五层架构的统一C++推理运行时，实现跨机器人和仿真器的可移植、延迟优先部署。"
+date: 2026-07-03
+tags: ["arxiv", "ai", "cs.ro", "cs.cv", "cs.os"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.02501](https://arxiv.org/abs/2607.02501)
+**Authors**: Ling Xu, Chuyu Han, Borui Li, Hao Wu, Shiqi Jiang, Ting Cao, Chuanyou Li, Sheng Zhong, Shuai Wang
+**Categories**: cs.RO, cs.CV, cs.OS
+
+## The Gap
+
+Embodied AI is having its "every model is a special snowflake" moment. VLA models like HY-VLA and pi0.5, plus emerging World-Action Models (WAMs), each ship their own Python stacks with model-specific preprocessing, backend assumptions, and robot glue code. If you want to deploy on a new robot platform — say, switching from a Franka arm to a mobile manipulator with a different sensor suite — you're rewriting plumbing, not science.
+
+The deeper issue: existing inference runtimes (TensorRT, ONNX Runtime, TFLite) were designed for request-response serving — batched, throughput-first, stateless. Embodied deployment demands something fundamentally different: **multi-rate execution** (vision at 10 Hz, control at 100 Hz, both inside a tight loop), **latency-first batch-1 inference** (you have one robot, not a datacenter), and **extensible I/O** that speaks actions and sensor streams, not just tensors. Nobody had built a runtime that honored this "embodied contract."
+
+```
+Fragmented Python stacks
+    |
+    v
+Per-model deployment code (HY-VLA/pi0.5/WAMs each unique)
+    |
+    v
+Inference runtimes assume request-response serving
+    |
+    +-- throughput-first, not latency-first
+    +-- batch-oriented, not single-stream
+    +-- fixed token I/O, not embodied interfaces
+    |
+    v
+No portable runtime for multi-rate closed-loop control
+    on heterogeneous edge hardware
+    |
+    v
+Embodied.cpp: 5-layer C++ runtime
+    |
+    +-- shared execution path across VLA/WAM
+    +-- multi-rate modular execution
+    +-- latency-first fused inference
+    |
+    v
+Evidence: 100.0% / 91.0% success on HY-VLA/pi0.5
+          312.2 -> 88.1 MiB memory on WAM block
+```
+
+## The Increment
+
+**One sentence**: Before this paper, deploying an embodied AI model on a new robot meant rewriting inference glue code from scratch in Python; after this paper, you have a single C++ runtime with a five-layer plugin architecture that ports across models, robots, and simulators through backend abstraction.
+
+### Core Mechanism
+
+Embodied.cpp is built on an architectural analysis of what VLA models and WAMs actually share at inference time. The authors identified a common execution path and decomposed it into five layers, each responsible for a clean abstraction boundary:
+
+**Input Adapters** handle the messy reality of heterogeneous sensors — camera frames, proprioceptive states, language instructions — and normalize them into a unified tensor format. **Sequence Builders** take these normalized inputs and construct the token or latent sequences that the backbone expects, handling the model-specific sequence construction logic. **Backbone Execution** runs the heavy compute (the transformer or similar architecture) through a unified backend abstraction that can target different hardware (GPU, NPU, etc.). **Head Plugins** decode backbone outputs into task-specific outputs — action vectors for VLA models, predicted states for WAMs. **Deployment Adapters** translate these outputs into the robot-specific action interface, closing the loop.
+
+The key engineering insight is **multi-rate scheduling**: the runtime can run different layers at different frequencies. Vision processing might tick at 10 Hz while the control head runs at 100 Hz, with the backbone amortized between them. This is orchestrated through a modular execution graph, not a monolithic forward pass.
+
+```
+Sensor Data (cameras, joints, language)
+    |
+    v
++-----------------+
+| INPUT ADAPTERS  |  <-- heterogeneous -> normalized tensors
++-----------------+
+    |
+    v
++-----------------+
+| SEQUENCE        |  <-- tensors -> model-specific sequences
+| BUILDERS        |
++-----------------+
+    |
+    v
++-----------------+
+| BACKBONE        |  <-- unified compute (GPU/NPU/etc)
+| EXECUTION       |     fused, latency-first, batch-1
++-----------------+
+    |
+    v
++-----------------+
+| HEAD PLUGINS    |  <-- backbone output -> actions/states
++-----------------+
+    |
+    v
++-----------------+
+| DEPLOYMENT      |  <-- actions -> robot-specific commands
+| ADAPTERS        |
++-----------------+
+    |
+    v
+Robot Actuators / Simulator
+```
+
+Think of it like a **professional kitchen with a station-based brigade system**. The old way was like having each chef (each model) bring their own kitchen, their own stove format, their own ingredient prep station — if you changed restaurants (robots), the whole kitchen had to be rebuilt. Embodied.cpp is the brigade system: there's a **garde manger** (input adapters) who receives all raw ingredients (sensor data) and preps them into standardized mise en place. A **saucier** (sequence builders) assembles the prepared ingredients into the right compositions for each dish. The **executive chef** (backbone execution) handles the heavy cooking at the central station, and this is where the fused, latency-first inference happens — like a chef who batches work but prioritizes finishing one dish at a time. The **pâtissier** (head plugins) adds the final specialized touches — some dishes get action vectors, others get predicted states. And the **plater** (deployment adapters) presents each dish in the format the customer (robot) expects. The brigade works at different speeds — the garde manger might prep at 10 Hz while the saucier stirs at 100 Hz — and that's exactly the multi-rate scheduling that makes the kitchen efficient without anyone waiting around.
+
+### Key Concepts
+
+- **Multi-rate execution**: In a robot's control loop, not everything needs to run at the same frequency. Camera images arrive at 30 Hz, but you need to command motors at 100+ Hz. Naively, you'd either slow down control to match vision (dangerous — robot arm jerks) or wastefully re-run vision every control tick (burns compute). Multi-rate execution means the runtime explicitly schedules different components at different rates. Imagine a car dashboard: the speedometer updates every frame, but the GPS recalculates the route only every few seconds. Both are running, at their own cadence, and the system orchestrates which results to use when.
+
+- **Latency-first fused inference**: Traditional inference runtimes optimize for throughput — process as many requests per second as possible, using batching to amortize GPU kernel launches. But a robot with one body doesn't need throughput; it needs the **lowest possible latency for a single inference*. "Fused" means combining multiple small operations (attention, layer norm, activations) into single GPU kernels to avoid the overhead of launching them separately. It's like the difference between mailing 100 letters at once (throughput-optimized) versus sending one urgent message as fast as possible (latency-optimized) — the strategies are fundamentally different.
+
+- **Backend abstraction**: Different robots have different chips — an NVIDIA Jetson, an Intel NPU, a Qualcomm DSP. Without abstraction, you write model loading and execution code separately for each chip. The backend abstraction in Embodied.cpp provides a single API that wraps hardware-specific backends (TensorRT, ONNX Runtime, etc.), so swapping hardware means swapping a backend flag, not rewriting your deployment code.
+
+## Framework Shift
+
+```
+Before (mainstream approach):           After (this paper):
+
+  Model A    Model B    Model C          Model A   Model B   Model C
+  (Python)   (Python)   (Python)              |         |         |
+     |          |          |              +------------------------------+
+     v          v          v              |       EMBODIED.CPP           |
+  [Custom]   [Custom]   [Custom]         |  Input    Seq     Backbone   |
+  [Deploy]   [Deploy]   [Deploy]         |  Adapters Builders Execution |
+  [Code  ]   [Code  ]   [Code  ]         |  Head     Deployment        |
+     |          |          |              |  Plugins  Adapters          |
+     v          v          v              +------------------------------+
+  Robot A    Robot B    Robot C               |         |         |
+  (unique)   (unique)   (unique)           Robot A   Robot B   Robot C
+                                            (swap backend, keep runtime)
+```
+
+From per-model Python glue code to a unified five-layer C++ runtime, the core shift is treating embodied inference as a first-class systems problem rather than a model packaging afterthought.
+
+## Expert Assessment
+
+**Problem choice**: This is a real and underserved gap. The embodied AI community has been so focused on model architecture that deployment infrastructure has been neglected — everyone writes their own hacky Python scripts, and nobody shares them because they're embarrassingly hardware-specific. This paper sits at the intersection of systems and robotics, which is exactly where the bottleneck is shifting as models get good enough but deployment remains painful. The framing around the "runtime contract" is well-articulated and distinguishes this from generic serving frameworks.
+
+**Method maturity**: The five-layer decomposition is sensible and shows genuine architectural thinking, not brute force. It's closer to good systems engineering than a clever algorithmic insight — the value is in the careful abstraction boundaries. One concern: the paper doesn't deeply discuss what happens when a new model **doesn't* fit the five-layer pattern cleanly. VLA models map naturally, but WAMs are described as "preliminary," suggesting the abstraction hasn't been fully stress-tested. A simpler approach might be to just standardize the Python interfaces (like ONNX did for model format), but the authors make a reasonable case that C++ and multi-rate scheduling require going deeper than interface standardization.
+
+**Experimental integrity**: The VLA evaluations show strong task success rates (100% and 91%), but there's a conspicuous absence of **latency comparisons** against baselines. If the pitch is "latency-first inference," where are the end-to-end latency numbers versus running the same models through standard TensorRT or ONNX Runtime? The WAM memory reduction (312.2 → 88.1 MiB) is impressive but only tested on a single transformer block, not a full model. The baselines are somewhat soft — comparing against "running the original Python stack" isn't the most rigorous comparison for a systems paper.
+
+**Writing quality**: The paper is reasonably well-structured, but Section 3 (system design) reads more like a manual than a design narrative — it tells you **what* each layer does but doesn't always explain *why* the boundaries were drawn there. The related work section could be stronger; it would benefit from a deeper comparison to ONNX Runtime's execution providers or TensorRT's plugin system. The abstract is one of the better-written parts — clear and well-paced.
+
+**Verdict**: weak accept — The problem is real and the system design is thoughtful, but the evaluation gaps (especially missing latency baselines) prevent a strong endorsement. This would be a solid systems workshop paper that deserves a fuller empirical treatment in a follow-up.
+
+## Takeaways
+
+Three concrete things to steal:
+
+1. **The "embodied contract" framing**: If you're building any runtime for robotics or real-time control, articulate the contract explicitly: what execution pattern (multi-rate), what optimization target (latency not throughput), and what I/O shape (not just tensors). This framing transfers to any edge AI deployment where the inference loop is embedded in a physical system.
+
+2. **Five-layer decomposition as a portability pattern**: The input-adapter / sequence-builder / backbone / head-plugin / deployment-adapter pattern is a reusable template for any domain where you need to run structurally different models on diverse hardware. If you're building an ML platform for a company with multiple model types, this layering is worth stealing.
+
+3. **Multi-rate scheduling as a first-class primitive**: Most inference frameworks assume a single forward pass at one frequency. If your application has components that naturally tick at different rates (sensing vs. planning vs. control), explicitly scheduling them separately yields real efficiency gains. This idea applies well beyond robotics — think AR/VR pipelines, autonomous driving stacks, or real-time audio processing.
+:::
+
+:::zh
+**论文**: [2607.02501](https://arxiv.org/abs/2607.02501)
+**作者**: Ling Xu, Chuyu Han, Borui Li, Hao Wu, Shiqi Jiang, Ting Cao, Chuanyou Li, Sheng Zhong, Shuai Wang
+**分类**: cs.RO, cs.CV, cs.OS
+
+## 缺口
+
+具身AI正经历"每个模型都是独特雪花"的困境。
+VLA模型（如HY-VLA、pi0.5）和新兴的世界-动作模型（WAMs）各自携带一套专属的Python技术栈，
+包含模型特定的预处理逻辑、后端假设和机器人胶水代码。
+如果你想在新机器人平台上部署——比如从Franka臂切换到传感器套件不同的移动操作机器人——
+你重写的是管道工程，而不是科学。
+
+更深层的问题是：现有的推理运行时（TensorRT、ONNX Runtime、TFLite）是为请求-响应式服务设计的——
+批处理、吞吐量优先、无状态。
+而具身部署有根本不同的需求：**多速率执行**（视觉10Hz，控制100Hz，都在紧耦合回路里）、
+**延迟优先的batch-1推理**（你只有一台机器人，不是一个数据中心）、
+以及**可扩展的I/O接口**，要能处理动作和传感器流，而不仅仅是张量。
+此前没有人构建过能满足这种"具身契约"的运行时。
+
+```
+碎片化的Python技术栈
+    |
+    v
+每个模型独立的部署代码 (HY-VLA/pi0.5/WAM各不相同)
+    |
+    v
+推理运行时假设请求-响应式服务
+    |
+    +-- 吞吐量优先，而非延迟优先
+    +-- 面向批处理，而非单流
+    +-- 固定的token I/O，而非具身接口
+    |
+    v
+缺乏支持多速率闭环控制的可移植运行时
+    适用于异构边缘硬件
+    |
+    v
+Embodied.cpp: 五层C++运行时
+    |
+    +-- VLA/WAM共享执行路径
+    +-- 多速率模块化执行
+    +-- 延迟优先融合推理
+    |
+    v
+证据: HY-VLA/pi0.5成功率 100.0% / 91.0%
+      WAM块内存 312.2 -> 88.1 MiB
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，把具身AI模型部署到新机器人上意味着用Python从头重写推理胶水代码；在这篇论文之后，你有了一个五层插件架构的统一C++运行时，通过后端抽象在模型、机器人和仿真器之间移植。
+
+### 核心机制
+
+Embodied.cpp的构建基于一个关键洞察：不同VLA模型和WAMs在推理时实际上共享一条公共执行路径。
+作者对这条路径进行了架构分析，将其分解为五个层次，每个层次承担清晰的抽象边界：
+
+**输入适配器（Input Adapters）**处理异构传感器的复杂现实——相机帧、本体感受状态、语言指令——
+将它们归一化为统一的张量格式。
+**序列构建器（Sequence Builders）**接收归一化输入，构建骨干网络期望的token或潜在序列，
+处理模型特定的序列构建逻辑。
+**骨干执行（Backbone Execution）**通过统一的后端抽象运行重计算（Transformer或类似架构），
+可适配不同硬件（GPU、NPU等）。
+**头部插件（Head Plugins）**将骨干输出解码为任务特定的输出——
+VLA模型的动作向量，WAMs的预测状态。
+**部署适配器（Deployment Adapters）**将这些输出转化为机器人特定的动作接口，闭环。
+
+关键工程洞察是**多速率调度**：运行时可以以不同频率运行不同层。
+视觉处理可能以10Hz运行，而控制头部以100Hz运行，骨干网络在两者之间分摊计算。
+这种调度通过模块化执行图来编排，而非一个单一的前向传播。
+
+```
+传感器数据（相机、关节、语言）
+    |
+    v
++-----------------+
+|   输入适配器     |  <-- 异构数据 -> 归一化张量
++-----------------+
+    |
+    v
++-----------------+
+|   序列构建器     |  <-- 张量 -> 模型特定序列
++-----------------+
+    |
+    v
++-----------------+
+|   骨干执行       |  <-- 统一计算 (GPU/NPU等)
++-----------------+     融合、延迟优先、batch-1
+    |
+    v
++-----------------+
+|   头部插件       |  <-- 骨干输出 -> 动作/状态
++-----------------+
+    |
+    v
++-----------------+
+|   部署适配器     |  <-- 动作 -> 机器人特定指令
++-----------------+
+    |
+    v
+机器人执行器 / 仿真器
+```
+
+可以把这个系统想象成**专业厨房的班组制（Brigade system）**。
+旧方式就像每个厨师（每个模型）自带厨房、自带炉灶格式、自带食材准备台——
+如果换了餐厅（机器人），整个厨房必须重建。
+
+Embodied.cpp就是班组制：有一个**冷菜主厨**（输入适配器）接收所有原始食材（传感器数据），
+把它们处理成标准化的备料（mise en place）。
+**酱汁主厨**（序列构建器）把准备好的食材组装成每道菜需要的组合。
+**行政总厨**（骨干执行）在中央厨房处理重活，这就是融合的、延迟优先的推理发生的地方——
+像一个会批量处理但优先保证一道菜尽快完成的厨师。
+**甜点主厨**（头部插件）添加最终的专门装饰——
+有些菜输出动作向量，有些输出预测状态。
+**摆盘师**（部署适配器）把每道菜以客户（机器人）期望的格式呈现。
+
+班组以不同速度运作——冷菜主厨可能以10Hz备料，酱汁主厨以100Hz搅拌——
+这正是多速率调度的精髓：让厨房高效运转，没有人空等。
+
+### 关键概念
+
+- **多速率执行**：在机器人的控制回路中，不是所有组件都需要相同频率。
+  相机图像以30Hz到达，但你需要以100Hz以上频率向电机发指令。
+  笨办法是让控制频率降低到和视觉一样（危险——机械臂会抖动），
+  或者每次控制节拍都浪费地重跑视觉推理（烧算力）。
+  多速率执行意味着运行时显式地以不同频率调度不同组件。
+  想象汽车仪表盘：速度表每帧更新，但GPS每隔几秒才重新计算路线。
+  两者都在运行，各自有自己的节奏，系统编排何时使用哪个结果。
+
+- **延迟优先融合推理**：传统推理运行时优化吞吐量——每秒处理尽可能多的请求，
+  用批处理来摊薄GPU内核启动开销。但只有一个身体的机器人不需要吞吐量；
+  它需要**单次推理的最低可能延迟**。"融合"是指把多个小操作（注意力、层归一化、激活函数）
+  合并成单个GPU内核，避免分别启动的开销。
+  就像一次寄出100封信（吞吐量优化）和尽快发出一条紧急消息（延迟优化）的区别——
+  策略根本不同。
+
+- **后端抽象**：不同机器人有不同芯片——NVIDIA Jetson、Intel NPU、高通DSP。
+  没有抽象的话，你要为每个芯片单独写模型加载和执行代码。
+  Embodied.cpp的后端抽象提供单一API来封装硬件特定的后端（TensorRT、ONNX Runtime等），
+  所以换硬件只需要换一个后端参数，不需要重写部署代码。
+
+## 框架转变
+
+```
+之前（主流方法）：                    之后（本文方法）：
+
+  模型A     模型B     模型C            模型A   模型B   模型C
+ (Python)  (Python)  (Python)             |       |       |
+     |        |        |              +------------------------------+
+     v        v        v              |       EMBODIED.CPP           |
+  [自定义]  [自定义]  [自定义]        |  输入适配器  序列构建器  骨干执行|
+  [部署  ]  [部署  ]  [部署  ]        |  头部插件    部署适配器        |
+  [代码  ]  [代码  ]  [代码  ]        +------------------------------+
+     |        |        |                  |       |       |
+     v        v        v               机器人A  机器人B  机器人C
+  机器人A   机器人B   机器人C           (换后端，保持运行时)
+  (各不同)  (各不同)  (各不同)
+```
+
+从每个模型各自为政的Python胶水代码，到统一的五层C++运行时，
+核心转变是把具身推理当作一个一等公民的系统工程问题来对待，
+而不是模型打包之后的附属品。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实且被低估的缺口。具身AI社区一直在模型架构上发力，部署基础设施被忽视了——
+每个人都在写自己难看的Python脚本，而且没人愿意分享，因为它们太硬件相关了。
+这篇论文站在系统和机器人学的交叉点，而这正是瓶颈正在转移的方向：
+模型已经足够好了，但部署仍然痛苦。
+"运行时契约"的框架表述得很好，将它与通用服务框架区分开来。
+
+**方法成熟度**: 五层分解是合理的，展示了真正的架构思维，而非蛮力。
+它更接近优秀的系统工程，而非巧妙的算法洞察——价值在于细致的抽象边界。
+一个担忧是：论文没有深入讨论当新模型**不能**干净地适配五层模式时怎么办。
+VLA模型自然映射，但WAM被描述为"初步的"，
+说明这个抽象还没有经过充分的压力测试。
+更简单的做法可能是标准化Python接口（就像ONNX对模型格式所做的），
+但作者合理地论证了C++和多速率调度需要比接口标准化更深入。
+
+**实验诚意**: VLA评估展示了很强的任务成功率（100%和91%），
+但明显缺少**延迟对比**基准。如果卖点是"延迟优先推理"，
+那么与标准TensorRT或ONNX Runtime运行相同模型的端到端延迟数字在哪里？
+WAM的内存缩减（312.2 -> 88.1 MiB）很令人印象深刻，
+但只在单个Transformer块上测试，不是完整模型。
+基线有些软——与"运行原始Python技术栈"比较，对系统论文来说不够严格。
+
+**写作功力**: 论文结构合理，但第3节（系统设计）读起来更像手册而非设计叙事——
+它告诉你每层**做什么**，但不总是解释**为什么**在那里画边界。
+相关工作部分可以更深入；如果能与ONNX Runtime的执行提供者或TensorRT的插件系统
+做更深入的比较会更好。摘要是写得最好的部分之一——清晰且节奏好。
+
+**判决**: 弱接收——问题真实，系统设计有思考，但评估缺口（尤其是缺少延迟基准）
+阻碍了强推荐。这是一篇扎实的系统研讨会论文，值得在后续工作中进行更完整的实证检验。
+
+## 要点总结
+
+三个可以"偷"走的具体收获：
+
+1. **"具身契约"框架**：如果你在为机器人或实时控制构建任何运行时，要显式地阐明契约：
+   什么执行模式（多速率）、什么优化目标（延迟而非吞吐量）、什么I/O形态（不只是张量）。
+   这个框架可迁移到任何推理回路嵌入物理系统的边缘AI部署场景。
+
+2. **五层分解作为可移植性模式**：输入适配器 / 序列构建器 / 骨干 / 头部插件 / 部署适配器
+   的模式是一个可复用的模板，适用于任何需要在多样化硬件上运行结构不同模型的领域。
+   如果你在为一家拥有多种模型类型的公司构建ML平台，这个分层值得借鉴。
+
+3. **多速率调度作为一等原语**：大多数推理框架假设单次前向传播以一个频率运行。
+   如果你的应用中有组件自然以不同频率运行（感知 vs. 规划 vs. 控制），
+   显式地分别调度它们会产生真实的效率收益。
+   这个想法远超机器人学——想想AR/VR管线、自动驾驶栈或实时音频处理。
+:::

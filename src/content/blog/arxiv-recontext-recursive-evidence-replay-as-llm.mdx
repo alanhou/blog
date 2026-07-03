@@ -1,0 +1,350 @@
+---
+title:
+  en: "ReContext: When LLMs Can See But Can't Use — Fixing the Last Mile of Long-Context Reasoning"
+  zh: "ReContext：大模型看得见却用不上——修补长上下文推理的最后一英里"
+description:
+  en: "A training-free method that uses model-internal attention signals to recursively identify and replay relevant evidence before generation, bridging the gap between context access and effective utilization in LLMs."
+  zh: "一种无需训练的推理方法，利用模型内部注意力信号递归识别并重放相关证据，弥补大模型在长上下文推理中'看得见'与'用得上'之间的鸿沟。"
+date: 2026-07-03
+tags: ["arxiv", "ai", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.02509](https://arxiv.org/abs/2607.02509)
+**Authors**: Yanjun Zhao, Ruizhong Qiu, Tianxin Wei, Yuanchen Bei, Zhining Liu, Lingjie Chen, Ismini Lourentzou, Hanghang Tong, Jingrui He
+**Categories**: cs.AI
+
+## The Gap
+
+Here's the frustrating situation we've hit in the long-context LLM world: models now advertise context windows of 128K, 200K, even millions of tokens. But when you actually test them on tasks requiring reasoning across that full context, they often fail — not because the evidence isn't *in* the input, but because they can't *use* it effectively. The gap between "context access" and "context utilization" is real and well-documented.
+
+Prior attempts to fix this fall into three camps, each with clear limitations:
+
+1. **RAG / retrieval-augmented methods**: Use an external retriever (BM25, embedding models) to find relevant chunks before feeding them to the LLM. Problem: the retriever and the reasoner have different notions of relevance, and you're bottlenecked by the retriever's understanding.
+
+2. **Context compression / pruning**: Condense the long input into a shorter representation. Problem: you might throw away evidence that turns out to be critical, and compression is lossy by nature.
+
+3. **Fine-tuning for long contexts**: Train the model specifically for long-input tasks. Problem: expensive, task-specific, and doesn't generalize across backbones.
+
+ReContext proposes a fourth path: *use the model's own attention patterns* as a relevance signal, construct an evidence pool from that signal, and replay the most relevant evidence right before generation — all without any training.
+
+```
+[Long-context input with evidence scattered throughout]
+        |
+        v
+[LLM produces initial attention patterns over full context]
+        |
+        v
+[Assumption: attention signals encode genuine relevance]
+        |
+        v
+[Extract query-conditioned evidence pool from attention]
+        |
+        v
+[Recursively replay evidence pool before final answer]
+        |
+        v
+[Model generates answer with evidence "pre-loaded"]
+        |
+        v
+[Consistent improvement across 8 datasets, 3 backbones, 128K context]
+```
+
+## The Increment
+
+**One sentence**: Before this paper, if you wanted to improve a pre-trained LLM's long-context reasoning, you either fine-tuned it or built external retrieval infrastructure; after this paper, you can get consistent gains by simply replaying the model's own attention-sorted evidence at inference time, with zero training and zero external tools.
+
+### Core Mechanism
+
+ReContext works in three phases, all happening at inference time. Let me walk through the data flow:
+
+**Phase 1 — Signal Extraction.** You take the full long-context input (question + document) and run a single forward pass through the LLM. You don't need the final answer — you only need the attention weights. These attention patterns tell you which parts of the context the model **thinks* are relevant to the question. Specifically, you look at how much the question tokens attend to each segment of the context, giving you a relevance score per segment.
+
+**Phase 2 — Evidence Pool Construction.** Using those relevance scores, you select the top-k most relevant segments and assemble them into an "evidence pool." This pool is query-conditioned — different questions produce different evidence pools from the same document. The selection can be recursive: you can re-run the attention signal extraction on just the evidence pool to further refine it.
+
+**Phase 3 — Evidence Replay.** You now construct the final input by placing the evidence pool **before* the original full context. The model sees the condensed, relevant evidence first, then the full document, then the question. Because the evidence is replayed at the front, the model encounters it with fresh attention capacity — like putting the most important pages on top of the pile.
+
+```
+Phase 1: Signal Extraction
++---------------------------+
+| Full Context + Question   |
+|                           |
+|   [doc segment 1]        |
+|   [doc segment 2]        |
+|   ...                     |
+|   [doc segment N]        |
+|   [question]              |
++---------------------------+
+        |
+        v  (forward pass, extract attention)
++---------------------------+
+| Attention weight matrix   |
+| Q_tokens x context_tokens |
++---------------------------+
+        |
+        v
+
+Phase 2: Evidence Pool Construction
++---------------------------+
+| Score each segment by     |
+| attention from Q tokens   |
+|                           |
+| segment_2: 0.89           |
+| segment_7: 0.76           |
+| segment_1: 0.45           |
+| ...                       |
++---------------------------+
+        |
+        v  (select top-k)
++---------------------------+
+| Evidence Pool             |
+| [segment_2][segment_7]..  |
++---------------------------+
+
+Phase 3: Evidence Replay
++---------------------------+
+| [Evidence Pool]           |  <-- replayed on top
+| [Full Original Context]   |  <-- preserved in full
+| [Question]                |
++---------------------------+
+        |
+        v  (final forward pass)
++---------------------------+
+| Generated Answer          |
++---------------------------+
+```
+
+**Structural metaphor — the trial lawyer's preparation.**
+
+Imagine you're a defense attorney the night before a major trial. You have a warehouse of documents — thousands of pages of depositions, contracts, emails, financial records. Your question: "Is my client innocent?"
+
+**Phase 1 is your gut scan.** You flip through everything quickly, not reading deeply, just noticing which pages make you think "this matters." You're not a perfect judge of relevance, but your intuition — trained by years of practice — gives you a rough ranking. That's the model's attention: an imperfect but informative signal about what's relevant.
+
+**Phase 2 is your evidence binder.** You pull the top documents, organize them, maybe annotate them. You might even do a second pass on your binder — "wait, this email is actually only relevant because of the contract clause it references, let me make sure that's flagged too." That's the recursive refinement of the evidence pool.
+
+**Phase 3 is how you set up your courtroom table.** You put your key exhibits right in front of you, on top. The full warehouse of documents is still there — you can request any file at any time — but your most important evidence is **pre-positioned* for immediate access. When the judge asks a question, your eyes go to the right pages first.
+
+ReContext does exactly this for an LLM. The attention is the lawyer's gut scan. The evidence pool is the organized binder. The replay is putting the binder on top of the table. The model still has access to the full context, but its most relevant evidence is pre-loaded at the position where it will be most naturally attended to.
+
+### Key Concepts
+
+- **Query-Conditioned Evidence Pool**: This is the heart of ReContext. Instead of asking "what's important in this document?" (which is context-dependent), it asks "what's important **for this specific question*?" The evidence pool changes depending on what you're asking. Concretely: if you have a 128K document about a company and ask "What was Q3 revenue?", the pool might contain financial tables and analyst commentary. If you ask "Who is the CEO?", it contains the leadership section and board meeting notes. Same document, different pools. This is why they use the model's own attention — it's inherently question-dependent.
+
+- **Recursive Evidence Replay**: The "recursive" part means you can apply the evidence extraction process multiple times. First pass: rough relevance signal over the full context. Second pass: refined signal over just the extracted evidence. Each iteration sharpens the signal-to-noise ratio. Think of it like iterative editing — your first draft picks up the main themes, your second draft cuts the fluff, your third draft finds the key sentences. The recursion is shallow (typically 1-2 rounds) but it meaningfully improves evidence quality over a single-pass approach.
+
+- **Associative Memory Framework**: The paper's theoretical lens, borrowed from cognitive science. In associative memory, you have a **store* (your memories), a *cue* (what triggers recall), *associations* (strength of connection between cue and memory), and *retrieval* (pulling a memory into active consciousness). ReContext maps this: context = memory store, question = retrieval cue, attention weights = cue-trace associations, and replay = trace reactivation. This isn't just metaphor decoration — it explains *why* replay works. In associative memory theory, replaying a trace strengthens its accessibility. By replaying evidence in the prompt, you're essentially strengthening the model's ability to attend to it during generation.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+[External Retriever]                 [Model's Own Attention]
+       |                                    |
+       v                                    v
+[Top-k chunks via BM25/embeddings]   [Top-k segments via attention scores]
+       |                                    |
+       v                                    v
+[Feed chunks to LLM]                [Replay evidence before full context]
+       |                                    |
+       v                                    v
+[Answer]                             [Answer]
+       |                                    |
+       v                                    v
+[Disagreement between retriever      [No external dependency;
+ and model about what's relevant]     model's own notion of relevance]
+```
+
+From external retrieval to self-retrieval, the core shift is: **the model already knows what's relevant — it just needs a second chance to look at it.**
+
+## Expert Assessment
+
+**Problem choice**: This is a genuine and well-motivated gap. The "lost in the middle" phenomenon and related findings are well-established, and the access-vs-utilization distinction is crisp and practically important. It sits squarely in the hot zone of long-context LLM research and addresses a real pain point for practitioners deploying these models. That said, the problem space is getting crowded — there are many papers trying to make long contexts work better, and this paper doesn't deeply engage with some recent competitors (e.g., context caching techniques, positional encoding improvements).
+
+**Method maturity**: The core insight — use attention as a relevance signal and replay evidence — is elegant and genuinely clever. It's not brute force at all; it's a surgical intervention that requires no training and adds minimal overhead. The recursive refinement is a nice touch. However, I'm curious about edge cases: what happens when the attention signal itself is unreliable (which is known to happen in some architectures)? The paper doesn't deeply address failure modes. Also, the method requires a full additional forward pass for signal extraction, which could be significant at 128K context lengths — the computational cost analysis is thin.
+
+**Experimental integrity**: Eight datasets across three backbones (Qwen3-4B, Qwen3-8B, Llama3-8B) is decent breadth. The "best average rank" claim is reasonable. However, I'd like to see: (1) ablation on the number of recursion steps — the paper mentions it but could be more thorough; (2) comparison against simpler baselines like "just move the question to the end" or "just randomly sample k segments as replay"; (3) wall-clock runtime comparisons, not just accuracy. The baselines are fair but not exhaustive. No major red flags, but some yellow flags on computational cost transparency.
+
+**Writing quality**: The abstract and introduction are strong — the gap is clearly articulated. The theoretical section (associative memory framework) is the weakest part; it feels like it's trying to justify the method post-hoc rather than motivating it. If the authors had **started* from the associative memory theory and *derived* the method, the paper would be significantly stronger. As written, the theory reads like an afterthought dressed up in cognitive science language. The experiments section is solid but could be more visually engaging — some attention heatmap visualizations of the evidence selection would go a long way.
+
+**Verdict**: weak accept — The core idea is clean, the execution is competent, and the results are consistent. The main weaknesses are incomplete ablations and a theoretical section that doesn't quite land. This is the kind of paper that will get cited by people trying to improve their long-context pipelines, which is a good sign.
+
+## Takeaways
+
+Three concrete things a practitioner can steal:
+
+1. **The "attention-as-retriever" pattern**: Don't build an external retrieval system when the model already has relevance signals built in. Run a throwaway forward pass, extract attention weights over segments, use those as a retrieval score. This works with any transformer-based model and requires zero additional infrastructure.
+
+2. **Replay as a prompt engineering technique**: Even without the full ReContext pipeline, the insight that **putting relevant evidence at the beginning of the context* improves utilization is actionable. If you know which parts of a long document are relevant, prepend them. The positional bias in transformers works for you here.
+
+3. **Recursive refinement on your own signals**: If you have a noisy signal (like attention weights), you can improve it by running the signal extraction multiple times on successively refined inputs. This "self-distillation" pattern is cheap and doesn't require any training — it's worth trying whenever you have a noisy selection process that could benefit from iteration.
+:::
+
+:::zh
+**论文**: [2607.02509](https://arxiv.org/abs/2607.02509)
+**作者**: Yanjun Zhao, Ruizhong Qiu, Tianxin Wei, Yuanchen Bei, Zhining Liu, Lingjie Chen, Ismini Lourentzou, Hanghang Tong, Jingrui He
+**分类**: cs.AI
+
+## 缺口
+
+长上下文大模型领域正面临一个尴尬的现实：模型宣传的上下文窗口已经到了128K、200K甚至更长，但当你真正测试需要跨全文推理的任务时，它们经常失败——不是因为证据不在输入里，而是因为模型*用不上*这些证据。"上下文可访问"和"上下文可利用"之间的鸿沟已经被广泛记录。
+
+此前的修补方案主要有三条路径，各有明显短板：
+
+1. **检索增强生成（RAG）**：用外部检索器（BM25、向量检索）预先找到相关片段再喂给模型。问题在于：检索器和推理器对"相关"的理解不同，瓶颈卡在检索器的认知水平上。
+2. **上下文压缩/剪枝**：把长输入浓缩为短表示。问题在于：压缩必然丢信息，你可能恰恰丢掉了关键证据。
+3. **针对长上下文微调**：专门为长输入任务训练模型。问题在于：成本高、任务特定、不能泛化到不同模型架构。
+
+ReContext提出第四条路：*利用模型自身的注意力模式*作为相关性信号，构建证据池并在生成前重放——全程零训练、零外部工具。
+
+```
+[长上下文输入，证据散落各处]
+        |
+        v
+[LLM 对完整上下文产生初始注意力模式]
+        |
+        v
+[假设：注意力信号编码了真实的相关性]
+        |
+        v
+[从注意力中提取查询条件化的证据池]
+        |
+        v
+[递归重放证据池，置于最终生成之前]
+        |
+        v
+[模型在证据"预加载"状态下生成答案]
+        |
+        v
+[8个数据集、3个模型骨干、128K上下文，一致提升]
+```
+
+## 增量
+
+**一句话**：在此之前，想提升预训练大模型的长上下文推理能力，要么微调要么搭建外部检索系统；在此之后，你可以仅通过在推理时重放模型自己注意力排序的证据就获得一致的性能提升，零训练、零外部依赖。
+
+### 核心机制
+
+ReContext在推理时分三个阶段运行，我来走一遍数据流：
+
+**第一阶段——信号提取。** 把完整的长上下文（问题+文档）输入模型，跑一次前向传播。你不需要最终答案，只需要注意力权重。这些注意力模式告诉你模型认为上下文的哪些部分与问题相关。具体做法是看问题token对文档各段的注意力分布，从而为每个段落打上相关性分数。
+
+**第二阶段——证据池构建。** 用这些相关性分数选出top-k最相关的段落，组装成"证据池"。这个池子是查询条件化的——不同的问题会从同一篇文档中提取出不同的证据池。选择过程可以递归：把证据池再送回模型，再次提取注意力信号，进一步精炼。
+
+**第三阶段——证据重放。** 构造最终输入：把证据池放在**原封不动的完整上下文前面*。模型先看到精炼的相关证据，再看完整文档，再看问题。因为证据被重放在开头，模型能用新鲜的注意力容量去关注它们——就像把最重要的页码放在文件堆最上面。
+
+```
+第一阶段：信号提取
++-----------------------------+
+| 完整上下文 + 问题           |
+|                             |
+|   [文档段落 1]              |
+|   [文档段落 2]              |
+|   ...                       |
+|   [文档段落 N]              |
+|   [问题]                    |
++-----------------------------+
+        |
+        v  (前向传播，提取注意力)
++-----------------------------+
+| 注意力权重矩阵              |
+| 问题token x 上下文token     |
++-----------------------------+
+        |
+        v
+
+第二阶段：证据池构建
++-----------------------------+
+| 根据问题token的注意力       |
+| 给每个段落打分              |
+|                             |
+| 段落_2: 0.89                |
+| 段落_7: 0.76                |
+| 段落_1: 0.45                |
+| ...                         |
++-----------------------------+
+        |
+        v  (选 top-k)
++-----------------------------+
+| 证据池                      |
+| [段落_2][段落_7]...         |
++-----------------------------+
+
+第三阶段：证据重放
++-----------------------------+
+| [证据池]                    |  <-- 重放在最前面
+| [完整原始上下文]            |  <-- 完整保留
+| [问题]                      |
++-----------------------------+
+        |
+        v  (最终前向传播)
++-----------------------------+
+| 生成的答案                  |
++-----------------------------+
+```
+
+**结构比喻——庭审律师的准备工作。**
+
+想象你是一位辩护律师，开庭前一晚。你面前是整整一个仓库的文件——数千页证词、合同、邮件、财务记录。你的问题："我的当事人是否有罪？"
+
+**第一阶段是你的直觉扫描。** 你快速翻阅所有材料，不深读，只是标记哪些页面让你觉得"这个重要"。你不是完美的相关性判断者，但你多年训练出的直觉给了你一个粗略排序。这就是模型的注意力：一个不完美但有信息量的相关性信号。
+
+**第二阶段是你的证据活页夹。** 你把最重要的文件抽出来，整理好，也许还做批注。你甚至可能对活页夹做第二遍筛选——"等等，这封邮件之所以相关是因为它引用了合同条款，我得确保那个条款也在里面"。这就是证据池的递归精炼。
+
+**第三阶段是你庭审桌上的摆放方式。** 你把关键证据放在最前面、顺手可及的地方。整个仓库的文件仍然在——你随时可以调取任何档案——但你最重要的证据已经被**预置*在最容易拿到的位置。当法官问一个问题，你的目光第一时间落在正确的页码上。
+
+ReContext为大模型做的正是这件事。注意力是律师的直觉扫描。证据池是整理好的活页夹。重放是把活页夹放在桌上最显眼的位置。模型仍然可以访问完整上下文，但它最相关的证据已经被预先放在了最容易被注意到的位置。
+
+### 关键概念
+
+- **查询条件化的证据池**：这是ReContext的核心。它不是问"这篇文档里什么重要？"（这取决于上下文），而是问"对于这个**具体问题*，什么重要？"证据池会随提问不同而改变。举个具体例子：如果你有一篇128K的公司报告，问"Q3营收是多少？"，证据池可能包含财务表格和分析师评论。问"CEO是谁？"，它就包含管理层介绍和董事会记录。同一份文档，不同的池子。这就是为什么用模型自身的注意力——它天然就是问题依赖的。
+
+- **递归证据重放**："递归"意味着你可以多次施加证据提取过程。第一遍：对完整上下文的粗略相关性信号。第二遍：只对提取出的证据做精炼信号。每一轮都提升信噪比。可以类比迭代编辑——初稿抓主旨，二稿去废话，三稿找到关键句。递归通常很浅（1-2轮），但相比单轮处理有明显提升。
+
+- **联想记忆框架**：论文的理论视角，借自认知科学。联想记忆中有**存储*（你的记忆）、*线索*（触发回忆的触发器）、*关联*（线索与记忆之间的连接强度）、*检索*（把记忆拉入活跃意识）。ReContext做了这样的映射：上下文=记忆存储，问题=检索线索，注意力权重=线索-痕迹关联，重放=痕迹重激活。这不只是修辞装饰——它解释了*为什么*重放有效。联想记忆理论中，重放一个痕迹会增强其可及性。通过在提示中重放证据，你本质上是在增强模型在生成阶段关注它的能力。
+
+## 框架转变
+
+```
+之前（主流方法）：                之后（本文方法）：
+
+[外部检索器]                     [模型自身的注意力]
+       |                                |
+       v                                v
+[BM25/向量检索选出top-k片段]     [注意力分数选出top-k段落]
+       |                                |
+       v                                v
+[把片段喂给LLM]                  [在完整上下文前重放证据]
+       |                                |
+       v                                v
+[生成答案]                       [生成答案]
+       |                                |
+       v                                v
+[检索器与模型对"相关"的理解       [无外部依赖；
+ 不一致，成为瓶颈]                模型自己的相关性判断]
+```
+
+从外部检索到自我检索，核心转变是：**模型其实已经知道什么重要——它只是需要第二次机会去看一看。**
+
+## 专家评审
+
+**选题眼光**：这是一个真实且动机明确的缺口。"Lost in the middle"现象及相关发现已被广泛记录，"可访问vs可利用"的区分清晰且有实际价值。论文精准落在长上下文LLM研究的热点区域。不过，这个赛道正在变得拥挤——很多论文都在尝试让长上下文更好用，本文没有深入比较一些近期竞品（如上下文缓存技术、位置编码改进等）。
+
+**方法成熟度**：核心洞察——用注意力做相关性信号然后重放证据——优雅且真的聪明。不是蛮力方法，而是一次精准的手术式干预，不需要训练，额外开销很小。递归精炼是个不错的细节。但我对边界情况有疑虑：当注意力信号本身不可靠时怎么办（某些架构已知存在这个问题）？论文没有深入分析失败模式。另外，信号提取需要一次完整的额外前向传播，在128K上下文长度下这个计算开销可能很可观——计算成本分析偏薄。
+
+**实验诚意**：8个数据集、3个模型骨干（Qwen3-4B、Qwen3-8B、Llama3-8B），覆盖面可以。"最佳平均排名"的宣称是合理的。但我希望看到：（1）递归步数的消融实验——论文提到了但不够深入；（2）与更简单基线的比较，比如"把问题放到最后"或"随机采样k个段落做重放"；（3）端到端运行时间对比，而不仅仅是准确率。基线公平但不完整。没有大问题，但计算成本透明度上有黄旗。
+
+**写作功力**：摘要和引言写得好——缺口阐述清晰。理论部分（联想记忆框架）是最弱的环节；读起来像是事后为方法找理由，而不是从理论出发推导出方法。如果作者**从*联想记忆理论*出发*推导方法，论文会强很多。现在的理论部分像是事后包装的认知科学外衣。实验部分扎实但视觉呈现可以更好——一些关于证据选择过程的注意力热力图可视化会非常加分。
+
+**判决**：弱接收——核心想法干净，执行称职，结果一致。主要弱点是消融不够彻底和理论部分没有完全说服人。这类论文会被试图优化长上下文管线的实践者引用，这是一个好信号。
+
+## 要点总结
+
+三个实践者可以立即拿走的具体技巧：
+
+1. **"注意力即检索器"模式**：当模型内置的相关性信号已经可用时，不要费力搭建外部检索系统。跑一次"浪费"的前向传播，提取注意力权重作为检索分数。这对任何基于Transformer的模型都适用，不需要额外基础设施。
+
+2. **重放作为提示工程技巧**：即使不使用完整的ReContext管线，**把相关证据放在上下文开头*会提升利用效率这一洞察本身就可以直接行动。如果你知道长文档的哪些部分是相关的，在开头预置它们。Transformer的位置偏置在这里为你所用。
+
+3. **对自身信号的递归精炼**：如果你有一个噪声信号（比如注意力权重），可以通过在逐步精炼的输入上多次运行信号提取来改进它。这种"自蒸馏"模式成本很低且不需要任何训练——每当你的筛选过程有噪声但可以迭代时，都值得尝试。
+:::
