@@ -1,0 +1,151 @@
+---
+title:
+  en: "DemoPSD: Teaching LLMs to Reason Without Leaking the Answer"
+  zh: "DemoPSD：教大模型推理，但别把答案藏进捷径"
+description:
+  en: "A self-distillation framework that uses distribution disagreement to adaptively blend teacher and student policies, preventing privileged information leakage while preserving exploration capacity."
+  zh: "利用分布分歧自适应混合师生策略的自蒸馏框架，既防止特权信息泄露，又为模型保留探索空间。"
+date: 2026-07-05
+tags: ["arxiv", "ai", "cs.lg", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.02502](https://arxiv.org/abs/2607.02502)
+**Authors**: Yunhe Li, Hao Shi, Wenhao Liu, Mengzhe Ruan, Hanxu Hou, Zhongxiang Dai, Shuang Qiu, Linqi Song
+**Categories**: cs.LG, cs.AI
+
+## The Gap
+
+On-policy self-distillation (OPSD) has become a go-to recipe for training LLMs to reason: one model plays both teacher and student, with the teacher seeing the full context (chain-of-thought, answer) while the student only sees the question. The standard approach is straightforward — minimize KL divergence from the teacher's token-level distribution at every position.
+
+But there's a rot in the foundation. Recent work has surfaced two intertwined problems with this setup. First, the teacher's dense supervision is conditioned on *privileged information* (the answer, the full reasoning trace), and the student learns to encode shortcuts that correlate with that information — shortcuts that simply don't exist at test time. This is **privileged information leakage**: the student appears to reason well but is actually pattern-matching on answer-dependent signals. Second, fitting the full teacher distribution at every token **suppresses exploration* — the student never learns to venture beyond the teacher's mode, which kills cross-domain generalization. Prior fixes (like SDPO) tried to soften the distillation target but didn't address the root cause: the student is blindly copying a teacher whose every move is tainted by information it won't have later.
+
+DemoPSD asks: what if we could *automatically detect* which parts of the teacher's guidance are safe to follow and which are leakage-prone, then blend accordingly?
+
+```
+Privileged Info Leakage        Suppressed Exploration
+         \                          /
+          v                        v
++--------------------------------------------+
+| Dense token-level distillation             |
+| blindly fits student to teacher            |
++--------------------------------------------+
+                      |
+                      v
++--------------------------------------------+
+| Assumption: teacher-student disagreement   |
+| is a proxy for "teacher using priv. info"  |
++--------------------------------------------+
+                      |
+                      v
++--------------------------------------------+
+| Method: reverse-KL barycenter target       |
+| with per-token adaptive blending           |
++--------------------------------------------+
+                      |
+                      v
++--------------------------------------------+
+| Evidence: SciKnowEval (4 fields) +         |
+| OOD GPQA generalization                    |
++--------------------------------------------+
+                      |
+                      v
++--------------------------------------------+
+| Selective teacher adoption                 |
+| beats blind full distillation              |
++--------------------------------------------+
+```
+
+## The Increment
+
+**One sentence**: Before this paper, self-distillation treated the teacher's distribution as gospel at every token; after it, we have a principled mechanism to **selectively trust* the teacher based on real-time distributional disagreement, with provable guarantees on leakage reduction and exploration preservation.
+
+### Core Mechanism
+
+DemoPSD's architecture has three moving parts: a divergence estimator, an adaptive blending controller, and a barycenter loss target. Here's how data flows through the system.
+
+At each token position during training, both the teacher policy (with full context) and the student policy (with standard context) produce distributions over next tokens. The system computes the KL divergence between these two distributions at that position — this is the "disagreement signal." High divergence means the teacher's predictions are likely informed by privileged information the student won't have at inference. Low divergence means the teacher and student already agree, so the teacher's guidance is safe.
+
+This disagreement signal feeds into a soft gating function that produces an adaptive blending weight alpha\_t for each token. When divergence is high, alpha\_t shrinks toward the student's own distribution. When divergence is low, alpha\_t grows toward the teacher. The target distribution at each position is then computed as a *reverse-KL barycenter* — a weighted geometric mean of the teacher and student distributions, controlled by alpha\_t. The student is trained to minimize KL divergence to this barycenter target, not to the raw teacher distribution.
+
+```
+Prompt
+  |
+  +---> [Teacher (full ctx)] --> P_teacher(t) --+
+  |                                              |
+  |                                              +--> [KL Divergence D_t]
+  +---> [Student (std ctx)] --> P_student(t) ---+           |
+                                                             v
+                                                    [Adaptive Weight]
+                                                    alpha_t = f(D_t)
+                                                    high D -> low alpha
+                                                             |
+                                                             v
+                                                    [Barycenter Target]
+                                                    Q_t = P_teacher^alpha
+                                                        * P_student^(1-alpha)
+                                                             |
+                                                             v
+                                                    [Loss]
+                                                    KL(P_student || Q_t)
+                                                             |
+                                                             v
+                                                    [Update Student Params]
+```
+
+**The driving instructor metaphor.** Imagine learning to drive with an instructor who can see the dashboard — engine temperature, tire pressure, diagnostic codes — while you can only see the road, your mirrors, and the speedometer. After you get your license, you'll drive alone with just the road view.
+
+Standard self-distillation says: "copy every move the instructor makes." So when the instructor brakes hard before a gentle curve, you brake hard there too. But sometimes the instructor braked because the dashboard showed the engine overheating — not because the curve was dangerous. You've learned a shortcut tied to information you won't have when driving alone. That's privileged information leakage.
+
+DemoPSD works differently. At every driving decision — turn, brake, accelerate — you compare your instinct with the instructor's suggestion. When you two agree, follow them: it's safe learning, they're probably just confirming what the road already tells you. When you strongly disagree, lean toward your own judgment: the instructor is likely using dashboard data you can't see. The blended driving style — the *barycenter* — becomes your training target.
+
+Here's the mapping:
+
+- Dashboard (engine warnings, codes) = privileged information (answer, full reasoning trace)
+- Road view (mirrors, speedometer) = standard information (test-time available context)
+- Each driving decision = each token position
+- Instructor's suggestion = teacher distribution P\_teacher
+- Your instinct = student distribution P\_student
+- Disagreement between instinct and instructor = KL divergence D\_t
+- Following instructor when you agree, trusting yourself when you disagree = adaptive alpha\_t
+- Blended driving style = reverse-KL barycenter Q\_t
+
+The critical insight: the disagreement is your *automatic signal* for leakage risk. You don't need to know *what* privileged information exists — you just need to notice when the teacher's advice feels alien to your own judgment.
+
+### Key Concepts
+
+- **Privileged Information Leakage**: In self-distillation, the teacher sees more than the student will at test time (the full reasoning chain, the answer). If the student learns to copy the teacher's output exactly, it picks up on subtle statistical patterns that correlate with that hidden information — like a student who learns to guess answers from the question's phrasing rather than solving the problem. The result: good performance on training distributions, brittle failure elsewhere. Think of it as the student learning to read the teacher's poker tells instead of learning to play poker.
+
+- **Reverse-KL Barycenter**: A "barycenter" is just a weighted average of probability distributions. The "reverse-KL" part specifies **how* we average — reverse KL (minimizing KL(Q || P) rather than KL(P || Q)) tends to produce sharp, peaked distributions rather than spread-out ones, which is what we want for a reasoning target (commit to an answer, don't hedge everywhere). Concretely, if the teacher assigns high probability to "therefore" and the student assigns high probability to "hence," the barycenter picks a confident path rather than spreading mass across both plus fifty other tokens. The weighting (controlled by alpha) determines how much of the teacher versus student distribution goes into the blend, position by position.
+
+## Framework Shift
+
+```
+Before (mainstream OPSD):          After (DemoPSD):
+
+Teacher                            Teacher     Student
+   |                                  |           |
+   | full KL                           |           |
+   | at every token                    v           v
+   v                              [Divergence D_t]
+Student                                |
+(passive receiver,                     v
+ copies everything)              [Adaptive alpha_t]
+                                        |
+                                        v
+                                  Barycenter Q_t
+                                 = T^alpha * S^(1-alpha)
+                                        |
+                                        v
+                                     Student
+                                  (selective receiver,
+                                   balanced distillation)
+```
+
+From blind full-teacher imitation to disagreement-driven selective adoption, the core shift is that the student's own distribution becomes a co-author of the training target rather than just a receiver of the teacher's signal.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap, not manufactured. Privileged information leakage in self-distillation has been noted informally but rarely attacked with a principled framework. The paper sits at the right intersection — knowledge distillation meets LLM reasoning — and the dual problem formulation (leakage + exploration suppression) is well-motivated. It's the kind of issue that becomes more painful as self-distillation scales up.
+
+**Method maturity**: The reverse-KL barycenter is an elegant mathematical choice, not brute force
