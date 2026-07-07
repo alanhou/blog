@@ -1,0 +1,361 @@
+---
+title:
+  en: "REDDIT: Fixing Timestamp Drift in ASR Without Forgetting — Replay-Based Distribution Editing"
+  zh: "REDDIT：基于重放分布编辑的 ASR 时间戳漂移修正与遗忘规避"
+description:
+  en: "A lightweight post-training framework that corrects timestamp drift in autoregressive ASR over long non-speech spans while preserving transcription quality, using only replay-based distribution editing on 1.6% of parameters."
+  zh: "一种轻量级后训练框架，通过基于重放的分布编辑，在仅更新1.6%参数的条件下修正自回归ASR系统在长静音段上的时间戳漂移，同时保持转录质量。"
+date: 2026-07-07
+tags: ["arxiv", "ai", "cs.cl", "cs.ai", "cs.sd"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.05364](https://arxiv.org/abs/2607.05364)
+**Authors**: Cheng-Kang Chou, Ming-To Chuang, Ke-Han Lu, Chan-Jan Hsu, Hung-yi Lee
+**Categories**: cs.CL, cs.AI, cs.SD
+
+## The Gap
+
+Autoregressive ASR systems like Whisper have popularized timestamp-as-token decoding: the model emits special timestamp tokens interleaved with transcript tokens, producing aligned transcriptions without frame-level forced aligners or post-hoc heuristics. This is elegant and works well in normal speech. But there's a catch nobody stress-tested rigorously: when the audio contains long non-speech spans — pauses, silence, music breaks — the autoregressive decoder loses track of where it is on the time axis. The text stays plausible, but the timestamps drift. A 10-second silence might get reported as 3 seconds, or a gap might stretch an entire segment forward.
+
+Prior work largely sidestepped this. Frame-level aligners (CTC, attention-based) need architecture changes. Post-processing methods (VAD + interpolation) are brittle and disconnected from the model's own representations. And the obvious fix — fine-tune on corrected timestamps — turns out to be a trap: naively supervised fine-tuning (SFT) on timestamp tokens catastrophically degrades non-timestamp behavior. On Whisper-tiny, naive SFT pushed Common Voice English MER from 41.3% to 524.2%. The model unlearns how to transcribe.
+
+So the gap is precise: how do you correct a narrow slice of model behavior (timestamp accuracy over non-speech spans) without destroying everything else the model knows? Nobody had a principled answer. This paper provides one.
+
+```
+Problem
+|
+Long non-speech spans cause timestamp drift in
+autoregressive ASR (Whisper et al.)
+|
+v
+Prior attempts
+|
++-- Frame-level aligners: need architecture redesign
++-- Post-processing (VAD + interpolation): brittle, disconnected
++-- Naive SFT on timestamps: catastrophic forgetting
+|   (MER 41.3% --> 524.2% on Whisper-tiny)
+|
+v
+Insight: fine-tuning corrupts the decoder distribution
+because the teacher-forced prefix context shifts
+|
+v
+REDDIT method
+|
++-- Stage 1: edit timestamp targets under
+|   replayed (frozen) base model decoder context
+|   + match base distribution on non-timestamp tokens
++-- Stage 2: short edited-prefix refinement
+|
+v
+Evidence
+|
++-- long-gap mIoU: 38.7% --> 95.0%
++-- mixed-gap AAS: 2752ms --> 223ms
++-- CV-en MER preserved: 41.3% (vs 524.2% naive SFT)
++-- 34.9 hours targeted data, 1.6% params updated
+|
+v
+Conclusion
+|
+Lightweight replay-based distribution editing
+corrects narrow model behavior without forgetting
+```
+
+## The Increment
+
+**One sentence**: Before this paper, correcting timestamp drift in autoregressive ASR required either architectural changes or accepted catastrophic forgetting; after this paper, there exists a lightweight post-training recipe that fixes timestamps in 34.9 hours on 1.6% of parameters while preserving everything else.
+
+### Core Mechanism
+
+REDDIT operates in two stages, both built on a single principle: when you want to change one token's prediction but keep everything else intact, you should show the model its own "clean" context while only modifying the target of interest.
+
+**Stage 1 — Replay-Based Distribution Editing.** The base (frozen) model and a trainable copy (edited model) both process the same input. The base model autoregressively generates decoder hidden states — these represent "what the model would have thought if we hadn't touched it." The edited model receives these replayed hidden states as context when predicting timestamp tokens. The training objective has two heads: for timestamp tokens, minimize the distance to corrected (ground-truth) timestamps; for non-timestamp tokens (the actual transcript), minimize KL divergence to the frozen base model's output distribution. This ensures the edited model's predictions on regular text tokens remain anchored to the original model's behavior. Only a small adapter and the timestamp-prediction parameters are updated.
+
+**Stage 2 — Edited-Prefix Refinement.** Stage 1 uses the base model's context, which is "clean" but doesn't reflect the edited model's own corrected timestamps. Stage 2 closes this loop: the edited model now processes its own corrected timestamp predictions as prefix context for a short window, then predicts the next tokens. This is a brief refinement pass that teaches the model to be self-consistent — to handle its own corrected timestamps gracefully rather than relying on the base model's (potentially drifted) context.
+
+```
+Stage 1: Replay-Based Distribution Editing
+
+[Audio Input] --> [Encoder (frozen)] --> encoder_out
+                                            |
+                 +---------------------------+
+                 |                           |
+          [Base Decoder]              [Edited Decoder]
+          (frozen, replayed)          (trainable adapter)
+                 |                           |
+          base_hidden_states -----> used as replay context
+                 |                           |
+          base_logits                 edited_logits
+                 |                           |
+          (reference)              +-- timestamp tokens: loss vs corrected ts
+                                  +-- non-ts tokens: KL(base_logits || edited_logits)
+
+
+Stage 2: Edited-Prefix Refinement
+
+[Audio + corrected_ts_prefix] --> [Edited Decoder]
+                                          |
+                                  predict next tokens
+                                  using own corrected context
+                                          |
+                                  short refinement loss
+```
+
+**Metaphor: The Radio Frequency Analogy.** Imagine you're a radio engineer. Your receiver (the ASR model) is tuned to a station (the audio), and it normally works fine. But when the station goes silent for a while (non-speech span), your dial drifts — the frequency readout says one thing, but the actual signal is somewhere else. 
+
+Naive fine-tuning is like grabbing the dial and forcing it to the right frequency. It works for that moment, but you've disturbed the entire tuning mechanism — now the radio can't pick up any station properly (catastrophic forgetting). 
+
+REDDIT's Stage 1 is like having a second, identical radio (the base model) that keeps playing normally. You carefully adjust only the dial on the first radio while using the second radio's audio output as your reference. You measure: "Is the dial reading right? Good. Is everything else sounding the same as the second radio? Good." You only touch the dial (timestamp tokens) and leave all other controls (non-timestamp tokens) locked to match the reference radio's settings.
+
+Stage 2 is like now turning off the reference radio and checking: "Does my adjusted radio stay on frequency when it's operating on its own?" You listen for a short while to confirm self-consistency, making tiny final adjustments if needed.
+
+Without the reference radio (replayed base distribution), any adjustment you make to the dial would ripple through and change how the whole receiver behaves. The replay is what makes surgical correction possible.
+
+### Key Concepts
+
+- **Timestamp Drift**: In autoregressive ASR, the model generates a sequence of tokens like `<|0.00|> Hello <|1.20|> world <|2.40|> <|3.50|> ... <|4.20|> goodbye`. Each `<|...|>` is a predicted timestamp. The model has learned to predict these as regular tokens, not through explicit alignment. When there's a 5-second silence in the audio, the model must "imagine" that 5 seconds have passed — but it has no internal clock. It just generates whatever timestamp token seems plausible based on its training, and over long gaps, these estimates drift. Think of it like estimating seconds in your head while distracted: you might count to 10 but only 6 real seconds passed. The model makes a similar error, except it affects every downstream timestamp.
+
+- **Catastrophic Forgetting**: Neural networks store knowledge in shared parameters. When you fine-tune on a new task (correct timestamps), gradient updates shift the same weights that encode transcription ability. The model doesn't have separate "timestamp cells" and "transcription cells" — it's all intertwined. So optimizing for timestamps can trash transcription. This is like repainting one wall of a house and accidentally cracking the plumbing that runs behind it. REDDIT's KL-matching on non-timestamp tokens acts as a constraint that says "you can change the paint, but the plumbing must stay exactly as it was."
+
+- **Distribution Editing via Replay**: The core technical trick. Instead of training the edited model end-to-end (which would let corrections ripple through and corrupt the decoder state), you "freeze time" by feeding the base model's hidden states into the edited model's decoder. The edited model sees what the base model was thinking and only changes its prediction at timestamp tokens. This is surgical: you're editing one line of the model's "thought process" while keeping every other line identical. It works because the model's representation of "what to say next" (transcription) and "when to say it" (timestamps) can be partially disentangled if you control the context carefully enough.
+
+## Framework Shift
+
+```
+Before (mainstream approach):
+                                                    
+  [Audio] --> [ASR Model] --> [Raw Timestamps]
+                                    |
+                              [Post-processing]
+                              (VAD + interpolation)
+                                    |
+                              [Adjusted Timestamps]
+                                    |
+                              [Drift not fully fixed]
+                              [Or: fine-tune = forget]
+
+
+After (this paper):
+
+  [Audio] --> [Encoder] --> encoder_out
+                                 |
+                  +--------------+--------------+
+                  |                             |
+           [Base Decoder]                [Trainable Adapter]
+           (frozen)                      (1.6% params)
+                  |                             |
+           replay hidden states ------> context
+                  |                             |
+           base_dist (reference)    +-- correct timestamps
+                                    +-- match base_dist on text
+                                                |
+                                          [Edited Model]
+                                          (correct + preserved)
+```
+
+From post-hoc patching or destructive fine-tuning to surgical replay-based distribution editing, the core shift is treating timestamp correction as an isolated edit operation on the model's generation process rather than a retraining problem.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, well-motivated. Timestamp drift over silence is something anyone who's built on Whisper has probably noticed but tolerated. The 15-system benchmark (including modern audio-language models) makes the scope clear: this isn't a Whisper-only issue, it's architectural. The gap sits at the intersection of ASR alignment and continual learning — two active areas that rarely talk to each other.
+
+**Method maturity**: Clever, not brute force. The replay-based editing idea is the real contribution — it's a general principle (edit one behavior by anchoring to frozen reference distributions) that happens to be applied to timestamps here. The two-stage design (base-replayed then self-replayed) addresses a real subtlety: models need to learn to handle their own corrected outputs, not just the base model's. That said, the VAD-based synthetic data construction is practical but somewhat brittle — it assumes non-speech gaps can be cleanly inserted, which may not reflect all real-world drift scenarios (think overlapping speakers, gradual noise transitions).
+
+**Experimental integrity**: The numbers are striking but hold up to scrutiny. The MER preservation (41.3% vs 524.2%) is the key comparison and it's dramatic. The 15-system evaluation on self-built benchmarks is thorough, though the benchmarks themselves aren't released (as far as I can tell), which limits reproducibility. The ablation between Stage 1 and Stage 2 would strengthen the paper — we don't see how much each stage contributes independently. The 34.9-hour data budget and 1.6% parameter update are compelling practical claims. One concern: all main results are on Whisper-tiny. How does this scale to Whisper-large or other architectures? The paper touches on this but doesn't deep-dive.
+
+**Writing quality**: Solid but not exceptional. The motivation section is clear. The method description could benefit from a cleaner mathematical formulation — the two objectives (timestamp correction loss and KL matching) are described in prose but a formal loss function in one place would help. The related work section is thin; there's interesting adjacent work in knowledge distillation and model editing that deserves connection. Section 5 (the 15-system benchmark) is the paper's strongest contribution to the community but reads as an afterthought — it should be elevated.
+
+**Verdict**: weak accept — The core idea (replay-based distribution editing for surgical model correction) is transferable and the timestamp-drift problem is real, but the limited scale of experiments and missing ablations temper enthusiasm.
+
+## Takeaways
+
+1. **Replay-based distribution editing is a general-purpose tool.** The principle — anchor to the frozen base model's distribution on tokens you want to preserve, only supervise the tokens you want to change — applies to any narrow model correction task. Think: fixing hallucination on specific entity types, correcting bias in certain output categories, patching a model's behavior on edge cases without full retraining.
+
+2. **KL matching on "don't-touch" tokens is cheap insurance against forgetting.** If you're fine-tuning a model for any narrow behavioral change, adding a KL-divergence term that matches the original model's distribution on everything except your target tokens costs almost nothing and prevents catastrophe. This is simpler than EWC, progressive nets, or other continual learning machinery.
+
+3. **Self-built stress-test benchmarks have outsized value.** The authors' 15-system evaluation on gap and long-gap audio is arguably more useful than their method. If you work with ASR timestamps, you now have a template for testing whether your system survives non-speech spans. Consider building your own version for your domain.
+:::
+
+:::zh
+**论文**: [2607.05364](https://arxiv.org/abs/2607.05364)
+**作者**: Cheng-Kang Chou, Ming-To Chuang, Ke-Han Lu, Chan-Jan Hsu, Hung-yi Lee
+**分类**: cs.CL, cs.AI, cs.SD
+
+## 缺口
+
+自回归ASR系统（如Whisper）流行一种做法：把时间戳当作普通token解码。
+模型在转录文本token之间穿插特殊的时间戳token，无需帧级对齐器就能生成带时间戳的转录。
+这在正常语音上效果很好，但有个此前没人严格压测的盲区：当音频包含长静音段时，
+自回归解码器会失去时间轴的锚定。文本仍然合理，但时间戳漂移了——
+10秒的沉默可能被报告为3秒，或者一个间隙把后续所有时间戳整体前移。
+
+此前的解决方案各有硬伤。
+帧级对齐器（CTC、注意力对齐）需要改架构；
+后处理方法（VAD + 插值）脆弱且与模型内部表示脱节；
+最直觉的修法——在修正后的时间戳上做SFT——是个陷阱：
+朴素SFT会导致灾难性遗忘。在Whisper-tiny上，英语Common Voice的MER从41.3%飙到524.2%。
+模型连怎么转录都忘了。
+
+所以缺口很精确：如何修正模型行为的一个窄切面（长静音段的时间戳精度），
+同时不破坏模型其他所有能力？此前没有原则性的答案。
+本文提供了一个。
+
+```
+问题
+|
+长静音段导致自回归ASR时间戳漂移
+|
+v
+已有方案
+|
++-- 帧级对齐器：需要改架构
++-- 后处理（VAD+插值）：脆弱、脱节
++-- 朴素SFT：灾难性遗忘（MER 41.3% --> 524.2%）
+|
+v
+关键洞察：SFT破坏了teacher-forced前缀下的解码器分布
+|
+v
+REDDIT方法
+|
++-- 阶段1：在冻结基座模型的重放上下文中编辑时间戳目标
+|   同时在非时间戳token上匹配基座分布
++-- 阶段2：编辑后前缀的短程精炼
+|
+v
+实验结果
+|
++-- 长间隙mIoU：38.7% --> 95.0%
++-- 混合间隙AAS：2752ms --> 223ms
++-- CV-en MER保持：41.3%（朴素SFT为524.2%）
++-- 34.9小时目标数据，仅更新1.6%参数
+|
+v
+结论
+|
+轻量级重放分布编辑可精准修正模型行为而不引发遗忘
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，修正自回归ASR的时间戳漂移要么需要改架构，要么不得不接受灾难性遗忘；在这篇论文之后，有了一个轻量级后训练配方，用34.9小时数据和1.6%的参数就能修正时间戳，同时保持其他能力不变。
+
+### 核心机制
+
+REDDIT分两个阶段运作，两者建立在一个统一原则之上：
+当你只想改变某一类token的预测而保持其余一切不变时，
+你应该让模型看到自己"干净"的上下文，同时只修改你关注的目标。
+
+**阶段一：重放式分布编辑。**
+冻结的基座模型和一个可训练的编辑副本同时处理相同输入。
+基座模型自回归地生成解码器隐状态——这些状态代表"如果我们没碰它，模型会怎么想"。
+编辑模型在预测时间戳token时，接收这些重放的隐状态作为上下文。
+训练目标分两路：对时间戳token，最小化与修正后（真值）时间戳的距离；
+对非时间戳token（实际转录文本），最小化与冻结基座模型输出分布的KL散度。
+这确保编辑模型在常规文本token上的预测始终锚定在原始模型的行为上。
+只有小型适配器和时间戳预测相关的参数被更新。
+
+**阶段二：编辑后前缀精炼。**
+阶段一使用的是基座模型的上下文，这个上下文"干净"但没有反映编辑模型自身修正后的时间戳。
+阶段二闭环：编辑模型现在以自己修正后的时间戳预测作为前缀上下文，
+处理一个短窗口，然后预测后续token。
+这是一个简短的精炼过程，教会模型自洽地处理自己修正后的时间戳，
+而非依赖基座模型（可能已漂移的）上下文。
+
+```
+阶段一：重放式分布编辑
+
+[音频输入] --> [编码器（冻结）] --> encoder_out
+                                        |
+                 +----------------------+------+
+                 |                             |
+          [基座解码器]                    [编辑解码器]
+          （冻结，重放）                  （可训练适配器）
+                 |                             |
+          base_hidden_states -------> 作为重放上下文
+                 |                             |
+          base_logits                 edited_logits
+                 |                             |
+          （参考分布）              +-- 时间戳token：与修正后时间戳计算loss
+                                  +-- 非时间戳token：KL(base_logits || edited_logits)
+
+
+阶段二：编辑后前缀精炼
+
+[音频 + 修正后的时间戳前缀] --> [编辑解码器]
+                                        |
+                                  用自身修正后的上下文
+                                  预测后续token
+                                        |
+                                  短程精炼loss
+```
+
+**核喻：收音机调频。** 想象你是一个无线电工程师。你的接收器（ASR模型）调在一个电台（音频）上，平时工作正常。但当电台沉默了一段时间（非语音段），你的频率读数就漂了——表盘显示一个频率，实际信号却在别处。
+
+朴素微调就像抓住旋钮强行扭到正确频率。
+那一刻管用了，但你扰动了整个调谐机构——现在这台收音机连正常电台都收不了了（灾难性遗忘）。
+
+REDDIT的阶段一就像拿出一台一模一样的收音机（基座模型），让它正常播放。
+你小心翼翼地只调整第一台收音机的旋钮，同时用第二台的声音输出作参考。
+你测量："读数对了吗？好。其他所有设置跟第二台一样吗？好。"
+你只动旋钮（时间戳token），其他所有控制（非时间戳token）都锁定在与参考机一致的位置。
+
+阶段二就像关掉参考机，然后检验："我调完的收音机自己运转时，频率还稳吗？"
+你听一小会儿确认自洽性，需要时做最后微调。
+
+没有参考机（重放的基座分布），任何对旋钮的调整都会涟漪般改变整个接收器的行为。
+重放正是让精准手术成为可能的关键。
+
+### 关键概念
+
+- **时间戳漂移**: 在自回归ASR中，模型生成的token序列长这样：`<|0.00|> 你好 <|1.20|> 世界 <|2.40|> <|3.50|> ... <|4.20|> 再见`。每个 `<|...|>` 都是一个预测出的时间戳token。模型把它当普通token来预测，不是通过显式对齐。当音频中有5秒静音时，模型必须"猜"5秒过去了——但它没有内部时钟。它只是根据训练经验生成一个看起来合理的时间戳，而在长间隙上，这些估计会漂移。就像你在脑子里数秒但被分心了：你以为数到了10，但实际只过了6秒。模型犯类似的错误，只不过它影响后续所有时间戳。
+
+- **灾难性遗忘**: 神经网络把知识存在共享参数里。当你微调一个新任务（修正时间戳）时，梯度更新移动的是编码转录能力的同一组权重。模型没有独立的"时间戳单元"和"转录单元"——所有知识交织在一起。所以优化时间戳可能毁掉转录能力。这就像重新粉刷一堵墙，却意外碰裂了墙后面的水管。REDDIT在非时间戳token上的KL匹配就像一个约束，意思是"你可以改油漆，但水管必须原封不动"。
+
+- **通过重放的分布编辑**: 核心技术窍门。不是端到端训练编辑模型（那样修正会涟漪般传播、破坏解码器状态），而是通过把基座模型的隐状态喂进编辑模型的解码器来"冻结时间"。编辑模型看到基座模型在想什么，只在时间戳token处改变预测。这是外科手术式的：你只编辑模型"思考过程"中的一行，同时保持其他每一行完全相同。之所以有效，是因为模型对"接下来说什么"（转录）和"什么时候说"（时间戳）的表示，如果你精心控制上下文，是可以部分解耦的。
+
+## 框架转变
+
+```
+之前（主流方法）：                    之后（本文方法）：
+
+[音频] --> [ASR模型] --> 原始时间戳    [音频] --> [编码器] --> encoder_out
+                  |                                           |
+            [后处理]                                +---------+---------+
+            （VAD+插值）                            |                   |
+                  |                           [基座解码器]        [可训练适配器]
+            调整后的时间戳                     （冻结）            （1.6%参数）
+                  |                               |                   |
+            漂移未完全修复               重放隐状态 --------> 上下文
+            或：微调=遗忘                             |                   |
+                                              base_dist           +-- 修正时间戳
+                                              （参考）            +-- 匹配base_dist
+                                                                      |
+                                                                [编辑后模型]
+                                                                （修正+保持）
+```
+
+从后处理打补丁或破坏性微调，到外科手术式的重放分布编辑，核心转变是把时间戳修正当作对模型生成过程的孤立编辑操作，而非重新训练问题。
+
+## 专家评审
+
+**选题眼光**: 真缺口，动机扎实。静音段的时间戳漂移是所有基于Whisper做过工程的人都可能注意到但一直在忍受的问题。15个系统的评测（包括现代音频语言模型）清楚地展示了问题的广度：这不是Whisper独有的问题，而是架构层面的。这个缺口处在ASR对齐和持续学习的交叉地带——两个活跃但很少对话的领域。
+
+**方法成熟度**: 巧劲，不是蛮力。重放式编辑才是真正的贡献——它是一个通用原则（锚定到冻结参考分布来编辑单一行为），恰好在这里应用于时间戳。两阶段设计（基座重放后自重放）处理了一个真实微妙点：模型需要学会处理自己修正后的输出，而不仅仅是基座模型的输出。不过，基于VAD的合成数据构造虽然实用，但有些脆弱——它假设非语音间隙可以干净地插入，可能无法反映所有真实漂移场景（比如重叠说话人、渐变噪声）。
+
+**实验诚意**: 数字惊人但经得起检验。MER保持（41.3%对比524.2%）是关键比较，效果戏剧化。15个系统在自建基准上的评测很彻底，但基准本身似乎未公开发布，这限制了可复现性。阶段一和阶段二的消融实验会让论文更强——我们看不到各自独立的贡献。34.9小时数据和1.6%参数更新是很有说服力的实际声明。一个疑虑：所有主要结果都在Whisper-tiny上。对Whisper-large或其他架构的扩展性如何？论文有所触及但没有深入。
+
+**写作功力**: 扎实但不出色。动机部分清晰。方法描述可以有更好的数学形式化——两个目标函数（时间戳修正loss和KL匹配）在散文中描述，但一个统一的正式loss函数会更好。相关工作部分偏薄；知识蒸馏和模型编辑方面有有趣的邻近工作值得关联。第5节（15系统评测）是论文对社区最强的贡献，但读起来像附录——应该提升为主要贡献。
+
+**判决**: 弱接收 —— 核心想法（重放式分布编辑做精准模型修正）具有可迁移性，时间戳漂移问题真实存在，但实验规模有限且缺少消融，打了折扣。
+
+## 要点总结
+
+1. **重放式分布编辑是通用工具。** 核心原则——在你想保持不变的token上锚定到冻结基座模型的分布，只在你想改变的token上施加监督——适用于任何窄范围的模型修正任务。可以想想：修复特定实体类型的幻觉、在特定输出类别上纠正偏差、针对边缘情况打补丁而不用全面重训。
+
+2. **在"别碰"的token上做KL匹配是防遗忘的廉价保险。** 如果你在为任何窄范围行为变化微调模型，加上一个KL散度项来匹配原始模型在非目标token上的分布，几乎零成本就能防止灾难性遗忘。这比EWC、渐进式网络或其他持续学习机制简单得多。
+
+3. **自建压力测试基准有超乎想象的价值。** 作者对间隙和长间隙音频的15系统评测，可能比他们的方法本身更有用。如果你的工作涉及ASR时间戳，你现在有了一个测试系统能否经受非语音段考验的模板。考虑在自己的领域构建类似的评测。
+:::
