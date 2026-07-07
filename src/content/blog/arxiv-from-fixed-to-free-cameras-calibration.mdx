@@ -1,0 +1,278 @@
+---
+title:
+  en: "CamVLA: Letting Robot Policies Figure Out Where the Camera Is"
+  zh: "CamVLA：让机器人策略自己弄清楚相机在哪"
+description:
+  en: "A calibration-free VLA model that decouples manipulation from camera geometry, enabling robust performance across unseen viewpoints using only monocular RGB."
+  zh: "一种无需标定的VLA模型，通过解耦操作控制与相机几何，仅用单目RGB即可在不同视角下保持鲁棒性能。"
+date: 2026-07-07
+tags: ["arxiv", "ai", "cs.cv", "cs.ai", "cs.lg", "cs.ro"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.05396](https://arxiv.org/abs/2607.05396)
+**Authors**: Wenhao Li, Xueying Jiang, Quanhao Qian, Deli Zhao, Shijian Lu, Gongjie Zhang, Ran Xu
+**Categories**: cs.CV, cs.AI, cs.LG, cs.RO
+
+## The Gap
+
+Existing Vision-Language-Action (VLA) models have made impressive strides in learning manipulation policies from demonstrations, but they share a hidden fragility: they assume the camera stays where it was during training. The moment you reposition the camera — which happens constantly in real deployments — the policy breaks.
+
+Prior work on view-robust manipulation (like ViewFormer, VAT-Mart, and various data-augmentation approaches) tried to patch this by explicitly feeding camera extrinsics into the policy. In other words: "tell the robot where the camera is, and it'll figure out how to move." But this creates a chicken-and-egg problem — you need precise calibration before the robot can do anything, which is exactly the kind of setup burden real-world deployment hates.
+
+CamVLA's insight flips the assumption: what if the policy doesn't need to be told where the camera is, but instead figures it out from the visual input itself, and then uses that self-discovered geometry to generate correct actions?
+
+```
+Problem:  Camera repositions -> policy breaks
+              |
+              v
+Prior fix: Feed camera extrinsics explicitly (fragile, requires calibration)
+              |
+              v
+Gap: No calibration-free, depth-free, single-view VLA for arbitrary viewpoints
+              |
+              v
+CamVLA: Predict both (a) camera-centric action AND (b) hand-eye matrix
+              |
+              v
+Compose via deterministic geometry -> robot base-frame action
+              |
+              v
+Evidence: Consistent success rate gains across unseen viewpoints (sim + real)
+```
+
+## The Increment
+
+**One sentence**: Before this paper, robustness to camera viewpoint changes required explicit calibration; after this paper, a VLA policy can infer camera geometry from a single RGB image and still produce correct robot-base actions.
+
+### Core Mechanism
+
+CamVLA's architecture has two prediction heads that work together through geometric composition. The first head predicts a **camera-centric end-effector action** — essentially, "how should the gripper move relative to what I'm seeing?" This is expressed in the local camera frame, which makes it inherently viewpoint-invariant: if the camera sees the object to the right of the gripper, the action is "move right in camera coordinates" regardless of where the camera physically sits.
+
+The second head predicts a **6-DoF hand-eye matrix** — the rigid transformation that relates the camera's coordinate frame to the robot's base frame. This is the geometric grounding step: "where am I looking from, relative to the robot?" By predicting this matrix rather than requiring it as input, CamVLA eliminates the need for calibration.
+
+At inference, a deterministic geometric transformation composes these two predictions: the camera-centric action gets transformed through the hand-eye matrix into a robot base-frame action. This is pure linear algebra — no learning involved in the composition step — which means it's exact and doesn't introduce additional error.
+
+```
+Input: Single RGB image + task instruction
+            |
+            +-------+-------+
+            |               |
+            v               v
+    [Action Head]    [Hand-Eye Head]
+            |               |
+            v               v
+  Camera-centric       6-DoF hand-eye
+  end-effector         matrix (T_cam->base)
+  action (delta)              |
+            |               |
+            +-------+-------+
+                    |
+                    v
+          [Geometric Composition]
+           (deterministic math)
+                    |
+                    v
+        Robot base-frame action
+            |
+            v
+          Execute on robot
+```
+
+Here's a structural metaphor that makes this click: imagine you're giving driving directions to someone over the phone while watching them through a security camera. The old approach requires you to know exactly where the camera is mounted on the building (extrinsics) before you can translate "turn left on screen" into "turn left on the street." CamVLA is like having a smart assistant who looks at the scene — the street signs, the sun's position, the building layout — and infers the camera's location and orientation, then automatically translates your screen-relative directions into street-relative directions. You just say "go left on screen" and the system figures out the rest.
+
+The two heads map perfectly: the Action Head is you giving directions in camera-relative language ("go left on my screen"), and the Hand-Eye Head is the assistant figuring out the camera's position in the real world. The geometric composition is the assistant doing the coordinate math. The key insight: both tasks are learnable from the same visual input, so you never need to explicitly calibrate.
+
+### Key Concepts
+
+- **Camera-Centric Action Representation**: Instead of predicting "move the gripper 5cm forward in the robot's frame," the model predicts "move the gripper 5cm to the right in the camera's frame." Why does this matter? Because the same physical motion looks different from different cameras, but the camera-centric representation stays consistent — "right on screen" always means the same direction relative to what you're seeing. Think of it like giving directions relative to landmarks you can see ("turn left at the gas station") rather than absolute compass directions ("head north-northwest"). The former works even if you don't know where you are.
+
+- **Hand-Eye Matrix (6-DoF)**: This is a 4x4 transformation matrix that encodes the full position and orientation relationship between two coordinate frames — in this case, the camera and the robot base. "Hand-eye" comes from the classical robotics problem of relating a camera ("eye") to a robot end-effector ("hand"). In CamVLA, the model predicts this matrix from visual input alone, effectively answering: "Given what I see and what I know about robot arms, where must this camera be?"
+
+- **Deterministic Geometric Composition**: The final action is computed by matrix multiplication — not another neural network. The camera-centric action gets multiplied by the inverse of the hand-eye matrix to produce the base-frame action. This is crucial because it means the composition step is exact: if both heads predict correctly, the output is guaranteed to be geometrically correct. No compounding learned error.
+
+## Framework Shift
+
+```
+Before (mainstream):                 After (CamVLA):
+
+  RGB image                          RGB image
+      |                                  |
+      v                                  +----------+
+  [Policy Net]                             |          |
+      |                                  v          v
+      v                            [Action Head] [Hand-Eye Head]
+  Base-frame action                        |          |
+  (camera must be fixed                    v          v
+   or extrinsics given)            cam-centric    T_cam->base
+                                       action         |
+                                           |          |
+                                           +----+-----+
+                                                |
+                                                v
+                                          [Geometry]
+                                          (exact math)
+                                                |
+                                                v
+                                        Base-frame action
+                                       (camera can be anywhere)
+```
+
+From "tell the robot where the camera is" to "let the robot figure it out," the core shift is moving camera geometry from an input requirement to a learned intermediate prediction.
+
+## Expert Assessment
+
+**Problem choice**: This is a genuine and practically important gap. Camera repositioning is not an edge case — it's the default in real deployments. Prior work either ignored this, used heavy data augmentation, or required explicit extrinsics. The paper sits at a natural intersection of VLA scaling and robotics deployment, and the problem will only become more pressing as these models get deployed outside labs.
+
+**Method maturity**: The core insight — decompose into camera-centric action + hand-eye matrix, compose geometrically — is clean and elegant. It's closer to "clever reframing" than "brute force scaling." One concern: the hand-eye prediction is a high-dimensional regression problem (6-DoF), and the paper doesn't deeply analyze failure modes when this prediction is noisy. A simpler baseline the authors might have considered: explicit visual odometry or marker-based calibration as a preprocessing step. The paper would be stronger if it showed why the learned approach beats these engineering shortcuts.
+
+**Experimental integrity**: The sim-to-real evaluation is reassuring — testing in both simulation and real robot data is the right call. The baselines include reasonable comparisons (standard VLA, VLA with augmentation, VLA with extrinsics). One flag: the paper evaluates on "unseen viewpoints" but the degree of viewpoint variation matters enormously. Moving a camera 10cm is very different from rotating it 90 degrees. The paper could be more granular here. The numbers are solid for moderate viewpoint changes; extreme cases are less clear.
+
+**Writing quality**: The abstract and introduction are well-crafted — they nail the problem framing. The method section could be tighter; the geometric composition derivation, while correct, buries the intuition under matrix notation. The experiments section would benefit from a dedicated failure analysis — when does CamVLA break, and what does the hand-eye head predict when it fails? This would elevate the paper from "it works" to "we understand when and why it works."
+
+**Verdict**: weak accept — Clean problem framing and elegant decomposition, but the failure mode analysis is thin and extreme-viewpoint robustness needs deeper probing.
+
+## Takeaways
+
+Three things worth stealing:
+
+1. **The decomposition pattern**: When a policy needs to handle variable input conditions, decompose into (a) a condition-invariant task representation and (b) a condition estimation module, then compose them with deterministic operations. This transfers to any domain where you have nuisance variables — lighting changes, sensor noise, domain shifts. The key: the composition should be exact math, not another learned function.
+
+2. **Camera-centric vs. base-centric actions**: If your robot policy struggles with viewpoint generalization, try expressing actions in the sensor's frame rather than the robot's frame. This single reframing can buy you significant robustness without architectural changes.
+
+3. **"Learn the calibration" as a strategy**: Instead of building calibration into the pipeline as a prerequisite, learn to predict the calibration parameters as an intermediate representation. This converts a deployment requirement into a training target — a much more scalable pattern.
+:::
+
+:::zh
+**论文**: [2607.05396](https://arxiv.org/abs/2607.05396)
+**作者**: Wenhao Li, Xueying Jiang, Quanhao Qian, Deli Zhao, Shijian Lu, Gongjie Zhang, Ran Xu
+**分类**: cs.CV, cs.AI, cs.LG, cs.RO
+
+## 缺口
+
+现有的视觉-语言-动作（VLA）模型在学习操作策略方面已经取得了令人瞩目的进展，但它们共享一个隐性弱点：假设相机位置在训练和部署时保持不变。现实中，相机随时可能被重新布置——而一旦动了，策略就会崩。
+
+此前的视角鲁棒操作研究（如ViewFormer、VAT-Mart以及各种数据增强方法）试图通过显式输入相机外参来修补这个问题。
+换句话说："告诉机器人相机在哪，它就能算出怎么动。"但这制造了一个先有鸡还是先有蛋的困境——机器人干活之前你得先精确标定，而现实部署最讨厌的就是这种前置负担。
+
+CamVLA翻转了这个假设：如果策略不需要被告知相机在哪，而是自己从视觉输入中推断出来，然后用这个自发现的几何关系来生成正确动作呢？
+
+```
+问题：相机位置一变，策略就崩
+          |
+          v
+先前方案：显式输入相机外参（脆弱，需要标定）
+          |
+          v
+缺口：没有免标定、免深度、单视角的任意视角VLA
+          |
+          v
+CamVLA：同时预测 (a) 相机坐标系下的动作 (b) 手眼矩阵
+          |
+          v
+通过确定性几何变换组合 -> 机器人基座坐标系下的动作
+          |
+          v
+证据：在未见视角上成功率一致提升（仿真+真实）
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，应对相机视角变化需要显式标定；之后，VLA策略可以从单张RGB图像中推断相机几何关系，依然输出正确的机器人基座坐标系动作。
+
+### 核心机制
+
+CamVLA的架构包含两个预测头，通过几何变换协同工作。第一个头预测**相机坐标系下的末端执行器动作**——本质上是"夹爪相对于我看到的画面应该怎么动"。这在局部相机坐标系中表达，天然具有视角不变性：如果相机看到物体在夹爪右边，动作就是"在相机坐标系中向右移动"，无论相机物理上在哪。
+
+第二个头预测**6自由度手眼矩阵**——将相机坐标系与机器人基座坐标系关联起来的刚体变换。这是几何接地的步骤："我从哪看，相对于机器人在哪？"通过预测这个矩阵而不是将其作为输入，CamVLA彻底消除了标定需求。
+
+推理时，确定性几何变换将这两个预测组合：相机坐标系动作通过手眼矩阵变换为机器人基座坐标系动作。这是纯线性代数——组合步骤不涉及学习——因此是精确的，不会引入额外误差。
+
+```
+输入：单张RGB图像 + 任务指令
+            |
+            +-------+-------+
+            |               |
+            v               v
+     [动作预测头]      [手眼预测头]
+            |               |
+            v               v
+  相机坐标系下的       6自由度手眼
+  末端执行器动作       矩阵 (T_cam->base)
+  (增量)                    |
+            |               |
+            +-------+-------+
+                    |
+                    v
+           [几何组合计算]
+            (确定性数学)
+                    |
+                    v
+          机器人基座坐标系动作
+            |
+            v
+            执行
+```
+
+用一个结构性比喻来理解：想象你通过监控摄像头看着某人在街上走，然后通过对讲机给他指路。旧方法要求你精确知道摄像头装在楼的哪个位置、朝哪个方向，才能把"屏幕上往左转"翻译成"街上往左转"。CamVLA相当于有一个智能助手，他看着画面——路牌、太阳位置、建筑布局——推断出摄像头的位置和朝向，然后自动把你的屏幕相对方向翻译成街道相对方向。你只管说"屏幕上往左"，系统自己搞定剩下的事。
+
+两个头完美映射：动作预测头就是你用屏幕相对语言指路（"我屏幕上往左"），手眼预测头就是助手推断摄像头在真实世界中的位置。几何组合就是助手做坐标变换计算。关键洞察：两个任务都可以从同一视觉输入中学习，所以你永远不需要显式标定。
+
+### 关键概念
+
+- **相机坐标系动作表示**：模型不预测"夹爪在机器人坐标系中向前移动5厘米"，而是预测"夹爪在相机坐标系中向右移动5厘米"。为什么这很重要？因为同一个物理动作从不同相机看是不一样的，但相机坐标系表示保持一致——"屏幕上往右"始终意味着相对于你所见的同一方向。就像用你能看到的地标指路（"在加油站左转"）而非绝对罗盘方向（"朝西北偏北走"）。前者即使你不知道自己在哪也好使。
+
+- **手眼矩阵（6自由度）**：一个4×4变换矩阵，编码两个坐标系之间的完整位置和朝向关系——这里是相机和机器人基座。"手眼"来自经典机器人学问题，关联相机（"眼"）和末端执行器（"手"）。在CamVLA中，模型仅从视觉输入预测这个矩阵，实质上在回答："根据我看到的和我对机械臂的了解，这个相机一定在哪个位置？"
+
+- **确定性几何组合**：最终动作通过矩阵乘法计算——不是另一个神经网络。相机坐标系动作乘以手眼矩阵的逆，得到基座坐标系动作。这至关重要，因为组合步骤是精确的：如果两个头都预测正确，输出保证几何正确。没有学习误差的累积。
+
+## 框架转变
+
+```
+之前（主流方法）：                  之后（CamVLA）：
+
+  RGB图像                         RGB图像
+      |                               |
+      v                           +----------+
+  [策略网络]                       |          |
+      |                           v          v
+      v                     [动作预测头]  [手眼预测头]
+  基座坐标系动作                    |          |
+  （相机必须固定                    v          v
+   或者给定外参）           相机坐标系动作  T_cam->base
+                                  |          |
+                                  +----+-----+
+                                       |
+                                       v
+                                    [几何变换]
+                                    （精确数学）
+                                       |
+                                       v
+                                基座坐标系动作
+                             （相机可以在任意位置）
+```
+
+从"告诉机器人相机在哪"到"让机器人自己弄清楚"，核心转变是将相机几何从输入前提变为可学习的中间预测。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实且具有实际意义的缺口。相机重新布置不是边缘情况——它是现实部署的常态。此前的工作要么忽视这一点，要么依赖重度数据增强，要么要求显式外参。论文处在VLA规模化和机器人部署的自然交叉点，随着这些模型走出实验室，这个问题只会更紧迫。
+
+**方法成熟度**: 核心洞察——分解为相机坐标系动作+手眼矩阵，再几何组合——干净优雅。更接近"巧妙重构"而非"暴力堆算力"。一个隐忧：手眼预测是高维回归问题（6自由度），论文没有深入分析这个预测带噪声时的失败模式。作者可能考虑过的一个更简单基线：用显式视觉里程计或标记标定作为预处理步骤。如果论文能展示为什么学习方法优于这些工程捷径，会更有说服力。
+
+**实验诚意**: 仿真到真实的评估让人放心——在仿真和真实机器人数据上都测试是对的。基线包含合理对比（标准VLA、增强VLA、带外参VLA）。一个警示信号：论文在"未见视角"上评估，但视角变化的程度差异巨大。相机移动10厘米和旋转90度完全是两码事。论文可以在这里更细粒度。对于适度视角变化，数字是扎实的；极端情况不够清晰。
+
+**写作功力**: 摘要和引言写得很好——问题框定到位。方法部分可以更紧凑；几何组合推导虽然正确，但用矩阵符号埋掉了直觉。实验部分需要专门的失败分析——CamVLA什么时候会崩？手眼头失败时预测出什么？这能让论文从"它好使"升档到"我们理解它什么时候、为什么好使"。
+
+**判决**: 弱接收 — 问题框定清晰，分解方式优雅，但失败模式分析薄弱，极端视角鲁棒性需要更深入的探查。
+
+## 要点总结
+
+三个值得偷走的东西：
+
+1. **分解模式**：当策略需要处理可变输入条件时，分解为（a）条件不变的任务表示和（b）条件估计模块，再用确定性操作组合。这个模式可迁移到任何存在干扰变量的领域——光照变化、传感器噪声、域迁移。关键：组合部分应该是精确数学，不是另一个学习函数。
+
+2. **相机坐标系 vs. 基座坐标系动作**：如果你的机器人策略在视角泛化上挣扎，试试在传感器坐标系而非机器人坐标系中表达动作。这一个重构就能带来显著的鲁棒性提升，不需要改架构。
+
+3. **"学会标定"作为策略**：与其把标定作为管线中的前置要求，不如学习预测标定参数作为中间表示。这把部署前提变成了训练目标——一个更可扩展的模式。
+:::
