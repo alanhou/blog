@@ -1,0 +1,253 @@
+---
+title:
+  en: "Your LLM Knows What It Doesn't Know — But Won't Tell You"
+  zh: "大模型知道自己不知道什么——但就是不说"
+description:
+  en: "Polish Bielik models reveal a cheap internal signal that separates familiar entities from fabricated ones at near-perfect accuracy, yet this 'awareness' decouples sharply from factual correctness and the model almost never abstains."
+  zh: "波兰 Bielik 模型的内部激活包含一个几乎完美的信号，能区分模型见过和没见过的实体，但这种'意识'与事实准确性严重脱钩，且模型几乎从不拒绝回答。"
+date: 2026-07-09
+tags: ["arxiv", "ai", "cs.cl", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.07670](https://arxiv.org/abs/2607.07670)
+**Authors**: Grzegorz Brzezinka
+**Categories**: cs.CL, cs.LG
+
+## The Gap
+
+People have been trying to detect LLM hallucinations for years. The main approaches fall into two camps: output-level methods (confidence scores, semantic entropy, self-consistency) that require multiple forward passes and cost 5x+ inference time, and representation-level probes (linear classifiers, probing tasks) that look at internal activations. Both camps have a blind spot.
+
+Output-level methods conflate two distinct questions: "Have I seen this entity before?" and "Do I actually know the correct answer?" They treat all uncertainty the same way. Representation-level probes, meanwhile, have mostly been studied on English, with hand-picked entity lists, and without cleanly separating familiarity from correctness across model scales.
+
+The specific gap: nobody has asked whether a model's internal activations encode entity familiarity *before a single token is generated*, whether that signal is already strong in small models, and whether it scales differently from factual reliability. If these are distinct phenomena on different curves, that changes how we think about hallucination mitigation — you can't just scale your way to trustworthiness.
+
+```
+Problem: LLMs hallucinate about entities they haven't seen
+         |
+         v
+Assumption: internal activations should reflect familiarity
+            before generation begins
+         |
+         v
+Method: probe post-SwiGLU MLP activations with
+        unsupervised dispersion measures (IPR, spectral entropy)
+        + supervised linear probe, across 4 model scales
+         |
+         v
+Evidence: AUROC 0.95-1.00 separating known vs fabricated
+          BUT familiarity signal at ceiling at 1.5B
+          while factual accuracy scales 0/42 -> 19/42
+          AND models almost never abstain (2 refusals / 2520 answers)
+         |
+         v
+Conclusion: entity familiarity and factual reliability
+            are distinct phenomena on different scaling curves;
+            the model "knows what it doesn't know" but won't say so
+```
+
+## The Increment
+
+**One sentence**: Before this paper, we assumed better models meant fewer hallucinations; after this paper, we know the internal "I've seen this before" signal is already perfect at the smallest scale — the bottleneck is behavioral, not representational.
+
+### Core Mechanism
+
+The method is refreshingly simple. Take any prompt about an entity. Run it through the model for a single forward pass, but *stop before generating any output*. Extract the activations from the MLP layers — specifically the post-SwiGLU activations, which are the hidden states right after the gated activation function in each transformer block.
+
+From these activations, compute two unsupervised dispersion metrics. **Inverse Participation Ratio (IPR)** measures how "spread out" the activation vector is — a high IPR means the activations are diffuse (many dimensions contributing), while a low IPR means they're concentrated on a few dimensions. **Spectral Entropy** does something similar but from an information-theoretic angle: it measures the entropy of the eigenvalue spectrum of the activation matrix. Both capture the same underlying intuition: when the model encounters a familiar entity, its activations organize into a distinctive, structured pattern; when it sees a fabricated name, the activations are more uniform or scattered.
+
+For comparison, they also train a simple supervised linear probe on top of the same activations. The unsupervised measures hit AUROC 0.95-1.00; the supervised probe hits 0.99-1.00. The key validation: permutation tests confirm this isn't luck (floors at 0.70-0.74), and the signal holds across held-out layers (0.93-0.99), transfers across entity types (athletes, cities, writers, musicians), and persists even when comparing known vs. obscure-but-real entities (0.96-1.00).
+
+```
+Single forward pass (no generation)
+         |
+         v
+Extract post-SwiGLU MLP activations per layer
+         |
+    +----+----+
+    |         |
+    v         v
+ [Unsupervised]    [Supervised]
+ IPR / Spec. Ent.  Linear Probe
+    |                   |
+    v                   v
+ Dispersion score   Learned classifier
+ (no labels needed)  (labels needed)
+    |                   |
+    v                   v
+ AUROC 0.95-1.00    AUROC 0.99-1.00
+ separating           separating
+ known vs fabricated  known vs fabricated
+```
+
+Think of it like this. Imagine walking into a library and asking the librarian about a book. If the librarian *immediately* reaches for a specific shelf with confident, precise movements, she's probably read it. If she freezes, looks around vaguely, or starts scanning shelves randomly, she probably hasn't. The dispersion measures are watching the "librarian's movements" — the shape of the model's internal activity pattern — without ever waiting to hear what she says. The brilliant part: the librarian's *body language* (activations) is already perfectly informative at age 5 (1.5B parameters), but her ability to actually *tell you accurate facts about the book* (factual reliability) improves dramatically as she grows up to age 20 (11B parameters). And here's the kicker: even when the librarian clearly doesn't know the book, she *never says* "I haven't read that one" — she just confidently makes something up.
+
+### Key Concepts
+
+- **Inverse Participation Ratio (IPR)**: Imagine you have 4096 buckets and you're throwing sand into them. If all the sand lands in 3 buckets, the IPR is low — the activity is concentrated. If the sand spreads evenly across all 4096 buckets, the IPR is high — the activity is diffuse. When the model sees "Adam Małysz" (famous Polish ski jumper it's seen in training), its activation sand concentrates into specific buckets in a recognizable pattern. When it sees "Zbigniew Kowalczyk-Paprotnik" (a fabricated name), the sand scatters in a generic, unstructured way. The IPR number captures this difference in a single scalar.
+
+- **Activation Dispersion vs. Behavioral Reliability**: These are the two faces of the paper's core insight. "Dispersion" is what happens inside the model's neurons — the geometric shape of activation patterns. "Behavioral reliability" is what comes out of the model's mouth — correct, verifiable answers. The paper shows these two things have fundamentally different scaling curves. It's like discovering that a student's ability to **recognize* exam questions (familiarity) maxes out in elementary school, while their ability to *answer them correctly* (reliability) keeps improving through college. The recognition signal is already perfect; the knowledge is what scales.
+
+- **Abstention Gap**: The model has an internal signal that says "I don't know this" (unfamiliar entity = scattered activations), yet it almost never uses that signal to say "I don't know" in its output. Out of 2,520 answers audited, only 2 refusals and 1 hedge were found. This is the paper's most provocative finding: the bottleneck in hallucination isn't the model's awareness of its own ignorance — it's the model's willingness (or architectural inability) to act on that awareness.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+  Model outputs answer                 Look at activations BEFORE
+        |                              any answer is generated
+        v                                    |
+  Check confidence /                       v
+  run N samples for                   Compute single-pass
+  self-consistency                    dispersion metrics
+        |                                    |
+        v                                    v
+  Expensive (5x+ inference)           Cheap (1 forward pass, no generation)
+  Conflates familiarity               Separates familiarity from
+  and correctness                     correctness as distinct signals
+  Treats all uncertainty equally      Shows they scale on different curves
+```
+
+From "detect hallucinations by examining what the model says" to "detect what the model knows by examining how its neurons move before it speaks," the core shift is relocating the diagnostic moment from output to representation.
+
+## Expert Assessment
+
+**Problem choice**: This is a genuine and underexplored gap. The distinction between entity familiarity and factual reliability has been implicit in prior work on calibration and hallucination, but nobody has made it this clean and this systematic. The focus on Polish-language models (Bielik) is both a strength — it tests the signal in a lower-resource setting where training data is more constrained — and a limitation, since we don't know if the findings transfer to English or Chinese models. The entity taxonomy (known/obscure-but-real/fabricated) is well-designed and the 42+42+42 split across 4 domains gives reasonable coverage.
+
+**Method maturity**: The unsupervised dispersion measures are clever and elegant — IPR and spectral entropy are well-known in physics and information theory, but applying them to post-SwiGLU activations as a familiarity proxy is novel. The supervised linear probe serves as a useful ceiling comparison but doesn't add much conceptual novelty. The matched-template counterfactual (varying templates to rule out template-driven artifacts) shows good experimental hygiene. One concern: the paper doesn't compare against other representation-level probes like CKA or representation similarity analysis, which might reveal more about **what* the dispersion signal actually encodes.
+
+**Experimental integrity**: The numbers are strong and the validation is thorough — permutation tests, held-out layers, cross-entity-type transfer, template ablations. The 5x-sample semantic entropy baseline at 0.71-0.83 vs. the paper's 0.95-1.00 is a convincing cost-accuracy argument. However, the "within known entities" result (separating correct from hallucinated answers) is much weaker — probe AUROC 0.93 is decent but the unsupervised measures don't beat a first-token-entropy baseline. The paper is honest about this, which is good. The refusal audit (2/2520) is a striking data point but it's not clear whether this is Bielik-specific behavior or a general LLM trait.
+
+**Writing quality**: The paper is well-structured and the narrative arc is clear. The related work section could be tighter — it's somewhat scattered between hallucination detection, calibration, probing, and scaling laws without a clean synthesis. The entity lists (42 per domain) are somewhat arbitrary; a brief justification for why 42 and not 100 would help. Section 5 (the scaling analysis) is the most novel and deserves more depth — specifically, the claim that "familiarity is at ceiling at 1.5B" should be stress-tested with even smaller models (300M, 500M) to find the actual threshold.
+
+**Verdict**: weak accept — Clean, well-executed study that makes a genuine conceptual contribution (familiarity vs. reliability as distinct scaling phenomena), but limited to one model family in one language, and the "so what for practitioners" story needs sharper development.
+
+## Takeaways
+
+1. **Stop averaging your hallucination signal.** If you're running semantic entropy or self-consistency to detect hallucinations, you're paying 5x+ inference cost and still conflating two different failure modes. A single forward pass with a simple IPR/spectral entropy check on MLP activations could flag unfamiliar entities at near-zero marginal cost — then you can spend your compute budget on just the risky queries.
+
+2. **Entity familiarity is a free lunch; correctness is not.** If you're building a system that needs to know whether an LLM "knows" an entity (for routing, retrieval augmentation, or abstention), you don't need a large model. The 1.5B model already has a perfect familiarity signal. Save your GPU budget for the hard part: getting the answer right.
+
+3. **The abstention gap is the real research target.** The model has the information to refuse, but doesn't. This suggests that RLHF/fine-tuning for calibrated abstention is where the real leverage is — not in better representation probes or bigger models. If you're working on hallucination mitigation, focus on the behavioral bottleneck, not the representational one.
+
+4. **Post-SwiGLU activations are an underexplored diagnostic surface.** Most probing work focuses on residual stream or attention outputs. This paper shows the MLP activation space (specifically after the gating function) carries rich semantic signals accessible with trivial methods. Worth exploring in your own models.
+:::
+
+:::zh
+**论文**: [2607.07670](https://arxiv.org/abs/2607.07670)
+**作者**: Grzegorz Brzezinka
+**分类**: cs.CL, cs.LG
+
+## 缺口
+
+大模型幻觉问题研究了好几年，主流方法分两路：一路看输出端——置信度、语义熵、自一致性采样，要跑好几次推理，成本是正常推理的5倍以上；另一路看内部表征——线性探针、表征分析，但大多在英语模型上做，而且没有把"模型有没有见过这个实体"和"模型能不能答对这个问题"干净地分开。
+
+具体的缺口在于：没人系统地问过，模型的内部激活在*还没生成任何token之前*，是否已经编码了实体熟悉度信号；这个信号在小模型里是不是已经很强了；以及这个信号和事实准确性的缩放曲线是否不同。如果它们确实是两条不同的曲线，那对幻觉缓解策略的含义完全不同——光靠堆参数是堆不出可信度的。
+
+```
+问题：大模型对没见过的实体最容易产生幻觉
+         |
+         v
+假设：内部激活在生成前就应该反映实体熟悉度
+         |
+         v
+方法：用无监督分散度指标（IPR、谱熵）探查
+      SwiGLU 后的 MLP 激活，跨4个模型尺度
+         |
+         v
+证据：区分已知/虚构实体 AUROC 0.95-1.00
+      但熟悉度信号在 1.5B 就已经饱和
+      而事实准确率从 0/42 缩放到 19/42
+      且模型几乎从不拒绝回答（2520条回答中仅2次拒绝）
+         |
+         v
+结论：实体熟悉度和事实可靠性是两个不同的现象，
+      走在不同的缩放曲线上
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，我们以为更好的模型意味着更少的幻觉；这篇论文之后，我们知道了内部的"我见过这个"信号在最小的模型里就已经完美了——瓶颈在行为层面，不在表征层面。
+
+### 核心机制
+
+方法出奇地简单。拿任何一个关于实体的提示，跑一次前向传播，但在生成任何输出之前就停下来。提取各层 MLP 的激活——具体是 SwiGLU 门控激活函数之后的隐藏状态。
+
+从这些激活中计算两个无监督分散度指标。**逆参与比（IPR）**衡量激活向量有多"分散"——高 IPR 意味着很多维度都在贡献信号（分散），低 IPR 意味着集中在少数维度（集中）。**谱熵**做类似的事，但从信息论角度出发：衡量激活矩阵特征值谱的熵。两者捕捉同一个直觉：当模型遇到熟悉的实体时，激活会形成有结构的、可辨认的模式；当它看到捏造的名字时，激活是均匀的、散乱的。
+
+作为对比，他们还在同样的激活上训练了一个简单的监督线性探针。无监督指标达到 AUROC 0.95-1.00；监督探针达到 0.99-1.00。关键验证：置换检验确认这不是运气（底线 0.70-0.74），信号在留出层上保持稳健（0.93-0.99），跨实体类型迁移良好（运动员、城市、作家、音乐家），甚至区分已知实体和"真实但冷门"实体也有效（0.96-1.00）。
+
+```
+单次前向传播（不生成任何 token）
+         |
+         v
+提取每层 SwiGLU 后的 MLP 激活
+         |
+    +----+----+
+    |         |
+    v         v
+ [无监督]       [监督]
+ IPR / 谱熵     线性探针
+    |              |
+    v              v
+ 分散度分数       学习的分类器
+ （无需标签）     （需要标签）
+    |              |
+    v              v
+ AUROC 0.95-1.00  AUROC 0.99-1.00
+```
+
+打个比方。你走进图书馆问管理员一本书。如果管理员*立刻*自信地走向某个特定书架，动作精准，那她很可能读过。如果她愣住了，眼神四处游移，开始随机扫描书架，那她大概率没读过。分散度指标看的就是管理员的"肢体语言"——内部活动模式的形状——完全不用等她开口说什么。精妙之处在于：管理员五岁时（1.5B参数）的肢体语言就已经完美反映了她是否读过这本书，但她能准确*告诉你书的内容*的能力（事实可靠性）要到二十岁（11B参数）才有显著提升。更关键的是：即使管理员明显不知道这本书，她*从来不会说*"我没读过"——她会自信地编一个。
+
+### 关键概念
+
+- **逆参与比（IPR）**: 想象你有4096个桶，往里面扔沙子。如果所有沙子都落在3个桶里，IPR很低——活动集中。如果沙子均匀散落在所有4096个桶里，IPR很高——活动分散。当模型看到"Adam Małysz"（波兰著名跳台滑雪运动员，训练数据里见过），它的激活沙子会集中到特定桶里，形成可辨认的模式。当它看到一个捏造的名字，沙子会以一种通用的、无结构的方式散开。IPR这个数字用一个标量捕捉了这种差异。
+
+- **激活分散度 vs. 行为可靠性**: 这是论文核心洞见的两面。"分散度"发生在模型神经元内部——激活模式的几何形状。"可靠性"是从模型嘴里出来的——可验证的正确答案。论文证明这两个东西有根本不同的缩放曲线。就像发现一个学生**识别*考题的能力（熟悉度）在小学就达到顶峰，而*答对*考题的能力（可靠性）一路提升到大学毕业。识别信号已经完美了；真正缩放的是知识。
+
+- **拒绝缺口**: 模型内部有一个信号在说"我不知道这个"（不熟悉的实体=散乱的激活），但它几乎从不利用这个信号在输出中说"我不知道"。审计了2520条回答，只发现2次拒绝和1次含糊。这是论文最具挑衅性的发现：幻觉的瓶颈不在于模型对自身无知的觉察——而在于模型将这种觉察转化为行为的能力（或意愿）。
+
+## 框架转变
+
+```
+之前（主流方法）：                    之后（本文方法）：
+
+  模型输出回答                              在生成任何回答之前
+    |                                      就看内部激活
+    v                                           |
+  检查置信度 /                                  v
+  跑 N 个样本做                            计算单次前向传播的
+  自一致性                                  分散度指标
+    |                                           |
+    v                                           v
+  昂贵（5x+ 推理成本）                   便宜（1次前向传播，不生成）
+  混淆熟悉度                              将熟悉度和可靠性
+  和正确性                                作为独立信号分离
+  对所有不确定性一视同仁                  它们在不同的缩放曲线上
+```
+
+从"通过检查模型说了什么来检测幻觉"到"通过检查模型的神经元在说话之前的运动方式来检测它知道什么"——核心转变是将诊断时刻从输出端前移到表征端。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实且未被充分探索的缺口。实体熟悉度和事实可靠性之间的区别在之前的校准和幻觉研究中是隐含的，但没有人把它做得这么干净、这么系统。关注波兰语模型（Bielik）既是优势——在训练数据更受限的低资源场景下测试信号——也是局限，因为我们不知道发现是否能迁移到英语或中文模型。实体分类体系（已知/真实但冷门/捏造）设计得好，4个领域各42+42+42的分法覆盖合理。
+
+**方法成熟度**: 无监督分散度指标用得巧妙——IPR和谱熵在物理和信息论里是经典工具，但把它们应用到SwiGLU后的激活作为熟悉度代理是新颖的。监督线性探针作为有用的上限对比，但概念上贡献不大。匹配模板反事实实验（变换模板排除模板驱动的伪影）显示了良好的实验习惯。一个不足：论文没有和其他表征级探针（如CKA或表征相似性分析）做对比，这可能揭示分散度信号到底编码了什么。
+
+**实验诚意**: 数字强劲，验证充分——置换检验、留出层、跨实体类型迁移、模板消融。5倍样本的语义熵基线（0.71-0.83）对比本文方法（0.95-1.00）的成本-精度论证有说服力。然而，"已知实体内部"的结果（区分正确和幻觉回答）弱得多——探针 AUROC 0.93 还行，但无监督指标没有超过首个 token 熵的基线。论文对此很诚实，这是好事。拒绝审计（2/2520）是很有冲击力的数据点，但不清楚这是Bielik特有的行为还是大模型的共性。
+
+**写作功力**: 论文结构清晰，叙事弧线明确。相关工作部分可以更紧凑——在幻觉检测、校准、探查和缩放定律之间有些分散，没有形成干净的综合。实体列表（每领域42个）有些随意；简要说明为什么是42而不是100会有帮助。第5节（缩放分析）是最新颖的部分，值得更多篇幅——具体来说，"熟悉度在1.5B就饱和"这个结论应该用更小的模型（300M、500M）来找到真正的阈值。
+
+**判决**: 弱接收——干净、执行良好的研究，提出了真正的概念贡献（熟悉度 vs. 可靠性作为不同的缩放现象），但仅限于一个模型家族、一种语言，对"实践者能拿来干什么"的故事需要更锐利的表述。
+
+## 要点总结
+
+1. **别再平均化你的幻觉信号了。** 如果你还在用语义熵或自一致性来检测幻觉，你花了5倍以上的推理成本，却还在混淆两种不同的失败模式。用单次前向传播加上简单的 IPR/谱熵检查，就能以接近零的边际成本标记不熟悉的实体——然后把计算预算花在真正有风险的查询上。
+
+2. **实体熟悉度是免费午餐，正确性不是。** 如果你在搭建一个需要判断大模型是否"认识"某个实体的系统（用于路由、检索增强或拒绝回答），你不需要大模型。1.5B 的模型就已经有完美的熟悉度信号。把 GPU 预算省给真正困难的部分：答对。
+
+3. **拒绝缺口才是真正的研究靶点。** 模型有信息可以拒绝，但就是不拒绝。这说明用 RLHF/微调来训练校准过的拒绝行为才是真正的杠杆——不是更好的表征探针，也不是更大的模型。如果你在做幻觉缓解，聚焦在行为瓶颈上，而不是表征瓶颈。
+
+4. **SwiGLU 后的激活是一个被低估的诊断界面。** 大多数探查工作聚焦在残差流或注意力输出上。这篇论文展示了 MLP 激活空间（具体是门控函数之后）携带丰富的语义信号，用最简单的方法就能提取。值得在你自己的模型上探索。
+:::
