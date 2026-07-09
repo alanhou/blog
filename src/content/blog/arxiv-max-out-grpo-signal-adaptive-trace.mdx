@@ -1,0 +1,358 @@
+---
+title:
+  en: "AdaPrefix-GRPO: Turning the Hardest Problems into the Best Teachers"
+  zh: "AdaPrefix-GRPO：把最难的题变成最好的老师"
+description:
+  en: "An adaptive prefix controller that keeps GRPO training in the gradient-rich sweet spot, doubling accuracy on hard math problems for small models."
+  zh: "一种自适应前缀控制器，将 GRPO 训练保持在梯度信号最强的甜区，使小模型在困难数学题上的准确率翻倍。"
+date: 2026-07-09
+tags: ["arxiv", "ai", "cs.lg", "cs.cl"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.07674](https://arxiv.org/abs/2607.07674)
+**Authors**: Vladislav Beliaev
+**Categories**: cs.LG, cs.CL
+
+## The Gap
+
+GRPO (Group Relative Policy Optimization) has become the go-to RL method for training reasoning models: you sample a group of rollouts per problem, compute advantages relative to the group mean, and update the policy. It works beautifully — until it doesn't. The failure mode is subtle but devastating: when a problem is hard enough that *every* rollout in the group fails, all rewards are zero, all advantages vanish, and the problem contributes **exactly zero gradient** to the update. The hardest problems — the frontier examples you most want the model to learn from — become invisible.
+
+Prior work noticed this. The standard trick is to prepend a partial "prefix" of the correct solution (e.g., the first few reasoning steps from a reference answer) to give the model a running start, boosting success rates and recovering gradient signal. But existing methods pick a fixed prefix length once — either by hand or with a static schedule — and stick with it throughout training. The problem: difficulty isn't static. As the model improves, what was impossible yesterday becomes possible today. A fixed prefix either overscaffolds (the problem is too easy, gradient signal weakens again) or underscaffolds (still no successes, still zero gradient).
+
+This paper asks: what if the prefix length were a **closed-loop controller** that continuously adapts to keep each problem in the gradient-sweet-spot?
+
+```
+Hard problem sampled
+        |
+        v
+GRPO group rollout (N attempts)
+        |
+        v
+All fail? --> yes --> Zero advantage --> No gradient (WASTED)
+        |
+       no
+        |
+        v
+Some succeed --> Non-zero advantages --> Gradient update (LEARN)
+        |
+        v
+Gap: hardest problems never get gradient signal
+        |
+        v
+Fix: prepend partial solution prefix
+        |
+        v
+Problem: fixed prefix length ignores training dynamics
+        |
+        v
+AdaPrefix-GRPO: adapt prefix length per-problem per-step
+        to hold success rate ~50% (max gradient signal)
+        |
+        v
+Evidence: 2.1x accuracy on 0.6B model, 1.6x on 1.7B
+        |
+        v
+Conclusion: adaptive difficulty control > static scaffolding
+```
+
+## The Increment
+
+**One sentence**: Before this paper, prefix-based scaffolding for GRPO was a fixed dial you set once; after this paper, it's a thermostat that self-regulates throughout training, keeping every problem in the zone where gradient signal is strongest.
+
+### Core Mechanism
+
+AdaPrefix-GRPO has three moving parts that work together:
+
+**1. Prefix Injection.** During data preparation, each problem gets paired with a reference solution. A prefix of that solution (the first **k* tokens or reasoning steps) is prepended to the model's input. The model only needs to complete the remaining reasoning. This is the scaffolding.
+
+**2. Success Rate Monitoring.** During training, the system tracks what fraction of rollouts succeed for each problem (or bucket of problems). This is the sensor reading.
+
+**3. Adaptive Controller.** A feedback loop adjusts prefix length: if success rate drops below the target (~50%), increase the prefix (give more help). If it rises above, decrease the prefix (give less help). Over the course of training, the prefix is gradually withdrawn to zero — the model eventually solves everything unassisted.
+
+Crucially, the prefix tokens are **masked from the loss**. The model doesn't learn to **produce* the prefix; it only learns from the completion. This means the prefix is pure scaffolding that disappears at deployment time with zero cost.
+
+```
+[Training Step]
+     |
+     v
++------------------+
+| Problem + Ref    |  --> Select prefix length k
+| Solution         |      (from controller)
++------------------+
+     |
+     v
++------------------+
+| Concatenate:     |
+| [Prefix_k | ???] |  --> Model generates rollout from suffix onward
++------------------+
+     |
+     v
++------------------+
+| Score rollouts   |  --> Compute group-relative advantages
+| (GRPO standard)  |
++------------------+
+     |
+     v
++------------------+
+| Loss mask:       |  --> Only backprop through model-generated
+| prefix = 0       |      tokens, not prefix tokens
+| suffix = 1       |
++------------------+
+     |
+     v
++------------------+
+| Update success   |  --> Adjust k for next time this
+| rate tracker     |      problem appears
++------------------+
+     |
+     v
+[Next iteration]
+```
+
+### Structural Metaphor: A Piano Teacher
+
+Think of GRPO training as teaching someone to play piano pieces by ear. You give them a hard piece, they try repeatedly, and you grade their attempts relative to each other. The problem: if the piece is *way* too hard, every attempt is a train wreck. You learn nothing from grading train wrecks against other train wrecks.
+
+The old fix: play the first phrase of the piece for them, then let them finish. They pick up from there. But you always play the *same* first phrase, regardless of progress.
+
+AdaPrefix-GRPO is a **piano teacher who listens after every session**. Early on, the student can barely get past the first cadenza — so the teacher plays a long opening, dropping the student in at the easy part. As the student improves, the teacher plays less and less. Eventually the teacher plays nothing: the student performs the whole piece solo. And critically: the teacher's performance doesn't count toward the student's grade — it's just scaffolding that vanishes at the recital.
+
+The controller is the teacher's ear. The 50% target is the Goldilocks zone — not so easy that the student zones out (weak gradient), not so hard that they freeze (zero gradient). The prefix withdrawal is the gradual removal of training wheels.
+
+### Key Concepts
+
+- **Group-Relative Advantage**: Imagine you ask 8 students to solve the same problem. You rank their answers. The best gets a positive score, the worst gets negative, and the average gets zero. This is GRPO's advantage — it's **relative* to the group, not absolute. The catch: if every student scores zero (everyone failed), every advantage is zero. No ranking, no signal, no learning. The problem is that GRPO's signal is proportional to the *variance* in the group's outcomes. Zero variance = zero signal.
+
+- **50% Success Rate Sweet Spot**: Why 50% and not 90% or 10%? Because gradient signal in GRPO is maximized when the group has the most variance — half succeed, half fail. If 90% succeed, most advantages are near-zero (everyone's roughly the same). If 10% succeed, same problem in reverse. At 50%, the split is maximally informative. It's the coin-flip of learning: the problem is right at the model's capability frontier.
+
+- **Loss Masking on Prefix Tokens**: The prefix is training wheels, not the bicycle. By zeroing out the loss on prefix tokens, the model never learns to **generate* the hint — it only learns the hard part that comes after. At deployment, you simply stop prepending the prefix. No architectural change, no distillation, no fine-tuning. The scaffolding was always invisible to the final model's own generation process.
+
+## Framework Shift
+
+```
+Before (mainstream approach):
+
+  Problem --> [Fixed prefix length k] --> GRPO --> Update
+                   |
+                   Set once, stays constant
+                   Same k for all problems
+                   Same k for all training steps
+
+
+After (this paper):
+
+  Problem --> [Adaptive k(t, problem)] --> GRPO --> Update
+                   |          ^
+                   v          |
+              Success rate    Feedback: adjust k
+              monitoring      to target ~50%
+                   |
+                   k shrinks over time --> k = 0 at end
+```
+
+From static difficulty engineering to closed-loop difficulty control, the core shift is treating prefix length as a *control variable* rather than a *hyperparameter*.
+
+## Expert Assessment
+
+**Problem choice**: This is a real and well-identified gap. The "zero-gradient on hard problems" failure mode of GRPO is well-known in the community but under-addressed in the literature. Most practitioners just ignore hard problems or hope the model eventually gets there. Framing it as a control problem is the right abstraction. The paper sits at a natural intersection of RL curriculum learning and reasoning-model training — an area that's heating up fast.
+
+**Method maturity**: This is a clever insight executed simply. The method reduces to data preparation + a loss mask — you barely touch the trainer. That's a strength: it's easy to adopt. However, the 50% target is treated as a magic number. Why not 40% or 60%? The paper doesn't ablate this, which is a missed opportunity. There's also a question of whether simpler heuristics (e.g., a linearly decaying prefix schedule per problem difficulty bucket) would get 80% of the gains with 20% of the implementation complexity. The controller itself isn't formally analyzed — no convergence guarantees, no stability analysis. It works empirically, but the **why* is hand-waved.
+
+**Experimental integrity**: The baselines are reasonable — standard GRPO and GRPO with fixed prefixes. The gains are substantial: 2.1x on the 0.6B model is striking. The "smaller the model, the larger the gain" finding makes intuitive sense (smaller models struggle more on hard problems, so adaptive scaffolding helps more). A few concerns: the paper doesn't compare against other curriculum learning methods (e.g., prioritized replay, self-paced learning) which have tackled similar ideas in different contexts. The AIME results (1.7x) are on a very small benchmark — I'd want to see generalization to other reasoning domains. Also, the paper claims "roughly halving trace length" but doesn't deeply analyze whether this is a side effect of the prefix masking or a genuine efficiency gain in reasoning.
+
+**Writing quality**: The paper is concise and readable — respect for that. The core idea is explained in the abstract itself, which is rare. However, the experimental section could be tighter. The ablation studies are thin: I want to see (a) sensitivity to the 50% target, (b) what happens if you only adapt per-bucket rather than per-problem, and (c) comparison to a simple prefix decay schedule. The related work section is brief to a fault — curriculum learning in RL has decades of literature that deserves engagement here.
+
+**Verdict**: weak accept — The core idea is genuinely useful and easy to implement, but the evaluation doesn't fully justify the claims. The lack of ablations on the target success rate and comparison to simpler baselines keeps this from a strong accept.
+
+## Takeaways
+
+**For GRPO practitioners**: If you're training reasoning models with GRPO and hitting the zero-gradient wall on hard problems, this is a plug-and-play fix. The implementation is literally: (1) prepare reference solutions, (2) prepend variable-length prefixes during data loading, (3) mask prefix tokens in the loss. You can steal this in an afternoon.
+
+**The 50% heuristic as a design principle**: The idea of "keep each training example at the capability frontier" is transferable far beyond GRPO. Any RL method with group-relative or rank-based advantages has the same zero-variance failure mode. The adaptive scaffolding pattern — provide help, monitor success rate, withdraw help — is a general curriculum learning template.
+
+**Small models benefit most**: If you're deploying smaller models (0.5B–2B) for cost reasons, this method disproportionately helps. The larger the gap between problem difficulty and model capability, the more value adaptive scaffolding provides. This is a practical lever for getting more reasoning per parameter.
+
+**Loss masking as invisible scaffolding**: The technique of masking auxiliary input tokens from the loss so they don't affect the model's generation behavior is simple but underused. It's a clean way to provide hints during training without any deployment-time cost. Steal this pattern for any "training-only assist" scenario.
+:::
+
+:::zh
+**论文**: [2607.07674](https://arxiv.org/abs/2607.07674)
+**作者**: Vladislav Beliaev
+**分类**: cs.LG, cs.CL
+
+## 缺口
+
+GRPO（Group Relative Policy Optimization）已经成为训练推理模型的主流强化学习方法：对每个问题采样一组尝试，计算相对于组内均值的优势值，然后更新策略。  
+它在大多数情况下工作得很好——直到遇到最难的题。  
+失败模式很隐蔽但很致命：当一个问题难到组内*所有*尝试都失败时，所有奖励都是零，所有优势都归零，这个问题对梯度更新的贡献**恰好为零**。  
+最难的问题——我们最想让模型学到的前沿样本——变成了隐形的。
+
+此前的方案是给模型一个"起跑优势"：在输入前拼接参考解的前几步推理（即"前缀"），提高成功率，恢复梯度信号。  
+但现有方法只设定一个固定的前缀长度，训练全程不变。  
+问题是：难度不是静态的。模型在进步，昨天不可能的题今天可能就变得可解了。  
+固定的前缀要么给多了（问题变简单，梯度信号变弱），要么给少了（仍然全失败，仍然零梯度）。
+
+本文的核心问题：如果把前缀长度变成一个**闭环控制器**，持续调整，让每个问题始终处于梯度信号最强的区间呢？
+
+```
+问题被采样
+    |
+    v
+GRPO 组内尝试（N 次）
+    |
+    v
+全部失败？ --是--> 优势全零 --> 零梯度（浪费）
+    |
+   否
+    |
+    v
+部分成功 --> 非零优势 --> 梯度更新（学到东西）
+    |
+    v
+缺口：最难的题永远得不到梯度信号
+    |
+    v
+修复：拼接参考解的部分前缀
+    |
+    v
+问题：固定前缀长度忽视训练动态
+    |
+    v
+AdaPrefix-GRPO：按问题、按训练步骤自适应调整前缀长度
+    保持成功率在约50%（梯度信号最大区间）
+    |
+    v
+证据：0.6B 模型准确率提升 2.1 倍，1.7B 提升 1.6 倍
+    |
+    v
+结论：自适应难度控制 > 静态辅助脚手架
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，前缀辅助是一根固定拨好的旋钮；在这篇论文之后，它变成了一个自我调节的恒温器，让每个难题在训练全程都处于梯度信号最丰富的区间。
+
+### 核心机制
+
+AdaPrefix-GRPO 由三个协同工作的部件组成：
+
+**1. 前缀注入。** 数据准备阶段，每个问题配对一个参考解。参考解的前 **k* 个 token（或前几步推理）被拼接到模型输入的前面。模型只需完成剩余的推理部分。这就是脚手架。
+
+**2. 成功率监测。** 训练过程中，系统追踪每个问题（或每组问题）的尝试成功率。这是传感器读数。
+
+**3. 自适应控制器。** 反馈回路根据成功率调整前缀长度：成功率低于目标（约50%），就增加前缀（给更多帮助）；高于目标，就缩短前缀（减少帮助）。  
+训练过程中，前缀逐渐缩短到零——最终模型完全独立解题。
+
+关键细节：前缀 token 被**从损失中屏蔽**。模型不会学习"生成"前缀，只学习从前缀之后的续写部分。  
+这意味着前缀是纯粹的训练脚手架，部署时消失，零成本。
+
+```
+[训练步骤]
+     |
+     v
++------------------+
+| 问题 + 参考解    |  --> 选择前缀长度 k
+|                  |      （来自控制器）
++------------------+
+     |
+     v
++------------------+
+| 拼接：            |
+| [前缀_k | ???]   |  --> 模型从续写部分开始生成
++------------------+
+     |
+     v
++------------------+
+| 评分各次尝试      |  --> 计算组内相对优势
+| （标准 GRPO）     |
++------------------+
+     |
+     v
++------------------+
+| 损失屏蔽：        |  --> 只对模型生成的 token
+| 前缀 = 0         |      反向传播
+| 续写 = 1         |
++------------------+
+     |
+     v
++------------------+
+| 更新成功率        |  --> 下次该问题出现时
+| 追踪器            |      调整 k
++------------------+
+     |
+     v
+[下一轮迭代]
+```
+
+### 核喻：一位钢琴老师
+
+把 GRPO 训练想象成一个钢琴老师教学生弹高难度曲目。老师让学生反复弹，然后对每次弹奏打分，分数是相对的——弹得最好的加分，最差的扣分。问题是：如果曲子太难，每次弹都一塌糊涂，那所有尝试的相对排名毫无意义——全是零分，学生什么也没学到。
+
+以前的解决办法：老师先把曲子的前几句弹给学生听，然后让学生接着弹。但不管学生进步多少，老师每次都弹*一样长*的开头。
+
+AdaPrefix-GRPO 是一位**会倾听的钢琴老师**。  
+刚开始，学生连第一个华彩段都弹不过去——老师就弹一大段，把学生接到容易的部分。  
+随着学生进步，老师弹得越来越少。  
+最终老师什么都不弹：学生完整独奏。  
+关键：老师的弹奏不算入学生的成绩——它只是训练时的脚手架，到正式演出时完全消失。
+
+控制器就是老师的耳朵。  
+50% 目标率就是"金发女孩区间"——不太简单（学生走神，梯度弱），不太难（学生卡壳，梯度零）。  
+前缀撤回就是逐步去掉训练轮。
+
+### 关键概念
+
+- **组内相对优势**: 想象你让 8 个学生解同一道题，然后对他们的答案排名。最好的得正分，最差的得负分，平均的得零分。这就是 GRPO 的优势——它是**相对于组内*的，不是绝对的。致命问题：如果所有学生都得零分（全错了），所有优势都是零。没有排名，没有信号，没有学习。GRPO 的信号强度与组内结果的*方差*成正比。零方差 = 零信号。
+
+- **50% 成功率甜区**: 为什么是 50% 而不是 90% 或 10%？因为 GRPO 的梯度信号在组内方差最大时最强——一半成功，一半失败。如果 90% 成功，大多数人的优势接近零（大家都差不多）。如果 10% 成功，反过来也一样。50% 时信息量最大，问题恰好处于模型能力的边界线上。
+
+- **前缀 token 的损失屏蔽**: 前缀是训练轮，不是自行车本身。把前缀 token 的损失设为零，模型永远不会学会"生成"提示——只学习前缀之后的困难部分。部署时，简单地停止拼接前缀就行。不需要改架构，不需要蒸馏，不需要微调。脚手架对最终模型自己的生成过程始终是不可见的。
+
+## 框架转变
+
+```
+之前（主流方法）：
+
+  问题 --> [固定前缀长度 k] --> GRPO --> 更新
+                |
+                设定一次，全程不变
+                所有问题相同 k
+                所有训练步骤相同 k
+
+
+之后（本文方法）：
+
+  问题 --> [自适应 k(t, 问题)] --> GRPO --> 更新
+                |          ^
+                v          |
+           成功率监测      反馈：调整 k
+                          以 ~50% 为目标
+                |
+                k 随训练递减 --> 最终 k = 0
+```
+
+从静态难度工程到闭环难度控制，核心转变是把前缀长度从**超参数**变成了**控制变量**。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实且精准识别的缺口。GRPO 在难题上"零梯度"的失败模式在社区内众所周知，但文献中针对它的解决方案很少。大多数实践者要么忽略难题，要么指望模型自己慢慢开窍。把它框架化为一个控制问题，是正确的抽象。本文处于强化学习课程学习和推理模型训练的交叉地带——一个正在快速升温的方向。
+
+**方法成熟度**: 巧劲，不蛮力。方法退化为数据准备加一个损失掩码——几乎不用改训练器。这是优势：容易采用。但 50% 目标率被当成了魔法数字。为什么不试试 40% 或 60%？论文没有做这个消融实验，这是个遗憾。还有一个疑问：更简单的启发式方法（比如按问题难度分桶、线性衰减前缀长度）能否拿到 80% 的收益？控制器本身没有被形式化分析——没有收敛保证，没有稳定性分析。经验上有效，但"为什么"被一笔带过。
+
+**实验诚意**: 基线合理——标准 GRPO 和固定前缀 GRPO。增益显著：0.6B 模型 2.1 倍很抢眼。"模型越小收益越大"的发现符合直觉（小模型在难题上挣扎更多，所以自适应辅助帮助更大）。几个疑虑：没有与其他课程学习方法对比（如优先级重放、自适应步速学习），这些方法在不同语境下处理过类似问题。AIME 结果（1.7 倍）基于非常小的基准——希望看到其他推理领域的泛化性。论文声称"trace 长度大致减半"，但没有深入分析这是前缀屏蔽的副作用还是推理效率的真实提升。
+
+**写作功力**: 简洁可读——值得尊重。核心思想在摘要里就讲清楚了，这很少见。但实验部分可以更紧凑。消融实验太薄：我至少想看三个东西：（a）对 50% 目标率的敏感性，（b）只按分桶而非按问题自适应的效果，（c）与简单前缀衰减调度的对比。相关工作部分简略到失礼——强化学习中的课程学习有几十年的文献值得讨论。
+
+**判决**: 弱接收 — 核心想法确实有用且易于实现，但评估没有完全支撑住所有声明。缺少对目标成功率的消融和与更简单基线的对比，使得无法给出强接收。
+
+## 要点总结
+
+**给 GRPO 实践者**: 如果你在用 GRPO 训练推理模型时遇到了零梯度的墙，这是一个即插即用的修复方案。实现本质上就是三步：（1）准备参考解，（2）在数据加载时拼接可变长度的前缀，（3）在损失中屏蔽前缀 token。一个下午就能搞定。
+
+**50% 启发式作为设计原则**: "让每个训练样本处于能力边界"的思想远远超越 GRPO。任何使用组内相对或基于排名的优势的强化学习方法都有同样的零方差失败模式。自适应辅助脚手架的模式——提供帮助、监测成功率、撤回帮助——是一个通用的课程学习模板。
+
+**小模型收益最大**: 如果你出于成本考虑部署较小的模型（0.5B-2B），这个方法的收益不成比例地大。问题难度与模型能力之间的差距越大，自适应脚手架的价值越高。这是一个用更少参数获得更多推理能力的实用杠杆。
+
+**损失屏蔽作为隐形脚手架**: 屏蔽辅助输入 token 的损失、使其不影响模型生成行为的技术，简单但未被充分利用。这是在训练时提供提示而部署时零成本的干净方式。任何"仅训练时辅助"的场景都可以借鉴这个模式。
+:::

@@ -1,0 +1,60 @@
+---
+title:
+  en: "Why Delta Beats Gate: The Analysis Behind Linearizing Transformers"
+  zh: "Delta为何胜过Gate：Transformer线性化的分析基础"
+description:
+  en: "An analysis-driven approach to transformer linearization that reveals why delta-style state updates outperform gated accumulation through the lens of rank-1 projection structure, and introduces targeted fixes—sink tokens, short convolutions, and cache routing—to close the remaining quality gap at 32B scale."
+  zh: "通过分析softmax注意力的秩1投影结构，揭示了delta式状态更新优于门控累积的根本原因，并引入sink token、短卷积和缓存路由三项针对性修复，在32B参数规模上实现了后验线性化的最优质量。"
+date: 2026-07-09
+tags: ["arxiv", "ai", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.07706](https://arxiv.org/abs/2607.07706)
+**Authors**: Anna Kuzina, Paul N. Whatmough, Babak Ehteshami Bejnordi
+**Categories**: cs.LG
+
+## The Gap
+
+You already know the problem: causal self-attention scales as O(n^2) with sequence length, and once you hit 32K+ tokens, inference becomes painfully slow. The field has responded with a wave of post-hoc linearization methods — take a pretrained transformer, swap its attention for linear attention or state-space recurrence, and hope quality survives. Think Linearizing SSMs, RWKV-style conversions, gated RNN replacements, and various kernel-approximation pipelines.
+
+The trouble is that nobody can tell you *which parts* of these pipelines actually preserve quality and which are cargo cult. You run ten steps, quality drops 3%, and you don't know if step 4 or step 7 is responsible. The causal structure of "this component causes that degradation" has been missing.
+
+This paper's move is simple and smart: freeze the backbone entirely — no fine-tuning, no adapter training, nothing. Just swap the attention mechanism and see what happens. In this clean regime, they isolate *state update design* as the critical variable, then do the math to explain why.
+
+```
+Problem: O(n^2) causal self-attention
+  |       bottlenecks long-context inference
+  v
+Prior: Numerous post-hoc linearization pipelines
+  |       (hard to identify which preserve quality)
+  v
+Approach: Frozen-backbone regime isolates
+  |       state update design as the key variable
+  v
+Analysis: Softmax decomposes into rank-1,
+  |       key-dependent orthogonal projections
+  v
+Insight: Delta rule mirrors this structure;
+  |       pure gating diverges (accumulates error)
+  v
+Fixes: Sink tokens + short conv + cache routing
+  |       target remaining approximation errors
+  v
+Result: 32B LLaMA/Qwen — SOTA post-hoc MMLU,
+            matches adaptive caching on long-context
+```
+
+## The Increment
+
+**One sentence**: Before this paper, post-hoc linearization was a black-box recipe — you threw components together and hoped quality survived; after, we understand **why* delta updates work (they mirror softmax's rank-1 projection structure) and *how* to fix the remaining errors with targeted structural interventions that scale to 32B parameters.
+
+### Core Mechanism
+
+The starting point is a pretrained transformer with standard softmax attention. The authors freeze every weight — Q, K, V projections, output projections, FFN layers, everything. The only thing they change is *how attention computes*.
+
+Standard softmax attention builds an output by weighted-combining all past values, where the weights come from softmax over query-key dot products. This is expensive because you need to compute and store all pairwise interactions. Linear attention instead maintains a running state matrix M (size d×d per head) that accumulates information incrementally. The question is: how should you update M when a new token arrives?
+
+Two main strategies exist. **Gated accumulation** blends new information into the running state with a fixed mixing ratio: M_new = g ** M_old + (1-g) * v @ k^T. Think of it as exponential moving average — simple but lossy over long sequences. **Delta update** instead corrects the error between what the state currently predicts and what the new token actually says: M_new = M_old + (v - M_old @ k) @ k^T. This is structurally richer because it **targets* what's wrong.
+
+The paper shows mathematically that softmax attention's contribution from
