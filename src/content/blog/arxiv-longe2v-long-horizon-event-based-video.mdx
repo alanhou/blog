@@ -1,0 +1,377 @@
+---
+title:
+  en: "LongE2V: Using Video Diffusion Priors to Reconstruct, Predict, and Interpolate from Sparse Event Streams"
+  zh: "LongE2V：用视频扩散先验从稀疏事件流中重建、预测和插值"
+description:
+  en: "A method that fine-tunes a pre-trained video diffusion model to handle three event-camera tasks simultaneously — reconstruction, prediction, and interpolation — with special tricks to maintain coherence over very long sequences."
+  zh: "通过微调预训练视频扩散模型，同时处理事件相机的三大任务——重建、预测和插值——并引入专门技术保持超长序列的时序一致性。"
+date: 2026-07-11
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.08770](https://arxiv.org/abs/2607.08770)
+**Authors**: Cheng-De Fan, Chun-Wei Tuan Mu, Chen-Wei Chang, Chin-Yang Lin, Kun-Ru Wu, Yu-Chee Tseng, Yu-Lun Liu
+**Categories**: cs.CV
+
+## The Gap
+
+Event cameras don't capture frames — they stream asynchronous brightness changes (events) at microsecond resolution. Converting this sparse, noisy stream back into conventional video is genuinely hard. Prior approaches split into two camps, each with a fatal flaw:
+
+- **Regression methods** (e.g., E2VID, FireNet) minimize pixel-wise error, producing blurry textures. They're fast but lifeless — the "uncanny valley" of event-to-video.
+- **Generative methods** (e.g., diffusion-based E2V) produce sharp frames but accumulate temporal drift over long sequences. Generate 100 frames and the scene quietly morphs into something unrecognizable.
+
+Nobody has cleanly solved all three sub-tasks — reconstruction, prediction, and interpolation — within a single framework, especially not at long horizons. The gap is a method that has the perceptual quality of generative models, the temporal stability of regression models, and the generality to handle multiple tasks.
+
+```
+Sparse Event Stream
+        |
+        v
++------------------+
+| Problem:         |
+| Events -> Video  |
+| (reconstruction) |
+| + prediction     |
+| + interpolation  |
++--------+---------+
+         |
+         v
++-------------------+        +---------------------+
+| Regression        |        | Generative (Diff.)   |
+| -> blurry         |        -> temporally unstable  |
++-------------------+        +---------------------+
+         |                           |
+         v                           v
++-------------------------------+
+| Assumption:                   |
+| Pre-trained video diffusion   |
+| model already encodes rich    |
+| visual priors. Fine-tune it   |
+| with event conditions.        |
++---------------+---------------+
+                |
+                v
++-------------------------------+
+| Method: LongE2V               |
+| - Fine-tune video diffusion   |
+| - Autoregressive unrolling    |
+| - Adaptive context switching  |
+| - Event voxel density aug.    |
++---------------+---------------+
+                |
+                v
++-------------------------------+
+| Evidence:                     |
+| Outperforms SOTA on all      |
+| 3 tasks, real-world data,    |
+| long-horizon stability,       |
+| zero-shot generalization      |
++---------------+---------------+
+                |
+                v
+Conclusion: Diffusion priors
+can unify event-based video
+tasks at scale.
+```
+
+## The Increment
+
+**One sentence**: Before this paper, event-to-video methods either looked good but fell apart over time, or stayed stable but looked blurry — now there's a single diffusion-based framework that does all three tasks (reconstruction, prediction, interpolation) with both quality and long-horizon stability.
+
+### Core Mechanism
+
+LongE2V starts from a pre-trained text-to-video diffusion model (think something like a Video LDM) and replaces the text conditioning with event voxel conditioning. The model is fine-tuned to "read" event streams as a kind of motion blueprint and hallucinate plausible RGB frames that respect that blueprint. Because the diffusion prior already knows what real video looks like, the fine-tuning needs relatively little data — the model transfers visual knowledge from its pre-training.
+
+For long sequences, they process video autoregressively: generate a chunk of frames, then use the last few frames as context for the next chunk. The problem is that errors compound — each chunk can drift slightly, and after 10 chunks you're on Mars. Their fix is **Adaptive Context Switching**: instead of always conditioning on the last N generated frames, they dynamically switch between local context (recent frames for motion continuity) and global context (earlier reference frames for appearance anchoring) based on how much drift has accumulated. Think of it as a sailor who mostly watches the waves ahead but periodically checks the compass.
+
+For frame interpolation specifically, they need bidirectional consistency — the interpolated frame should look right whether you approach it from the past or the future. They achieve this through **Reencoding Alignment with Cross Residual Correction**: encode the frame from both directions, then correct each encoding by borrowing residual information from the other direction. This ensures the two paths converge rather than fighting each other.
+
+```
+Event Stream
+     |
+     v
+[Event Encoder] --> event features
+     |
+     v
++----------------------------+
+| Pre-trained Video Diffusion|
+| (fine-tuned)               |
+|                            |
+| event features ---->       |
+|                    UNet    |
+| noise ---------> /DiT ---->| denoised frames
+|                            |
++----------------------------+
+     |
+     v (autoregressive)
+     |
+     v
++----------------------------+
+| Context Manager            |
+|                            |
+| local_ctx = last N frames  |
+| global_ctx = ref. frames   |
+|                            |
+| if drift > threshold:      |
+|   use global_ctx           |
+| else:                      |
+|   use local_ctx            |
++----------------------------+
+     |
+     v
+[Output: reconstructed /
+ predicted / interpolated
+ video frames]
+```
+
+**Metaphor: A restoration painter with a photographic memory.**
+
+Imagine you're a painter hired to recreate a burned-down museum from a written log of which objects moved where (the event stream). You've spent years painting from photographs of every room in the world (pre-training on video). Now:
+
+- **Event encoder** = the log telling you "something moved left-to-right in this corner at this speed"
+- **Fine-tuned diffusion model** = your trained hand painting plausible scenes that respect the log's constraints
+- **Autoregressive unrolling** = painting one wall at a time, then moving to the next
+- **Adaptive context switching** = every few walls, you walk back to the museum entrance to re-orient yourself so you don't gradually paint the hallway wider and wider
+- **Cross residual correction** = for a wall between two rooms, you sketch it from Room A's side, then sketch it from Room B's side, then merge the two sketches so it looks consistent from both directions
+
+Without the periodic walk-back (context switching), you'd end up painting an Escher painting. Without the cross-sketching (residual correction), the wall would look like two different walls depending on which room you're standing in.
+
+### Key Concepts
+
+- **Event Voxel Grid**: An event camera doesn't record frames. Each pixel independently fires when its brightness changes, recording (+1 for brighter, -1 for darker) and a timestamp. To make this usable for neural networks, you bin events into a 3D grid: two spatial dimensions (x, y) and one temporal dimension (time slices). Each cell accumulates the signed events in that spatiotemporal volume. Think of it as a 3D point cloud where each point says "something happened here at this moment." The density of events tells you about motion speed; the sign tells you about direction.
+
+- **Autoregressive Unrolling with Context Switching**: When generating a long video, you can't denoise the entire thing at once (memory explodes). So you generate 16 frames, then use the last 4 as "context" to generate the next 16, and so on. The catch: each generation is slightly imperfect, so after 10 rolls, small errors have snowballed into visible drift (the scene slowly changes hue, the background shifts). Adaptive Context Switching monitors this drift and periodically pulls in a longer-range context — a reference frame from much earlier — to reset the appearance. It's like a long road trip where you mostly watch the GPS but every hour glance at the paper map in your lap to make sure the GPS hasn't told you to drive into a lake.
+
+- **Zero-shot generalization**: The model was fine-tuned on specific datasets but tested on scenes, objects, and motion patterns it never saw during training. Because it inherits strong priors from the pre-trained video diffusion model (which learned about lighting, materials, object structure from millions of generic videos), it can "fill in" plausible details for novel scenes — even if the event stream looks nothing like the training data. This is the payoff of leveraging foundation models rather than training from scratch.
+
+## Framework Shift
+
+```
+Before (mainstream):                   After (this paper):
+
+Event Stream                           Event Stream
+     |                                      |
+     v                                      v
+[Task-specific model]                [Unified diffusion model]
+     |                                      |
+     +---> Reconstruction model             |
+     |     (regression, blurry)             +---> All 3 tasks
+     +---> Prediction model                 |     (one fine-tuned model)
+     |     (separate architecture)          |
+     +---> Interpolation model              |
+           (separate architecture)
+                                          Drift? -> Context Switch
+Each task: separate model,               Interp? -> Cross Residual
+each with own failure mode
+```
+
+From task-specific regression pipelines to a unified generative framework, the core shift is treating event-to-video as a conditional generation problem where a single pre-trained video model handles all sub-tasks through shared priors and targeted fine-tuning.
+
+## Expert Assessment
+
+**Problem choice**: Real gap. Event-based vision has been growing but remains niche — most methods are task-specific and struggle at long horizons. The unification of three tasks under one model is genuinely useful, not contrived. This sits at the intersection of event cameras (getting cheaper, finding use in autonomous driving and robotics) and foundation models (getting more capable), which is a productive place to be.
+
+**Method maturity**: More clever than brute force, but not without cost. The context switching heuristic (drift threshold triggers global context injection) is practical but somewhat hand-tuned — I'd want to see ablations on how sensitive performance is to the threshold. Fine-tuning a pre-trained video diffusion model is the right play; training from scratch on event data would be hopeless given dataset sizes. One concern: inference speed. Diffusion models are slow, and autoregressive unrolling makes it slower. The paper should be more upfront about wall-clock times.
+
+**Experimental integrity**: Baselines are reasonable — they compare against E2VID, E2VID+, FireNet, and diffusion-based approaches. Real-world benchmarks (MVSEC, HQF, IJRR) are standard. The zero-shot generalization experiments are a nice touch and actually more convincing than the supervised numbers. I'd flag that "outperforms SOTA across all three tasks" is a bold claim — the margins on interpolation may be thinner than on reconstruction. Wish they'd included failure cases.
+
+**Writing quality**: Clean and structured, but the method section could use a single running figure that shows the full pipeline end-to-end rather than scattered diagrams. The Adaptive Context Switching explanation is somewhat buried — this is arguably their most novel engineering contribution and deserves a dedicated subsection with more visual explanation. The related work section is thorough but could be tighter.
+
+**Verdict**: weak accept — the unification of three tasks under diffusion priors is a genuine contribution with practical value, but the drift mitigation heuristics need more rigorous analysis and the speed-accuracy tradeoff is conspicuously unexplored.
+
+## Takeaways
+
+Three things worth stealing:
+
+1. **Fine-tune foundation models for niche modalities.** Don't train from scratch on event data — take a video diffusion model and condition it on events. This "adapter" pattern works because the visual priors transfer. Applies to any domain where labeled data is scarce but a foundation model for the output modality exists.
+
+2. **Context switching as drift control.** When running any autoregressive model (video, audio, text), periodically injecting long-range context alongside local context prevents drift compounding. The threshold-based switching is simple to implement and likely transferable to autoregressive audio generation, long document summarization, etc.
+
+3. **Cross residual correction for bidirectional tasks.** When you need consistency from two directions (e.g., forward and backward prediction, left and right stereo), encoding from both sides and correcting each with residuals from the other is a clean architectural trick. Could apply to stereo depth estimation, bidirectional translation, or any task requiring symmetric consistency.
+:::
+
+:::zh
+**论文**: [2607.08770](https://arxiv.org/abs/2607.08770)
+**作者**: Cheng-De Fan, Chun-Wei Tuan Mu, Chen-Wei Chang, Chin-Yang Lin, Kun-Ru Wu, Yu-Chee Tseng, Yu-Lun Liu
+**分类**: cs.CV
+
+## 缺口
+
+事件相机不拍帧——它以微秒级精度异步输出亮度变化（事件）。
+把这种稀疏、嘈杂的事件流转成常规视频，是个老大难问题。
+此前的方法分成两个阵营，各有各的硬伤：
+
+- **回归方法**（如 E2VID、FireNet）最小化像素误差，结果纹理模糊，生成的视频像是隔着毛玻璃拍的。
+- **生成方法**（如基于扩散的 E2V）画面锐利，但在长序列上漂移严重。
+  生成 100 帧后，场景会不知不觉变成别的东西。
+
+更重要的是，没有人在一个统一框架内干净地解决全部三个子任务——重建、预测和插值——尤其在长时间跨度下。
+缺口就是：一个既有生成方法的画质、又有回归方法的稳定性、还能一统三个任务的方法。
+
+```
+稀疏事件流
+    |
+    v
++-----------------+
+| 问题：          |
+| 事件 -> 视频    |
+| (重建)          |
+| + 预测          |
+| + 插值          |
++--------+--------+
+         |
+         v
++-------------------+      +---------------------+
+| 回归方法          |      | 生成方法(扩散)       |
+| -> 模糊           |      -> 时序漂移           |
++-------------------+      +---------------------+
+         |                         |
+         v                         v
++---------------------------------+
+| 假设：                          |
+| 预训练视频扩散模型已编码丰富     |
+| 视觉先验。用事件条件微调它。     |
++----------------+----------------+
+                 |
+                 v
++---------------------------------+
+| 方法：LongE2V                   |
+| - 微调视频扩散模型              |
+| - 自回归展开                    |
+| - 自适应上下文切换              |
+| - 事件体素密度增强              |
++----------------+----------------+
+                 |
+                 v
++---------------------------------+
+| 证据：                          |
+| 三个任务上全面超越 SOTA，       |
+| 长序列稳定，零样本泛化          |
++----------------+----------------+
+                 |
+                 v
+结论：扩散先验可以统一
+事件视频任务。
+```
+
+## 增量
+
+**一句话**: 此前的事件转视频方法要么好看但不持久，要么持久但模糊——现在有了一个基于扩散的统一框架，同时搞定重建、预测、插值三个任务，而且长序列不崩。
+
+### 核心机制
+
+LongE2V 从一个预训练的文本到视频扩散模型出发，把文本条件替换成事件体素条件。
+通过微调，让模型"读懂"事件流——把它当成运动蓝图——然后幻化出符合蓝图的 RGB 帧。
+因为扩散先验已经从海量视频中学会了什么是真实视觉，微调只需要少量数据就能迁移到事件域。
+
+长序列处理用的是自回归方式：生成一段帧，用最后几帧作为上下文生成下一段。
+问题在于误差累积——每段略有偏差，滚过 10 段后画面就飘到了火星。
+他们的解法是**自适应上下文切换**：不是每次都只用最近 N 帧做条件，
+而是根据已积累的漂移量，在局部上下文（保持运动连续性）和全局上下文（锚定外观）之间动态切换。
+像一个水手，大部分时间盯着前方的浪，但每隔一段时间看看罗盘。
+
+对于帧插值，需要双向一致性——从过去方向和从未来方向插值同一帧，结果应该一致。
+他们用**重编码对齐与交叉残差修正**实现这一点：从两个方向分别编码，然后用对方的残差信息修正自己，让两条路径收敛而非互相打架。
+
+```
+事件流
+  |
+  v
+[事件编码器] --> 事件特征
+  |
+  v
++------------------------------+
+| 预训练视频扩散模型(已微调)   |
+|                              |
+| 事件特征 ---->               |
+|              UNet / DiT      |
+| 噪声 -------> 去噪后帧      |
+|                              |
++------------------------------+
+  |
+  v (自回归)
+  |
+  v
++------------------------------+
+| 上下文管理器                 |
+|                              |
+| local_ctx = 最近 N 帧        |
+| global_ctx = 参考帧          |
+|                              |
+| if 漂移 > 阈值:              |
+|   用 global_ctx              |
+| else:                        |
+|   用 local_ctx               |
++------------------------------+
+  |
+  v
+[输出：重建/预测/插值的视频帧]
+```
+
+**核喻：一个有摄影记忆力的文物修复师。**
+
+想象你受雇根据一份物品移动日志（事件流）来重建一座被烧毁的博物馆。
+你过去花了很多年看着世界各地博物馆的照片作画（视频预训练）。
+
+- **事件编码器** = 那份日志，告诉你"这个角落有东西以这个速度从左移到右"
+- **微调后的扩散模型** = 你训练有素的手，画出既逼真又符合日志的场景
+- **自回归展开** = 一次画一面墙，画完移到下一面
+- **自适应上下文切换** = 每画几面墙，就走回博物馆入口重新定位，防止走廊越画越宽
+- **交叉残差修正** = 对于两个房间之间的墙，先从 A 房间那边画一遍，再从 B 房间那边画一遍，然后合并，让两侧视角一致
+
+没有定期走回入口（上下文切换），你会画出埃舍尔的不可能建筑。
+没有双向合并（残差修正），同一面墙在两个房间看会像两面不同的墙。
+
+### 关键概念
+
+- **事件体素网格**：事件相机不拍帧。每个像素独立地在亮度变化时触发，记录方向（+1 变亮、-1 变暗）和时间戳。为了给神经网络用，把这些事件装进一个三维网格：x、y 两个空间维度，加上时间切片。每个格子累加该时空体积内的带符号事件。可以想象成一个三维点云，每个点说"这里在这个时刻发生了什么"。事件密度反映运动速度，符号反映运动方向。
+
+- **自回归展开与上下文切换**：生成长视频时，不可能一次去噪整个序列（显存爆炸）。所以生成 16 帧，用最后 4 帧当"上下文"生成下一个 16 帧，依此类推。麻烦在于：每次生成都不完美，滚 10 轮后小误差就雪球般变成了可见的漂移（颜色慢慢偏移，背景悄悄移动）。自适应上下文切换监测这种漂移，定期拉入远距离上下文——一个很久之前的参考帧——来重置外观。就像长途开车，大部分时间看 GPS，但每小时瞄一眼纸地图，确保 GPS 没让你开进湖里。
+
+- **零样本泛化**：模型在特定数据集上微调，但测试时面对训练中从未见过的场景、物体和运动模式。因为它继承了预训练视频扩散模型的强先验（从数百万通用视频中学到的光照、材质、物体结构），所以能为全新场景"填充"合理的细节——即使事件流看起来和训练数据完全不同。这就是利用基础模型而非从头训练的回报。
+
+## 框架转变
+
+```
+之前（主流方法）：                 之后（本文方法）：
+
+事件流                            事件流
+  |                                 |
+  v                                 v
+[任务专属模型]                   [统一扩散模型]
+  |                                 |
+  +---> 重建模型                    +---> 三个任务
+  |     (回归，模糊)               |     (一个微调模型)
+  +---> 预测模型                    |
+  |     (独立架构)                  |
+  +---> 插值模型                    |
+        (独立架构)               漂移？-> 上下文切换
+                                插值？-> 交叉残差
+每个任务：独立模型，
+各有各的失败模式
+```
+
+从任务专属的回归流水线到统一的生成框架，核心转变是把事件转视频视为条件生成问题，用一个预训练视频模型通过共享先验和定向微调处理所有子任务。
+
+## 专家评审
+
+**选题眼光**: 真缺口。事件视觉持续增长但仍属小众，多数方法只做单任务且长序列表现差。把三个任务统一在一个模型下确实实用，不是人造需求。这篇处在事件相机（成本下降，在自动驾驶和机器人中越来越常见）和基础模型（能力越来越强）的交汇处，是个有生产力的位置。
+
+**方法成熟度**: 巧劲多于蛮力，但有代价。上下文切换的启发式规则（漂移阈值触发全局上下文注入）实用但偏手调——想看看性能对阈值有多敏感的消融实验。微调预训练视频扩散模型是正确的选择，用事件数据从头训练基本不可能。一个隐患：推理速度。扩散模型本来就慢，自回归展开让它更慢。论文应该更坦诚地报告实际运行时间。
+
+**实验诚意**: 基线合理——和 E2VID、E2VID+、FireNet 及基于扩散的方法都做了比较。真实世界基准（MVSEC、HQF、IJRR）是标准选择。零样本泛化实验是加分项，比监督指标更有说服力。要挑刺的话，"三个任务全面超越 SOTA"是大胆声明——插值任务的领先幅度可能比重建任务薄。希望看到失败案例分析。
+
+**写作功力**: 结构清晰，但方法部分需要一张端到端的总图，而不是分散的小图。自适应上下文切换的解释有点被埋了——这可能是他们最有工程价值的创新，值得独立成节并配更多可视化。相关工作部分全面但可以更紧凑。
+
+**判决**: 弱接收 —— 用扩散先验统一三个事件任务是真正有实用价值的贡献，但漂移缓解的启发式方法需要更严格的分析，速度-精度的权衡几乎没讨论。
+
+## 要点总结
+
+三个值得偷的技术：
+
+1. **用基础模型适配小众模态。** 别在事件数据上从头训练——拿一个视频扩散模型，用事件做条件微调。这个"适配器"模式之所以有效，是因为视觉先验可以迁移。适用于任何标注数据稀缺、但有针对输出模态的基础模型的领域。
+
+2. **上下文切换作为漂移控制。** 跑任何自回归模型（视频、音频、文本）时，定期注入长距离上下文配合局部上下文，可以阻止漂移累积。这个基于阈值的切换实现简单，大概率可以迁移到自回归音频生成、长文档摘要等场景。
+
+3. **交叉残差修正用于双向任务。** 当你需要从两个方向保持一致性（比如正向和反向预测、左右立体视觉），从两侧分别编码、再用对方的残差修正自己，是一个干净的架构技巧。可用于立体深度估计、双向翻译、或任何需要对称一致性的任务。
+:::
