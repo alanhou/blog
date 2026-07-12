@@ -1,0 +1,323 @@
+---
+title:
+  en: "Score Accuracy ≠ Stability: A Hidden Trap in Diffusion Sampling"
+  zh: "分数精度≠稳定性：扩散采样中的隐性陷阱"
+description:
+  en: "This paper proves that accurate score estimation under forward marginals can still produce numerically unstable reverse-time discretizations, and offers a simple projection fix."
+  zh: "本文证明前向边缘分布下精确的分数估计仍可导致反向时间离散化的数值不稳定，并提出一种简单的投影修复方案。"
+date: 2026-07-12
+tags: ["arxiv", "ai", "stat.ml", "cs.lg", "math.na", "math.pr"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.08757](https://arxiv.org/abs/2607.08757)
+**Authors**: Yiwei Zhou
+**Categories**: stat.ML, cs.LG, math.NA, math.PR
+
+## The Gap
+
+Diffusion models learn a score function (the gradient of the log-density) during the forward noising process, then use it to reverse the process and generate samples. The standard theoretical guarantee says: if your score estimate has small error under the forward marginals (the noisy distributions you trained on), you're in good shape. Papers like Song et al. (2021), Lee et al. (2023), and Chen et al. (2023) built convergence theories on exactly this assumption — small forward-marginal score error implies the reverse process is close to the true one.
+
+But here's the problem nobody formally pinned down: when you actually *run* the reverse sampler (say, Euler-Maruyama), the score is evaluated along the *sampler's own trajectory*, which drifts away from the forward marginals. Training accuracy doesn't guarantee accuracy at evaluation time. This paper closes that gap by showing the disconnect is not just a loose-end constant — it can cause complete numerical blowup.
+
+```
+[Score matching on forward marginals]
+              |
+              v
+[Small L2 score error under forward process]
+              |
+              | But...
+              v
+[Reverse sampler evaluates score along its OWN trajectory]
+              |
+              | = distribution shift at evaluation time
+              v
+[Euler-Maruyama can diverge in every W_p moment]
+              |
+              v
+[Even for smooth, bounded, Lipschitz networks]
+```
+
+## The Increment
+
+**One sentence**: Before this paper, small forward-marginal score error was implicitly treated as sufficient for stable sampling; after this paper, we know it is provably insufficient, and we have both the counterexamples and a clean fix.
+
+### Core Mechanism
+
+The paper's architecture has two parts: a **negative result** (the counterexample) and a **positive result** (the fix).
+
+**The counterexample construction**: Zhou builds a single smooth score field on a simple 1D problem. The learned score has **arbitrarily small* L² error under the forward marginals. The resulting continuous reverse-time SDE is perfectly well-behaved — nonexplosive, all moments finite, arbitrarily close to the true reverse in path-space total variation. But when you discretize with Euler-Maruyama, the discrete trajectories can wander into regions where the score error explodes. Every positive moment of the discretized endpoint diverges. Weak convergence holds (the distribution "converges" in a weak sense), but every Wasserstein distance W_p, p ≥ 1, diverges. The paper further shows this can occur within a fixed, bounded, globally Lipschitz neural network — not just an adversarially constructed mathematical function.
+
+**The positive result (projection fix)**: For compactly supported data, Zhou proposes projecting the learned denoiser's output onto a known bounded closed convex set that contains the data support. This projection preserves pointwise score accuracy, gives grid-uniform moment bounds, and yields Wasserstein convergence under mild local regularity. It's conceptually simple: just clip the denoiser to stay within the known support.
+
+```
+[Learned score s_theta(x,t)]
+         |
+         v
+[Evaluated on forward marginals] --> small L2 error (guaranteed)
+         |
+         | but at sampling time...
+         v
+[Evaluated along reverse trajectory] --> error may explode
+         |
+         | Fix:
+         v
+[Project denoiser output onto support]
+         |
+         v
+[Grid-uniform moment bounds + W_p convergence]
+```
+
+**Structural metaphor — the flight simulator analogy**: Think of score matching as training a pilot in a flight simulator. The simulator reproduces specific weather conditions (forward marginals) very accurately, and your pilot (the neural network) performs flawlessly in those conditions. The small forward-marginal error is like saying "the simulator is 99.9% accurate." Now you send this pilot into the real sky (the reverse-time sampling trajectory). The real flight may drift into turbulence zones (regions of state space) the simulator never covered. The pilot's perfectly calibrated responses — tuned for calm air — can cause control oscillations that grow until the plane crashes. The discrete Euler-Maruyama steps are the pilot's control inputs: each one is tiny, but they compound in the wrong region. The "projection fix" is the equivalent of an autopilot envelope protection system: regardless of what the pilot does, the plane is physically constrained to stay within safe airspeed and altitude bounds. You keep the pilot's accuracy where it counts, but you prevent catastrophic drift by clipping to a known safe region.
+
+### Key Concepts
+
+- **Wasserstein vs. Weak Convergence**: Imagine you're predicting where a dart will land. Weak convergence says "the probability of landing in any given region converges" — like your dart board heatmap getting more accurate. Wasserstein distance says "the average **distance* between predicted and actual landing spots converges." This paper shows you can have the first (heatmap looks right) while the second (actual error) blows up. How? The dart usually lands close to where you predicted (weak convergence), but on rare throws it flies wildly off-target, and those rare throws are so bad they make the average distance infinite. It's the difference between "usually right" and "never catastrophically wrong."
+
+- **Forward Marginals vs. Reverse Trajectory**: The forward process starts with real data and adds noise step by step — like slowly dissolving a sculpture in acid. The forward marginals are snapshots of partially-dissolved sculptures at each time. The reverse process starts from pure noise and tries to recover the sculpture. The key insight: the reverse process doesn't walk through the same states the forward process visited. It carves its own path through state space. Score matching tests your "sculpting instructions" against the forward snapshots, but during generation you're following those instructions in uncharted territory.
+
+- **Projection onto a Convex Set**: If you know your data lives inside a box (say, pixel values in [0,255]), and your denoiser predicts something outside that box, just clip it back in. This sounds almost too simple to be a theoretical contribution, but the paper proves it has deep consequences: it uniformly bounds all moments, prevents the numerical blowup, and restores Wasserstein convergence. The non-obvious part is that this trivial-seeming operation provably breaks the failure mode.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+[Score error on]                     [Score error on]
+[forward marginals]                  [forward marginals]
+       |                                    |
+       v                                    v
+  "Convergence"                     [May diverge numerically]
+  [assumed for                      [if trajectory drifts]
+   sampling]                               |
+                                           v
+                                    [Need trajectory-aware
+                                     control: projection]
+                                           |
+                                           v
+                                    [Provable W_p convergence]
+```
+
+From "trust the forward-marginal guarantee" to "verify and constrain along the sampling trajectory," the core shift is that the training-time metric is fundamentally decoupled from the sampling-time stability guarantee.
+
+## Expert Assessment
+
+**Problem choice**: This is a genuine, important gap. The diffusion theory community has been building convergence rates on top of forward-marginal score error without formally addressing this distribution-shift issue. It's the kind of hole that everyone half-suspects but nobody pins down. The paper sits at the intersection of stochastic numerics and deep learning theory — exactly where rigorous work is most needed and most rare.
+
+**Method maturity**: The counterexample construction is clever, not brute force. The 1D reduction is well-chosen — it strips away all architectural complexity and isolates the pure mathematical phenomenon. The Lipschitz-network construction extending the result to realistic architectures is the stronger contribution. The projection fix is elegant in its simplicity, though one might argue it requires knowing the data support, which isn't always available in high dimensions. The paper doesn't explore **approximate* projections or learned support estimates.
+
+**Experimental integrity**: The experiments use a small DiT-style network, which is reasonable for a theory paper. The demonstration of large growth along rare trajectories and its suppression by projection is convincing. However, the experiments are limited to low-dimensional settings. A practitioner would want to know: does this failure mode actually bite in latent diffusion models at scale? The paper is honest about this limitation but doesn't attempt to bridge it.
+
+**Writing quality**: The mathematical exposition is clean and well-structured. The counterexample-to-fix narrative arc is satisfying. Where the authors cut corners: the connection to practical diffusion model training could be much stronger. Section 5 (experiments) feels like an afterthought — one more figure showing failure rates in a realistic (even if small) image generation task would dramatically increase the paper's impact. The transition from the 1D theory to the neural network construction (Theorem 4) deserves its own subsection with more intuition.
+
+**Verdict**: weak accept — A genuinely novel theoretical insight with a clean proof structure, but the practical gap between the 1D counterexample and real-world diffusion models limits its immediate impact.
+
+## Takeaways
+
+1. **Don't trust forward-marginal error as your sole convergence guarantee.** If you're building diffusion model theory or doing rigorous evaluation, you need to account for distribution shift between training (forward marginals) and sampling (reverse trajectory).
+
+2. **Projection is a cheap, theoretically grounded safety net.** If your data has known support (images in [0,1], audio in [-1,1], etc.), projecting your denoiser output onto that set is nearly free and provably prevents the numerical blowup failure mode. This is directly implementable.
+
+3. **Weak convergence without Wasserstein convergence is a real trap.** In practice, this means your samples **usually* look fine, but occasionally you get catastrophically bad outputs. If you're seeing rare but extreme artifacts in diffusion-generated samples, this paper's mechanism is a plausible explanation — and projection is the fix.
+
+4. **For theorists**: The paper opens a concrete research direction — characterizing when and how strongly the forward-to-reverse distribution shift affects specific score network architectures and noise schedules. The 1D construction is a launching pad, not a destination.
+:::
+
+:::zh
+**论文**: [2607.08757](https://arxiv.org/abs/2607.08757)
+**作者**: Yiwei Zhou
+**分类**: stat.ML, cs.LG, math.NA, math.PR
+
+## 缺口
+
+扩散模型在前向加噪过程中学习分数函数（对数密度的梯度），然后用它来逆转过程、生成样本。
+标准的理论保证是：如果你的分数估计在前向边缘分布（训练时使用的含噪分布）下误差很小，
+那一切就稳了。Song et al. (2021)、Lee et al. (2023)、Chen et al. (2023) 等工作
+正是建立在这一假设之上——前向边缘分数误差小，意味着反向过程接近真实。
+
+但问题在于：当你真正运行反向采样器（比如 Euler-Maruyama）时，分数函数是在
+**采样器自己的轨迹**上被求值的，而这条轨迹会偏离前向边缘分布。
+训练精度并不能保证采样时的精度。
+本文正式封堵了这个缺口，证明这种脱节不只是常数级别的松弛——
+它可能导致完全的数值爆炸。
+
+```
+[前向边缘分布上的分数匹配]
+              |
+              v
+[前向过程下 L2 分数误差很小]
+              |
+              | 但是...
+              v
+[反向采样器在自身轨迹上求值分数]
+              |
+              | = 采样时的分布偏移
+              v
+[Euler-Maruyama 离散化可能在所有 W_p 矩下发散]
+              |
+              v
+[即使对于光滑、有界、Lipschitz 网络也成立]
+```
+
+## 增量
+
+**一句话**: 本文之前，前向边缘分数误差小被隐含地当作采样稳定性的充分条件；
+本文之后，我们有了严格的反例证明这不充分，并附带一个干净的修复方案。
+
+### 核心机制
+
+本文的结构分为两部分：**负结果**（反例）和**正结果**（修复）。
+
+**反例构造**：Zhou 在一个简单的 1D 问题上构造了一个光滑的分数场。
+学习到的分数在前向边缘分布下的 L² 误差可以任意小。
+由此产生的连续反向时间 SDE 完全良态——非爆炸、所有矩有限、
+与真实反向过程在路径空间全变差距离上任意接近。
+但当你用 Euler-Maruyama 离散化时，离散轨迹可能游走到分数误差爆炸的区域。
+离散化端点的每个正矩都发散。
+弱收敛成立（分布在弱意义下"收敛"），但所有 Wasserstein 距离 W_p（p ≥ 1）都发散。
+论文进一步证明，这可以发生在固定的、有界的、全局 Lipschitz 的神经网络中——
+不仅仅是数学上构造的对抗函数。
+
+**正结果（投影修复）**：对于紧支撑的数据，Zhou 提出将学习到的去噪器输出
+投影到一个包含数据支撑集的已知有界闭凸集上。
+这个投影保持逐点分数精度，给出网格一致的矩界，
+并在温和的局部正则性条件下恢复 Wasserstein 收敛。
+概念上很简单：把去噪器裁剪到已知支撑集范围内。
+
+```
+[学习到的分数 s_theta(x,t)]
+         |
+         v
+[在前向边缘分布上求值] --> L2 误差小（已保证）
+         |
+         | 但在采样时...
+         v
+[沿反向轨迹求值] --> 误差可能爆炸
+         |
+         | 修复：
+         v
+[将去噪器输出投影到支撑集上]
+         |
+         v
+[网格一致矩界 + W_p 收敛]
+```
+
+**核喻——飞行模拟器的比喻**：把分数匹配想象成在飞行模拟器中训练飞行员。
+模拟器非常精确地重现特定天气条件（前向边缘分布），
+你的飞行员（神经网络）在这些条件下表现完美。
+前向边缘误差小就相当于说"模拟器准确率 99.9%"。
+现在你把这位飞行员送上真实天空（反向时间采样轨迹）。
+真实飞行可能进入模拟器从未覆盖过的湍流区（状态空间中的某些区域）。
+飞行员在平静空气中完美校准的反应——在错误的区域会引起控制振荡，
+振荡不断放大直到飞机坠毁。
+离散的 Euler-Maruyama 步就是飞行员的控制输入：
+每一步都很小，但在错误区域会复合叠加。
+"投影修复"等同于自动驾驶包线保护系统：
+无论飞行员做什么，飞机都被物理约束在安全的速度和高度范围内。
+你在关键之处保留了飞行员的精度，但通过裁剪到已知安全区域来防止灾难性偏移。
+
+### 关键概念
+
+- **Wasserstein 距离 vs. 弱收敛**: 想象你在预测飞镖的落点。
+弱收敛说"落在任何给定区域的概率收敛"——就像你的飞镖靶热力图越来越准。
+Wasserstein 距离说"预测落点和实际落点之间的平均距离收敛"。
+本文证明你可以有前者（热力图看起来对）而后者（实际误差）爆炸。
+怎么做到的？飞镖通常落在你预测的附近（弱收敛），
+但偶尔飞得极其离谱，而这些罕见的抛掷糟糕到使平均距离无穷大。
+这就是"通常对"和"从不灾难性地错"之间的区别。
+
+- **前向边缘分布 vs. 反向轨迹**: 前向过程从真实数据开始，逐步加噪——
+就像用酸慢慢溶解一座雕塑。
+前向边缘分布就是每个时间点上半溶解雕塑的快照。
+反向过程从纯噪声开始，试图恢复雕塑。
+关键洞察：反向过程不会走过前向过程访问过的同一状态。
+它在状态空间中开辟自己的路径。
+分数匹配对着前向快照检验你的"雕刻指令"，
+但在生成时你是按照这些指令在未知领域中行进。
+
+- **投影到凸集**: 如果你知道数据生活在一个盒子里（比如像素值在 [0, 255]），
+而你的去噪器预测了超出这个盒子的值，就把它裁剪回来。
+这听起来简单得不像一个理论贡献，
+但论文证明它有深远的后果：它一致地约束所有矩，防止数值爆炸，
+并恢复 Wasserstein 收敛。
+不显而易见的部分是，这个看似平凡的操作被严格证明打破了失败模式。
+
+## 框架转变
+
+```
+之前（主流方法）：                  之后（本文方法）：
+
+[前向边缘上的]                     [前向边缘上的]
+[分数误差]                         [分数误差]
+       |                                    |
+       v                                    v
+  "收敛"                           [数值上可能发散]
+  [假设对采样                       [如果轨迹发生偏移]
+   成立]                                    |
+                                           v
+                                    [需要轨迹感知的
+                                     控制：投影]
+                                           |
+                                           v
+                                    [可证明的 W_p 收敛]
+```
+
+从"信赖前向边缘保证"到"在采样轨迹上验证并约束"，
+核心转变是：训练时的指标与采样时的稳定性保证从根本上是脱钩的。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实且重要的缺口。
+扩散理论界一直在前向边缘分数误差之上构建收敛率，
+却没有正式处理这个分布偏移问题。
+这是那种大家半信半疑但没人钉死的问题。
+论文处于随机数值方法和深度学习理论的交叉点——
+正是严格工作最稀缺也最需要的地方。
+
+**方法成熟度**: 反例构造用的是巧劲，不是蛮力。
+1D 简化选择得很好——它剥离了所有架构复杂性，隔离出纯粹的数学现象。
+Lipschitz 网络构造将结果推广到实际架构，是更强的贡献。
+投影修复优雅且简单，虽然有人会指出它需要知道数据支撑集，
+这在高维中并不总是可用的。
+论文没有探索近似投影或学习到的支撑集估计。
+
+**实验诚意**: 实验使用小型 DiT 网络，对理论论文来说合理。
+罕见轨迹上的大幅增长及其被投影抑制的演示有说服力。
+但实验仅限于低维设置。
+实践者会想知道：这个失败模式在大规模潜扩散模型中真的会咬人吗？
+论文坦诚地承认了这一局限，但没有尝试弥合。
+
+**写作功力**: 数学表达干净且结构良好。
+反例到修复的叙事弧线令人满意。
+作者偷懒的地方：与实际扩散模型训练的连接本可以更强。
+第5节（实验）读起来像事后补充——
+再加一张图展示在现实（即使很小的）图像生成任务中的故障率，
+就能大幅提升论文影响力。
+从1D理论到网络构造（定理4）的过渡值得用单独小节展开更多直觉。
+
+**判决**: 弱接收——一个真正新颖的理论洞察，证明结构干净，
+但1D反例与真实扩散模型之间的实践鸿沟限制了其即时影响。
+
+## 要点总结
+
+1. **不要把前向边缘误差当作唯一的收敛保证。**
+如果你在构建扩散模型理论或做严格评估，
+你需要考虑训练（前向边缘分布）和采样（反向轨迹）之间的分布偏移。
+
+2. **投影是一个廉价且有理论支撑的安全网。**
+如果你的数据有已知支撑集（图像在 [0,1]，音频在 [-1,1] 等），
+将去噪器输出投影到该集合上几乎零成本，
+且被严格证明能防止数值爆炸失败模式。
+这个可以直接实现。
+
+3. **弱收敛但无 Wasserstein 收敛是一个真实的陷阱。**
+在实践中，这意味着你的样本通常看起来不错，
+但偶尔会出现灾难性的糟糕输出。
+如果你在扩散生成的样本中看到罕见但极端的伪影，
+本文的机制是一个合理的解释——投影就是修复方案。
+
+4. **对理论研究者而言**: 本文开辟了一个具体的研究方向——
+刻画前向到反向分布偏移在特定分数网络架构和噪声调度下
+何时以及多强地影响采样。
+1D构造是发射台，不是终点。
+:::
