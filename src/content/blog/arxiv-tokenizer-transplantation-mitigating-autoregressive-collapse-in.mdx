@@ -1,0 +1,338 @@
+---
+title:
+  en: "Tokenizer Transplantation: Making English ASR Models Speak Bengali"
+  zh: "词表移植：让英语 ASR 模型学会说孟加拉语"
+description:
+  en: "A simple vocabulary swap from English bytes to Bengali WordPiece tokens eliminates autoregressive collapse in lightweight ASR models, cutting token fertility by 86% without retraining."
+  zh: "将英语字节词表替换为孟加拉语 WordPiece 词表，即可消除轻量级 ASR 模型的自回归崩溃问题，将词元生育率降低 86%，且无需重新预训练。"
+date: 2026-07-13
+tags: ["arxiv", "ai", "cs.cl"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.09598](https://arxiv.org/abs/2607.09598)
+**Authors**: Sanjid Hasan, Md. Abdur Rahman
+**Categories**: cs.CL
+
+## The Gap
+
+Edge-efficient ASR models like Moonshine are heavily optimized for English. They use byte-level tokenizers (like ByT5's approach) that work beautifully for Latin scripts — one or two bytes per character, predictable decoding. But Bengali is a different beast: it's an abugida script with conjunct consonants, vowel signs, and complex grapheme clusters. When you feed Bengali through a byte-level tokenizer trained on English assumptions, words explode into chains of 9+ bytes on average. The decoder, trained to emit one token per meaningful unit, suddenly faces sequences 8-9x longer than expected. This triggers **autoregressive collapse** — the model degenerates into repeating tokens or producing garbage, because it was never trained to handle such long decoding chains.
+
+Prior work either (a) trains models from scratch on Bengali (expensive, requires massive data), (b) uses multilingual models that are too heavy for edge deployment, or (c) fine-tunes but keeps the broken tokenizer, treating the symptom without fixing the cause. Nobody asked: what if we just swap the tokenizer's vocabulary wholesale?
+
+```
+English-centric            Bengali audio input         Byte-level tokenizer
+byte-level ASR     +-----> "আমার সোনার বাংলা"  +-----> 9.16 bytes/word avg
+on Bengali                 (morphologically rich)      fragments everything
+                                                      |
+                                                      v
+                                                 Autoregressive collapse
+                                                 (sequence too long,
+                                                  model degenerates)
+                                                      |
+                                                      v
+                                                 Garbage output / loops
+
+Proposed fix:  Transplant BanglaBERT WordPiece vocab
+               + resize embedding layer
+               + keep encoder weights frozen
+               |
+               v
+               1.30 tokens/word avg
+               85.8% shorter sequences
+               |
+               v
+               Stable decoding, 21.54% WER
+```
+
+## The Increment
+
+**One sentence**: Before this paper, adapting a compact English ASR model to Bengali meant expensive retraining or accepting broken behavior; after, a surgical vocabulary transplant achieves competitive accuracy with zero pre-training cost.
+
+### Core Mechanism
+
+The method has three stages: extraction, transplantation, and alignment.
+
+**Stage 1 — Extract.** The authors pull the WordPiece vocabulary from BanglaBERT, a Bengali-specific masked language model. This vocabulary contains ~30K subword units that natively represent Bengali morphemes, common conjuncts, and word stems. It's the "Bengali dictionary" the target model never had.
+
+**Stage 2 — Transplant.** The decoder's vocabulary is replaced wholesale. The token embedding matrix is resized from the original English byte-vocab dimensions to match BanglaBERT's vocabulary size. New embedding vectors are initialized (the paper doesn't specify the exact initialization, which is a minor gap). The decoder head is similarly resized to output logits over the new vocabulary.
+
+**Stage 3 — Fine-tune.** Only the decoder and embedding layers are trained on Bengali speech data (the Lipi-Ghor dataset, 882 hours). The encoder — which handles acoustic features — can be frozen or lightly fine-tuned, since acoustic representation is more script-agnostic.
+
+```
+BanglaBERT           Moonshine ASR
+(Bengali LM)         (English ASR)
+     |                     |
+     v                     v
+[WordPiece Vocab]    [Byte-level Vocab]
+  ~30K tokens         256 bytes
+     |                     |
+     +--------+  +---------+
+              |  |
+              v  v
+         [Transplant]
+         replace vocab
+         resize embeddings
+         resize decoder head
+              |
+              v
+     [Fine-tune decoder on]
+     [Bengali speech data]
+              |
+              v
+     Bengali-capable
+     edge ASR model
+```
+
+**The structural metaphor: Organ transplant surgery.**
+
+Think of the ASR model as a patient whose brain (encoder) processes sound just fine, but whose mouth and tongue (decoder + tokenizer) only know how to speak English. When Bengali audio comes in, the brain hears it correctly, but the mouth tries to produce English phonemes — it stutters, loops, and collapses.
+
+The paper's approach is like a tongue transplant. You take a healthy Bengali tongue from a cadaver (BanglaBERT's vocabulary), surgically swap it into the patient (resize embeddings, replace decoder vocab), then spend weeks in rehab (fine-tune on Bengali speech). The brain doesn't need replacement — it was hearing sounds correctly all along. The critical insight is that you don't need to rebuild the whole patient; you just need the right tongue.
+
+The "anti-rejection drugs" in this analogy are the fine-tuning steps — you can't just swap and walk away. The decoder needs to learn to coordinate with the new vocabulary, mapping Bengali subword tokens to acoustic patterns. But because the encoder is preserved, the rehabilitation is short and cheap.
+
+### Key Concepts
+
+- **Token Fertility**: Imagine reading a book where every word is split into individual letters with spaces between them. "Hello" becomes "H e l l o" — five tokens instead of one. That's what happens when Bengali meets an English byte tokenizer. Fertility measures how many tokens each original word gets split into. Bengali through English bytes: 9.16 tokens per word. Bengali through Bengali WordPiece: 1.30 tokens per word. Lower fertility = shorter sequences = faster, more stable decoding. It's the single most diagnostic metric in this paper.
+
+- **Autoregressive Collapse**: An autoregressive model generates one token at a time, feeding each output back as input for the next step. When sequences are much longer than training data ever showed, small errors compound. The model might start repeating the same token, or produce increasingly unlikely tokens until output is meaningless. Think of it like a game of telephone — the longer the chain, the worse the signal degradation. By shortening sequences 85.8%, the paper sidesteps this failure mode entirely.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+  Bengali audio                        Bengali audio
+       |                                    |
+       v                                    v
+  [Fixed English tokenizer]            [Bengali WordPiece vocab]
+       |                                    |
+       v                                    v
+  Long byte sequences                  Short subword sequences
+  (9x expected length)                 (1.3 tokens/word)
+       |                                    |
+       v                                    v
+  [Decoder trained on                  [Decoder fine-tuned on
+   English sequences]                   Bengali sequences]
+       |                                    |
+       v                                    v
+  Autoregressive collapse              Stable generation
+  / garbage output                     21.54% WER
+
+  Core assumption:                     Core assumption:
+  Tokenizer is architecture,           Tokenizer is a component,
+  not a replaceable part               swappable like a plug
+```
+
+From treating the tokenizer as a fixed architectural commitment to treating it as a swappable component, the core shift is **vocabulary modularity** — the idea that you can decouple acoustic processing from script-specific tokenization.
+
+## Expert Assessment
+
+**Problem choice**: This is a genuine, underexplored gap. Most edge ASR work focuses on English and a handful of high-resource languages. Bengali has 230M+ speakers and is structurally different enough from English to expose real failure modes. The identification of byte-level tokenization as the root cause (not just "model too small" or "not enough data") is sharp and well-motivated.
+
+**Method maturity**: It's a clever surgical insight executed with straightforward engineering. The "transplant" is not novel in isolation — people have swapped tokenizers before in NLP — but applying it specifically to fix autoregressive collapse in edge ASR is the contribution. One concern: the paper doesn't deeply explore initialization strategies for the new embeddings. Random initialization works, but would better initialization (e.g., from acoustic-semantic alignment) help more? Also, a simpler baseline like just using a multilingual SentencePiece vocab might have been worth comparing.
+
+**Experimental integrity**: The 882-hour Lipi-Ghor dataset is a reasonable scale. The WER of 21.54% is competitive but not SOTA for Bengali ASR in absolute terms — though the point is edge efficiency, not beating cloud models. The RTF of 0.0053 is convincingly fast. Main flag: no ablation on how much the encoder needs retraining. Is the encoder truly plug-and-play, or does it need more work than claimed? A frozen-encoder vs. fine-tuned-encoder comparison would strengthen the paper.
+
+**Writing quality**: The paper is clear but brief to a fault. Section 3 (method) reads more like a recipe than an explanation — you can follow the steps but don't always understand **why* each choice was made. The related work section is thin; it doesn't engage with the broader tokenizer adaptation literature from machine translation (where subword segmentation has been debated for years). A deeper discussion of why WordPiece specifically (vs. BPE, SentencePiece, unigram) would elevate the framing significantly.
+
+**Verdict**: weak accept — A clean, practical contribution with a clear problem-solution fit, but underexplored in depth and missing key ablations that would make it a strong paper.
+
+## Takeaways
+
+**1. Diagnose before fixing.** The paper's real contribution is the diagnosis — byte-level tokenizer fertility as root cause of collapse — not just the fix. Practitioners working on multilingual models should measure token fertility per language **before* assuming the model architecture is the bottleneck.
+
+**2. Vocabulary is a component, not architecture.** Treat your tokenizer's vocabulary as a swappable module. If you're adapting a model to a new language/script, consider whether a vocabulary transplant (from a pretrained LM in the target language) could be cheaper than full retraining.
+
+**3. Sequence length is a hidden cost multiplier.** In autoregressive models, doubling sequence length doesn't just double compute — it compounds decoding instability. Any preprocessing that shortens sequences (better tokenization, compression, summarization) has outsized effects on reliability.
+
+**4. Encoder-decoder models have asymmetric script sensitivity.** Encoders handling acoustic features are relatively script-agnostic. Decoders generating tokens are deeply script-coupled. This asymmetry means you can often freeze the encoder and only swap/adapt the decoder side — a much cheaper operation.
+:::
+
+:::zh
+**论文**: [2607.09598](https://arxiv.org/abs/2607.09598)
+**作者**: Sanjid Hasan, Md. Abdur Rahman
+**分类**: cs.CL
+
+## 缺口
+
+边缘端 ASR 模型（如 Moonshine）为英语高度优化，采用字节级分词器。
+这种分词器对拉丁字母表现极好——每个字符一两个字节，解码可预测。
+但孟加拉语完全不同：它是一种元音附标文字，有复合辅音、元音符号和复杂的字素簇。
+把孟加拉语喂进英语字节级分词器，每个词平均炸成 9.16 个字节。
+解码器从未见过这么长的序列，于是触发**自回归崩溃**——模型开始重复输出或产生乱码。
+
+此前的工作要么从头训练孟加拉语模型（昂贵）、要么用多语言大模型（无法边缘部署）、要么微调但保留坏掉的分词器（治标不治本）。
+没人问过：能不能直接把词表换掉？
+
+```
+英语字节级 ASR       孟加拉语音频输入       字节级分词器
+部署在孟加拉语 +----> "আমার সোনার বাংলা" +-----> 每词 9.16 字节
+                    (形态丰富)                    全部碎片化
+                                                  |
+                                                  v
+                                           自回归崩溃
+                                          (序列过长，
+                                           模型退化)
+                                                  |
+                                                  v
+                                           输出乱码/循环
+
+修复方案:  移植 BanglaBERT WordPiece 词表
+           + 调整嵌入矩阵大小
+           + 冻结编码器权重
+           |
+           v
+           每词 1.30 个词元
+           序列缩短 85.8%
+           |
+           v
+           稳定解码，WER 21.54%
+```
+
+## 增量
+
+**一句话**: 在此之前，把轻量英语 ASR 模型适配到孟加拉语意味着昂贵的重训练或接受坏掉的行为；
+在此之后，一次外科手术般的词表移植就能达到有竞争力的准确率，且零预训练成本。
+
+### 核心机制
+
+方法分三个阶段：提取、移植、对齐。
+
+**第一阶段——提取。** 从 BanglaBERT（孟加拉语专用掩码语言模型）中提取 WordPiece 词表。
+该词表包含约 3 万个子词单元，能原生表示孟加拉语的词素、常见复合辅音和词干。
+这是目标模型从未拥有的"孟加拉语词典"。
+
+**第二阶段——移植。** 解码器的词表被整体替换。
+词元嵌入矩阵从原来的英语字节词表维度调整为匹配 BanglaBERT 词表的大小。
+解码器头部同样调整，以输出新词表上的 logits。
+
+**第三阶段——微调。** 仅解码器和嵌入层在孟加拉语语音数据（Lipi-Ghor 数据集，882 小时）上训练。
+编码器负责声学特征处理，可以冻结或轻度微调——声学表征相对不依赖于文字系统。
+
+```
+BanglaBERT           Moonshine ASR
+(孟加拉语 LM)        (英语 ASR)
+     |                     |
+     v                     v
+[WordPiece 词表]     [字节级词表]
+  ~3 万个词元          256 字节
+     |                     |
+     +--------+  +---------+
+              |  |
+              v  v
+         [移植手术]
+         替换词表
+         调整嵌入矩阵
+         调整解码器头部
+              |
+              v
+     [在孟加拉语语音上微调解码器]
+              |
+              v
+     孟加拉语可用的
+     边缘端 ASR 模型
+```
+
+**结构比喻：器官移植手术。**
+
+把 ASR 模型想象成一个病人。他的大脑（编码器）能正确处理声音，但他的舌头和喉咙（解码器+分词器）只会说英语。
+当孟加拉语音频进来时，大脑听得对，但嘴巴试图发出英语音素——卡壳、循环、崩溃。
+
+这篇论文的做法就像舌头移植手术。
+从捐献者身上取一条健康的孟加拉语舌头（BanglaBERT 的词表），
+手术植入病人体内（调整嵌入、替换词表），
+然后花几周时间康复训练（在孟加拉语语音上微调）。
+大脑不需要替换——它一直都能正确听见声音。
+关键洞见是：你不需要重建整个病人，只需要换对舌头。
+
+这里的"抗排异药物"就是微调步骤——你不能换了舌头就走人。
+解码器需要学会和新词表协调，把孟加拉语子词映射到声学模式。
+但因为编码器被保留了，康复期短且便宜。
+
+### 关键概念
+
+- **词元生育率（Token Fertility）**: 想象你在读一本书，但每个词都被拆成了单个字母。
+  "你好"变成了"你 好"——两个词元而不是一个。
+  这就是孟加拉语遇到英语字节分词器时发生的事。
+  生育率衡量每个原始词被拆成多少个词元。
+  孟加拉语通过英语字节：每词 9.16 个词元。
+  孟加拉语通过孟加拉语 WordPiece：每词 1.30 个词元。
+  生育率越低 = 序列越短 = 解码更快更稳定。
+  这是本文最核心的诊断指标。
+
+- **自回归崩溃（Autoregressive Collapse）**: 自回归模型每次生成一个词元，
+  把每个输出反馈为下一个输入。
+  当序列远超训练时见过的长度，小误差会累积放大。
+  模型可能开始重复同一个词元，或者输出越来越不可能的词元直到完全无意义。
+  就像传话游戏——链条越长，信号衰减越严重。
+  通过将序列缩短 85.8%，论文完全绕过了这个故障模式。
+
+## 框架转变
+
+```
+之前（主流方法）：                  之后（本文方法）：
+
+  孟加拉语音频                       孟加拉语音频
+       |                                 |
+       v                                 v
+  [固定的英语分词器]                [孟加拉语 WordPiece 词表]
+       |                                 |
+       v                                 v
+  长字节序列                         短子词序列
+  (9 倍于预期长度)                  (每词 1.3 个词元)
+       |                                 |
+       v                                 v
+  [在英语序列上训练的解码器]        [在孟加拉语序列上微调的解码器]
+       |                                 |
+       v                                 v
+  自回归崩溃/乱码输出               稳定生成，WER 21.54%
+
+  核心假设：                        核心假设：
+  分词器是架构的一部分，            分词器是一个组件，
+  不可替换                          像插头一样可替换
+```
+
+从把分词器视为固定架构承诺，到把它视为可替换组件，
+核心转变是**词表模块化**——将声学处理与文字系统特定的分词解耦。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实且被低估的缺口。
+大多数边缘端 ASR 工作聚焦于英语和少数高资源语言。
+孟加拉语有 2.3 亿+使用者，结构与英语足够不同，能暴露真实的故障模式。
+将字节级分词器识别为根因（而非"模型太小"或"数据不够"）这一判断，尖锐且有据。
+
+**方法成熟度**: 巧妙的外科洞见，用直截了当的工程实现。
+"移植"本身在 NLP 中并非全新——人们换过分词器——
+但专门用来修复边缘端 ASR 的自回归崩溃，这是贡献所在。
+一个疑虑：论文没有深入探讨新嵌入的初始化策略。
+随机初始化能用，但更好的初始化（比如声学-语义对齐）会不会更有效？
+另外，一个更简单的基线（如直接用多语言 SentencePiece 词表）是否值得比较？
+
+**实验诚意**: 882 小时的 Lipi-Ghor 数据集规模合理。
+WER 21.54% 在绝对值上不是孟加拉语 ASR 的 SOTA——
+但重点是边缘端效率，不是打败云端模型。
+RTF 0.0053 的速度令人信服。
+主要红旗：没有关于编码器需要多少重训练的消融实验。
+编码器真的是即插即用吗，还是比声称的需要更多工作？
+冻结编码器 vs. 微调编码器的对比会大幅增强论文。
+
+**写作功力**: 论文清晰但简短到了吝啬的程度。
+第三章（方法）读起来更像菜谱而非解释——你能跟步骤但不一定理解*为什么*做每个选择。
+相关工作部分单薄，没有与机器翻译中更广泛的词表适配文献对话（子词分割在那边被讨论多年了）。
+深入讨论为什么选 WordPiece（而非 BPE、SentencePiece、unigram）会显著提升立论框架。
+
+**判决**: 弱接收——一个干净、实用的贡献，问题-方案契合度清晰，但在深度上探索不足，缺少关键消融实验来支撑为强论文。
+
+## 要点总结
+
+**1. 先诊断再修复。** 论文真正的贡献是诊断——字节级分词器的生育率是崩溃的根因——而不仅仅是解决方案。做多语言模型的实践者应在假设模型架构是瓶颈之前，先测量每种语言的词元生育率。
+
+**2. 词表是组件，不是架构。** 把分词器的词表当作可替换模块。如果要将模型适配到新语言/文字系统，考虑词表移植（从目标语言的预训练 LM 中取）是否比重训练整个模型更便宜。
+
+**3. 序列长度是隐藏的代价乘数。** 在自回归模型中，序列长度翻倍不只是计算量翻倍——它还会累积解码不稳定性。任何能缩短序列的预处理（更好的分词、压缩、摘要）都会对可靠性产生超线性效果。
+
+**4. 编码器-解码器模型对文字系统的敏感度是不对称的。** 处理声学特征的编码器相对不依赖文字系统。生成词元的解码器与文字系统深度耦合。这种不对称意味着你通常可以冻结编码器、只替换/适配解码器侧——便宜得多的操作。
+:::
