@@ -1,0 +1,423 @@
+---
+title:
+  en: "Requential Coding: Measuring What a Model Actually Learns, Not How Big It Is"
+  zh: "重序编码：衡量模型实际学到了什么，而非它有多大"
+description:
+  en: "A new compression framework where a teacher samples from the student's distribution, yielding code lengths independent of parameter count and data entropy — unlocking state-of-the-art PAC-Bayes bounds for billion-parameter LLMs."
+  zh: "一种新的压缩框架，教师从学生分布中采样，使得编码长度与参数量和数据熵无关——为十亿参数 LLM 带来最优的 PAC-Bayes 泛化保证。"
+date: 2026-07-14
+tags: ["arxiv", "ai", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.11883](https://arxiv.org/abs/2607.11883)
+**Authors**: Shikai Qiu, Marc Finzi, Yujia Zheng, Kun Zhang, Andrew Gordon Wilson
+**Categories**: cs.LG
+
+## The Gap
+
+Compression is a lens for understanding generalization: a model that compresses its training data well has discovered real structure. But existing compressors for neural networks have two fatal blind spots.
+
+**Parameter-based methods** (quantization, pruning, distillation) measure compression by how few bits you need to store the weights. This code length scales with model size — a 70B model compressed to 4 bits is still 35GB — and is completely insensitive to how much information those parameters actually encode about the data. A model that memorizes everything and a model that discovers elegant structure get the same treatment.
+
+**Prequential coding** (Hinton & Van Camp, 2003; Blier & Ollivier, 2018) is smarter: it compresses the training trajectory, coding each data point conditioned on all previous points. But it still codes the **exact data sequence*, so its code length is upper-bounded by the data entropy. If you train on high-entropy images, you pay a huge code regardless of how much the model learns. The compressor doesn't adapt to the model's actual knowledge.
+
+The gap: **no existing method produces a code length that is simultaneously independent of parameter count AND independent of data entropy, while still reflecting what the model genuinely learns.**
+
+This paper fills that gap with "requential coding."
+
+```
+Problem: Compression should reflect what a model learns
+        |
+        v
+Prior 1: Quantization/pruning -> code ~ parameter count
+         (ignores learned structure)
+        |
+Prior 2: Prequential coding -> code ~ data entropy
+         (ignores model's actual knowledge)
+        |
+        v
+Insight: Let a teacher sample FROM the student's distribution
+         Only pay bits for disagreements
+        |
+        v
+Method: Requential coding
+         code = selections where teacher/student diverge
+        |
+        v
+Result: Code independent of params AND data entropy
+        Orders of magnitude shorter
+        SOTA PAC-Bayes bounds for billion-param LLMs
+```
+
+## The Increment
+
+**One sentence**: Before this paper, compressing a neural network always conflated model size or data complexity with learned structure; after this paper, we have a compression scheme that measures **only* the information gap between a powerful teacher and the student, yielding generalization bounds that actually tighten as models get bigger.
+
+### Core Mechanism
+
+Requential coding has three actors: a **student** (the model being evaluated), a **teacher** (a stronger model or ensemble that approximates the true data-generating distribution), and a **coder** that must transmit the student's learned knowledge using as few bits as possible.
+
+The process works in rounds. At each round, the teacher draws a candidate sample from the *student's* predictive distribution over data. The teacher then decides: is this sample one the student "already knows" (i.e., the teacher would have generated it too), or is it one the student would get wrong? If the teacher would have picked the same sample, no bits are needed — the coder and decoder agree. If the teacher would have picked something different, the coder must transmit a selection index, costing bits proportional to the *disagreement* between teacher and student distributions.
+
+The total code length is the sum of these disagreement costs across all rounds. Crucially, this sum depends on neither the number of parameters in the student nor the entropy of the raw data. It depends only on how much the student's learned distribution diverges from the teacher's.
+
+```
+                    REQUENTIAL CODING FLOW
+                    ======================
+
+    [Teacher Distribution]     [Student Distribution]
+            |                          |
+            v                          v
+    Teacher draws sample         Student's predictive
+    FROM student dist            distribution
+            |                          |
+            +-----------+--------------+
+                        |
+                        v
+               Do teacher and student
+               agree on this sample?
+                      / \
+                    /     \
+                  /         \
+           [YES: no bits]   [NO: transmit selection index]
+                |                    |
+                v                    v
+           Cost = 0            Cost = log(1/p_student)
+           (free)              (disagreement penalty)
+                |                    |
+                +--------+-----------+
+                         |
+                         v
+                  Total code length =
+                  Sum of disagreement costs
+                         |
+                         v
+                  Independent of:
+                  - parameter count
+                  - data entropy
+```
+
+**The metaphor — a bespoke exam designed by an omniscient tutor:**
+
+Imagine you're studying for a certification exam. Your tutor has perfect knowledge of the subject. The tutor designs a custom test for you by randomly picking questions from *your own practice materials* — the things you've been studying.
+
+Here's the key move: the tutor only writes down the questions where they think you'd get the wrong answer. Questions you'd nail? The tutor skips them — zero cost, nothing to write down. The "exam length" is just the number of questions the tutor had to include.
+
+If you've truly mastered the material, the tutor's exam is nearly empty. If there are big gaps in your understanding, the exam grows. The exam length has nothing to do with how thick your textbook is (parameter count) or how hard the subject is in general (data entropy). It measures *your* specific knowledge gaps.
+
+Now replace "tutor" with a powerful teacher model, "you" with the student model, "questions" with data samples, and "exam length" with bits. That's requential coding.
+
+The teacher draws samples from the student's distribution. When the student's distribution matches the teacher's — when the student "knows" the material — those samples cost nothing. When they diverge, the coder must specify which sample was selected, paying a cost proportional to the surprise. The total cost is the total surprise across all rounds: the model's residual ignorance, nothing more.
+
+### Key Concepts
+
+- **Prequential coding**: Think of watching someone learn a language by reading a book, one page at a time. Prequential coding asks: "Given everything they've read so far, how surprised are they by the next page?" You sum up all those surprises. The total tells you how much the book taught them. The problem: you're coding the **exact pages* of the book, so if the book is written in gibberish (high entropy), the code is long even if the learner picks up patterns. It's like measuring a student's knowledge by the length of the textbook rather than the size of their brain.
+
+- **PAC-Bayes bound**: A mathematically rigorous guarantee that says: "If a model compresses its training data into K bits, then with high probability its test error won't exceed [training error + sqrt(K / n)]." The smaller K is, the tighter the guarantee. Previous work used parameter-based K (huge, scales with model size) or prequential K (still large for high-entropy data). Requential K is dramatically smaller, so the bound is dramatically tighter — the first time this has worked convincingly for billion-parameter models.
+
+- **Teacher-student disagreement**: This is the engine of the whole method. The "cost" of each data sample is the KL divergence between teacher and student distributions at that point. Where they agree, cost is zero. Where they disagree, you pay. This is elegant because it **automatically* ignores the parts of the data that are genuinely random (both teacher and student are equally uncertain, so no structured disagreement) and focuses on parts where the student could learn but hasn't.
+
+## Framework Shift
+
+```
+Before (mainstream approach):         After (this paper):
+
+  [Model weights]                     [Teacher]    [Student]
+       |                                 |              |
+       v                                 v              v
+  Quantize/prune                   Sample from      Predict
+       |                           student dist     distribution
+       v                                 |              |
+  Code length = f(params)               +------+-------+
+       |                                       |
+       v                                       v
+  Large for big models                 Compare: agree?
+  Blind to learned structure                / \
+                                         /     \
+                                   [agree]    [disagree]
+                                      |            |
+                                   cost=0      cost>0
+                                      |            |
+                                      +-----+------+
+                                            |
+                                            v
+                                     Code = sum(disagreements)
+                                     Small, scales with knowledge
+```
+
+From parameter-centric compression to knowledge-centric compression, the core shift is measuring what the model *learned* rather than how many *parameters* it used to learn it.
+
+## Expert Assessment
+
+**Problem choice**: This is a genuine and important gap. The connection between compression and generalization has been theoretically compelling for decades, but practical compressors that actually work for modern LLMs have been missing. The authors identify this with surgical precision and attack the right bottleneck. This sits at the intersection of MDL theory, PAC-Bayes, and practical deep learning — a sweet spot where theory meets engineering.
+
+**Method maturity**: This is a clever insight, not brute force. The idea of sampling from the student's distribution to avoid paying for data entropy is genuinely elegant. The teacher-ensemble approach for approximating the true distribution is pragmatic if expensive. One concern: the method assumes you have access to a "teacher" that's stronger than the student — which is fine for analysis but limits applicability as a standalone tool. The paper doesn't deeply explore what happens when the teacher is only marginally better.
+
+**Experimental integrity**: The PAC-Bayes experiments on billion-parameter LLMs are the headline, and they look solid — the bounds genuinely outperform aggressive quantization baselines, which is remarkable. The multiple-epoch overfitting prediction is a nice validation. The image vs. text entropy analysis is suggestive but would benefit from more controlled experiments isolating modality from architecture. Some of the scaling claims rely on specific teacher choices that could be cherry-picked, though the trend is clear enough.
+
+**Writing quality**: The paper is well-written with strong motivation. Section 3 (the core method) is clear. Where the authors cut corners: the connection between requential coding and the actual bits needed for a real compression scheme (practical codec) is hand-waved — they show the **theoretical* code length but don't demonstrate a practical encoder/decoder pair. Section 6 on the PAC-Bayes application could be tightened; the derivation is standard but the notation jumps between coding frameworks in a way that's hard to follow. The abstract oversells slightly — "orders of magnitude shorter" applies in specific regimes, not universally.
+
+**Verdict**: weak accept — The core idea is elegant and the PAC-Bayes results for LLMs are genuinely new, but the method's reliance on a strong teacher and the gap between theoretical code length and practical compression keep it from being a slam dunk. Worth attention from anyone working on generalization theory or model evaluation.
+
+## Takeaways
+
+1. **Evaluation paradigm shift**: If you care about what a model **knows*, don't count parameters — measure teacher-student disagreement on the student's own distribution. This reframes model evaluation from "how big is it" to "how much does it diverge from a gold standard."
+
+2. **PAC-Bayes is finally practical for LLMs**: The standard PAC-Bayes toolkit has been theoretically available but practically useless for modern models because the code lengths were too large. Requential coding fixes this. If you're working on provable generalization, this is the paper that makes the bound tight enough to be meaningful.
+
+3. **Ensembles as oracles**: Using a larger ensemble as the "teacher" to evaluate a single model is a technique that transfers directly. Want to know if your distilled model actually learned structure or just memorized? Compare its samples against a teacher ensemble — the disagreement rate tells you.
+
+4. **Data quality ≠ data entropy**: The paper's finding that low-entropy text has more learnable structure than high-entropy images is a sharp insight for dataset design. If you're choosing between data sources, the one with more predictable structure gives the model more to learn — even if it looks "simpler."
+:::
+
+:::zh
+**论文**: [2607.11883](https://arxiv.org/abs/2607.11883)
+**作者**: Shikai Qiu, Marc Finzi, Yujia Zheng, Kun Zhang, Andrew Gordon Wilson
+**分类**: cs.LG
+
+## 缺口
+
+压缩是理解泛化的透镜：一个能将训练数据压缩得很短的模型，说明它发现了真正的结构。
+但现有的神经网络压缩方法有两个致命盲区。
+
+**基于参数的方法**（量化、剪枝、蒸馏）用存储权重所需的比特数来衡量压缩。
+这个编码长度随模型规模线性增长——70B 模型压到 4 bit 仍然有 35GB——
+完全不考虑这些参数实际编码了多少关于数据的信息。
+一个死记硬背的模型和一个发现优雅结构的模型，得到的压缩评估完全一样。
+
+**序前编码**（prequential coding，Hinton & Van Camp 2003；Blier & Ollivier 2018）更聪明：
+它压缩训练轨迹，每个数据点在前面所有数据的条件下编码。
+但它仍然编码的是*精确的数据序列*，所以编码长度被数据熵上界约束。
+如果你在高熵图像上训练，不管模型学到多少，都要付出巨大的编码代价。
+压缩器不会随模型的实际知识而自适应。
+
+缺口在于：**没有任何现有方法能同时独立于参数量和数据熵，**
+**同时仍反映模型真正学到了什么。**
+
+本文用"重序编码"（requential coding）填补了这个缺口。
+
+```
+问题：压缩应反映模型学到了什么
+      |
+      v
+前人方案 1：量化/剪枝 -> 编码量 ~ 参数量
+            （忽略学到的结构）
+      |
+前人方案 2：序前编码 -> 编码量 ~ 数据熵
+            （忽略模型的实际知识）
+      |
+      v
+洞见：让教师从学生分布中采样
+      只为分歧部分付出比特
+      |
+      v
+方法：重序编码
+      编码 = 教师/学生分歧处的选择
+      |
+      v
+结果：编码量独立于参数量和数据熵
+      比序前编码短数个量级
+      十亿参数 LLM 的最优 PAC-Bayes 界
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，压缩神经网络总是把模型大小或数据复杂度与学到的结构混为一谈；
+在这篇论文之后，我们有了一种只衡量强教师与学生之间信息差距的压缩方案，
+使得泛化界在模型变大时反而收紧。
+
+### 核心机制
+
+重序编码涉及三个角色：**学生**（被评估的模型）、
+**教师**（更强的模型或集成，近似真实数据生成分布）、
+**编码器**（用尽可能少的比特传输学生学到的知识）。
+
+流程按轮次进行。
+每轮中，教师从*学生的*预测分布中抽取候选样本。
+然后教师判断：这个样本是学生"已经会的"（教师也会生成它），
+还是学生会搞错的？
+如果教师会选相同的样本，不需要比特——编码器和解码器一致。
+如果教师会选不同的样本，编码器必须传输一个选择索引，
+代价与教师和学生分布之间的*分歧*成正比。
+
+总编码长度是所有轮次分歧代价的总和。
+关键是，这个总和既不依赖学生的参数数量，也不依赖原始数据的熵。
+它只取决于学生学到的分布与教师的分布有多大偏差。
+
+```
+                 重序编码数据流
+                 ==============
+
+   [教师分布]            [学生分布]
+      |                      |
+      v                      v
+  教师从学生分布        学生的预测分布
+  中抽取样本                  |
+      |                      |
+      +----------+-----------+
+                 |
+                 v
+         教师和学生
+         对此样本是否一致？
+               / \
+             /     \
+           /         \
+     [一致：0比特]   [不一致：传输选择索引]
+          |                |
+          v                v
+     代价 = 0         代价 = log(1/p_学生)
+     （免费）         （分歧惩罚）
+          |                |
+          +-------+--------+
+                  |
+                  v
+           总编码长度 =
+           分歧代价之和
+                  |
+                  v
+           独立于：
+           - 参数量
+           - 数据熵
+```
+
+**核喻——一位全知导师为你量身定制的考试：**
+
+想象你在备考一个资格认证。
+你的导师对这个学科了如指掌。
+导师从*你自己的学习材料*中随机抽取题目，给你设计一份专属试卷。
+
+关键操作来了：导师只写下他们认为你会答错的题目。
+你肯定能答对的题？导师跳过——零成本，什么都不用写。
+"试卷长度"就是导师不得不加入的题目数量。
+
+如果你真的掌握了材料，导师的试卷几乎是空的。
+如果你的理解有大漏洞，试卷就会变长。
+试卷长度与你的课本有多厚（参数量）无关，
+与这门学科有多难（数据熵）无关。
+它衡量的是*你*的具体知识缺口。
+
+把"导师"换成强教师模型，"你"换成学生模型，
+"题目"换成数据样本，"试卷长度"换成比特数——
+这就是重序编码。
+
+教师从学生分布中抽样。
+当学生的分布匹配教师的分布——当学生"会了"——这些样本零成本。
+当分布偏离时，编码器必须指明选了哪个样本，
+付出与惊讶程度成正比的代价。
+总代价就是所有轮次惊讶之和：模型的残余无知，仅此而已。
+
+### 关键概念
+
+- **序前编码（prequential coding）**：想象看一个人一页页读一本书来学一门语言。
+序前编码问的是："读了前面所有页，他对下一页有多惊讶？"
+把所有惊讶加起来，就是书教给了他多少。
+问题是：你在编码书的*确切页面*，
+所以如果书写的是天书（高熵），编码就长，哪怕学习者其实发现了规律。
+这就像用课本的厚度来衡量学生的知识，而不是用学生脑中的知识量。
+
+- **PAC-Bayes 界**：一个数学上严格的保证，说的是：
+"如果一个模型把训练数据压缩成 K 比特，
+那么以高概率，其测试误差不会超过 [训练误差 + sqrt(K/n)]。"
+K 越小，界越紧。
+此前的工作用基于参数的 K（巨大，随模型规模增长），
+或者序前 K（对高熵数据仍然很大）。
+重序编码的 K 惊人地小，因此界惊人地紧——
+这是第一次对十亿参数模型真正奏效。
+
+- **教师-学生分歧**：这是整个方法的引擎。
+每个数据样本的"代价"是该点上教师与学生分布的 KL 散度。
+他们一致的地方，代价为零。
+他们不一致的地方，你要付出代价。
+这很优雅，因为它*自动*忽略数据中真正随机的部分
+（教师和学生同样不确定，没有结构性分歧），
+聚焦于学生能学但还没学到的部分。
+
+## 框架转变
+
+```
+之前（主流方法）：                 之后（本文方法）：
+
+  [模型权重]                      [教师]      [学生]
+      |                             |            |
+      v                             v            v
+  量化/剪枝                    从学生分布     预测分布
+      |                         中抽样            |
+      v                             |            |
+  编码量 = f(参数量)              +------+-------+
+      |                                  |
+      v                                  v
+  大模型 = 大编码               比较：是否一致？
+  对学到的结构视而不见               / \
+                                  /     \
+                            [一致]     [分歧]
+                               |          |
+                            cost=0     cost>0
+                               |          |
+                               +----+-----+
+                                    |
+                                    v
+                             编码 = sum(分歧)
+                             很小，随知识量缩放
+```
+
+从以参数为中心的压缩到以知识为中心的压缩，
+核心转变是衡量模型*学到了什么*，而非它*用了多少参数*来学。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实且重要的缺口。
+压缩与泛化之间的联系在理论上已有数十年的说服力，
+但面向现代 LLM 的实用压缩器一直缺席。
+作者精准地识别并攻击了正确的瓶颈。
+这个工作处于 MDL 理论、PAC-Bayes 和实用深度学习的交叉点——
+理论与工程相遇的甜蜜地带。
+
+**方法成熟度**: 这是巧劲，不是蛮力。
+通过从学生分布中采样来避免为数据熵买单，这个想法真正优雅。
+用教师集成来近似真实分布是务实的做法，但计算代价不低。
+一个担忧：方法假设你能获得比学生更强的"教师"——
+对于分析来说没问题，但作为独立工具时适用性受限。
+论文没有深入探讨当教师只比学生略强时会发生什么。
+
+**实验诚意**: 十亿参数 LLM 上的 PAC-Bayes 实验是亮点，看起来扎实——
+这些界确实超越了激进的量化基线，这很了不起。
+多轮训练过拟合的预测是不错的验证。
+图像 vs 文本熵的分析有启发性，但需要更受控的实验来隔离模态与架构的影响。
+部分 scaling 主张依赖于特定的教师选择，有可能是挑选过的，
+不过趋势足够清晰。
+
+**写作功力**: 论文写作不错，动机清晰。
+第 3 节（核心方法）很明白。
+作者偷懒的地方：重序编码与实际编码器/解码器之间的联系被轻描淡写——
+他们展示了*理论*编码长度，但没有演示实际的编解码对。
+第 6 节关于 PAC-Bayes 应用的部分可以再收紧；
+推导是标准的，但符号在不同编码框架间跳跃，读起来费劲。
+摘要略有夸大——"短数个量级"只在特定条件下成立，不是普遍结论。
+
+**判决**: 弱接收——核心想法优雅，对 LLM 的 PAC-Bayes 结果确实新颖，
+但方法对强教师的依赖、以及理论编码长度与实际压缩之间的鸿沟，
+让它还不是一篇让人拍桌子的工作。
+对从事泛化理论或模型评估的人来说值得关注。
+
+## 要点总结
+
+1. **评估范式转变**：如果你关心模型**知道什么*，不要数参数——
+在学生自己的分布上测量教师-学生分歧。
+这把模型评估从"它有多大"重新定义为"它与金标准差多少"。
+
+2. **PAC-Bayes 终于对 LLM 可用了**：标准的 PAC-Bayes 工具箱理论上一直在，
+但对现代模型基本没用，因为编码长度太大。
+重序编码解决了这个问题。
+如果你在做可证明的泛化，这篇论文让界紧到了有意义的程度。
+
+3. **集成即预言机**：用更大的集成作为"教师"来评估单个模型，
+这个技术可以直接迁移。
+想知道你的蒸馏模型是真的学到了结构还是只是背下来了？
+把它和教师集成比较——分歧率会告诉你。
+
+4. **数据质量 ≠ 数据熵**：论文发现低熵文本比高熵图像有更多可学习的结构，
+这对数据集设计是一个锐利的洞见。
+如果你在选择数据来源，看起来"更简单"的那一个，
+反而给模型更多可以学到的东西。
+:::
