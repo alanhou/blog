@@ -1,0 +1,406 @@
+---
+title:
+  en: "Hierarchical Denoising: Teaching Video Models to Reason in Steps"
+  zh: "层次化去噪：让视频模型学会分步推理"
+description:
+  en: "A new framework that organizes video generation into tree-structured hierarchies for multi-step visual reasoning, bridging the gap between fast streaming and deep planning."
+  zh: "一种将视频生成组织为树状层次结构的框架，用于多步视觉推理，在快速流式输出与深度规划之间架起桥梁。"
+date: 2026-07-17
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.15278](https://arxiv.org/abs/2607.15278)
+**Authors**: Zezhong Qian, Xiaowei Chi, Chak-Wing Mak, Tianze Zhou, Ruibin Yuan, Yuhan Rui, Hengzhe Sun, Zhuoqun Wu, Yuming Li, Siyuan Qian
+**Categories**: cs.CV
+
+## The Gap
+
+Video generation has matured enormously — we can synthesize photorealistic clips at scale. But there's a stubborn wall: these models don't *reason*. They produce pixels, not plans.
+
+Two camps have tried to fix this. **Streaming autoregressive diffusion** generates frames one by one, which is fast and latency-friendly, but each frame only sees the past — there's no room to revise a bad hypothesis once it's committed. Think of it as a chess player who can only move forward, never reconsider. **Bidirectional diffusion** denoises all frames simultaneously, enabling global revision, but at enormous cost: you pay for dense attention over every frame pair at every denoising step. It's like solving a jigsaw puzzle by looking at all pieces at once — powerful but slow.
+
+The specific gap: nobody has found a way to get *both* global planning (revising hypotheses across time) *and* low-latency streaming output in a single framework for complex multi-step reasoning tasks.
+
+```
+Problem: Video models can generate but cannot reason
+    |
+    v
+Prior approach 1: Streaming autoregressive diffusion
+    |   + Fast, low latency
+    |   - No global revision (commit-and-forget)
+    |
+Prior approach 2: Bidirectional diffusion
+    |   + Global revision possible
+    |   - O(N^2) attention cost, slow inference
+    |
+    v
+Assumption: Reasoning needs both planning AND streaming
+    |
+    v
+Method: Hierarchical latents (coarse-to-fine tree)
+    |   + Coarse layers = global hypotheses
+    |   + Fine layers = concrete states
+    |   + Sparse attention = low cost
+    |
+    v
+Evidence: 60.29 success vs 34.22 baseline (76% gain)
+    |       0.70s/latent vs bidirectional (54x faster)
+    |       82.9% performance with 2% data
+    |
+    v
+Conclusion: Hierarchical structure enables reasoning
+             without sacrificing streaming efficiency
+```
+
+## The Increment
+
+**One sentence**: Before this paper, you had to choose between fast-but-shallow streaming generation and slow-but-thorough bidirectional revision; after HDR, you get structured multi-step reasoning that streams at low latency while planning globally through a coarse-to-fine hierarchy.
+
+### Core Mechanism
+
+HDR's central idea is to restructure the latent space of a video diffusion model into a **tree hierarchy**. Instead of treating all video latents as flat frame-level tokens, HDR organizes them into layers: the top of the tree holds coarse, abstract representations (think: "the robot should move toward the goal"), and lower levels progressively fill in concrete visual details (think: "the arm rotates 30 degrees at timestep t=5"). During denoising, the model first resolves the coarse hypotheses — preserving uncertainty where multiple plans remain viable — then cascades downward, refining each hypothesis into specific visual states.
+
+The attention mechanism is critical here. Standard bidirectional diffusion applies dense attention across all frame pairs — O(N²) cost. HDR replaces this with **Sparse Hierarchical Attention Pattern (SHAP)**: within each level, tokens attend only to their siblings and parent node. This means coarse-level tokens (few in number) attend broadly for global planning, while fine-level tokens (many in number) attend locally for detail refinement. The result is that total attention cost scales much more favorably than dense bidirectional attention, while retaining the ability to revise hypotheses at the coarse level before committing to fine details.
+
+The training follows standard diffusion objectives but stratified by level: coarse levels learn to capture high-level structure and goal states, fine levels learn to fill in temporal and spatial specifics conditioned on their parents. This level-stratified design means the model naturally develops a planning-then-execution dynamic.
+
+```
+Input: Noisy video latents (all frames)
+    |
+    v
+[Tree Structure Construction]
+    |   Frame latents -> grouped into hierarchical levels
+    |
+    +---> Level 0 (Root): Global plan / goal state
+    |         |  Few tokens, broad receptive field
+    |         |  Attend to ALL children
+    |
+    +---> Level 1 (Mid): Sub-goals / intermediate states
+    |         |  Medium tokens
+    |         |  Attend to parent + siblings
+    |
+    +---> Level 2 (Leaf): Concrete frame-level details
+    |         Many tokens, local receptive field
+    |         Attend to parent + siblings only
+    |
+    v
+[Denoising: Coarse to Fine]
+    |
+    +---> Step 1: Denoise Level 0 (preserve multiple hypotheses)
+    +---> Step 2: Denoise Level 1 (conditioned on Level 0)
+    +---> Step 3: Denoise Level 2 (conditioned on Level 1)
+    |
+    v
+Output: Streaming video with coherent multi-step reasoning
+```
+
+### Core Mechanism (continued) — The Metaphor
+
+Imagine you're planning a road trip with a friend. **Without HDR**, you'd either (a) decide each turn as you drive — fast but you might end up lost — or (b) plan every single turn on a giant map before starting — thorough but you'd never leave the parking lot.
+
+**With HDR**, you plan in layers, like a good travel planner:
+
+- **Layer 0 (the executive)**: You sketch the big picture — "We'll go from Beijing to Shanghai, stopping in Nanjing." This is the coarse level. There might be two or three viable routes; you keep them all open for now. This layer has few decisions but enormous influence.
+
+- **Layer 1 (the route planner)**: For each big-picture route, you pick highway segments — "Take G2 to Nanjing, then G42 to Shanghai." This is the middle level. Each route from Layer 0 spawns its own set of segments. You can still revise here, but the options are narrowing.
+
+- **Layer 1 (the turn-by-turn)**: For each highway segment, you specify exact exits and turns. This is the leaf level. By now the plan is concrete and streamable — your GPS can just read it out in real time.
+
+The key insight: you *never* plan every turn for every possible route. The tree structure means coarse-level uncertainty (which route?) is resolved early, and fine-level detail (which exit?) is generated only for the surviving plan. This is exactly how HDR works — coarse denoising preserves hypotheses, fine denoising refines the winner into pixels.
+
+The SHAP attention mirrors this too: the executive (Layer 0) has a bird's-eye view and sees everything below. The turn-by-turn navigator (Layer 2) only sees its own segment and neighboring turns — it doesn't need to re-evaluate the entire trip.
+
+### Key Concepts
+
+- **Hierarchical Latents**: Standard diffusion models treat the latent space as flat — every frame is a peer. Hierarchical latents impose a tree structure where some latents are parents of others. Think of it like an organizational chart vs. a flat team: in a flat team, everyone talks to everyone (expensive, chaotic). In an org chart, the CEO makes strategic calls, managers translate to tactics, and workers execute. The hierarchy compresses global reasoning into fewer tokens at the top, so planning doesn't require attending to every pixel.
+
+- **Coarse-to-Fine Denoising**: In standard diffusion, all latents denoise simultaneously at the same rate. In coarse-to-fine denoising, higher-level latents denoise first and faster, establishing the "skeleton" before lower-level latents fill in the flesh. This is analogous to how an artist sketches composition lines before shading details — you don't start rendering the eye before you know where the head is. The practical benefit: coarse levels can explore multiple hypotheses cheaply (few tokens), and only when a hypothesis is selected do the expensive fine-level tokens get generated.
+
+- **Sparse Hierarchical Attention Pattern (SHAP)**: This is the engineering workhorse. In dense attention, every token attends to every other token — cost grows quadratically with sequence length. SHAP restricts each token's attention to its parent and siblings in the tree. Coarse tokens (few) can still attend broadly because they connect to many children; fine tokens (many) attend narrowly, keeping cost linear-ish. The result: you get the reasoning benefits of bidirectional attention at the coarse level, with the efficiency of streaming at the fine level.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+[Frame 1] [Frame 2] ... [Frame N]     [    Root: Global Plan    ]
+     |          |            |          /        |        \
+  flat attention or causal   |      [Mid 1]  [Mid 2]  [Mid 3]
+                              |      / | \    / | \    / | \
+  Bidirectional:              |   [L] [L] [L][L] [L] [L][L] [L]
+  Everyone sees everyone      |
+  O(N^2) cost                 |   Coarse-to-fine denoising
+  No streaming                |   Sparse attention (parent+sibling)
+                              |   Streaming output at leaf level
+  Autoregressive:
+  Each frame sees only past
+  No revision possible
+```
+
+From flat bidirectional/global-vs-local tradeoff to hierarchical coarse-to-fine planning, the core shift is **restructuring the latent space itself so that reasoning and streaming coexist by operating at different levels of abstraction**.
+
+## Expert Assessment
+
+**Problem choice**: This is a genuine gap. The tension between streaming efficiency and global reasoning in diffusion-based video models is real and increasingly important as these models move toward embodied AI and world modeling. The problem isn't manufactured — it's the natural next bottleneck after video quality plateaued. That said, the tasks chosen (maze, Tower of Hanoi, Sokoban) are synthetic puzzles with clear ground truth, which makes evaluation clean but doesn't necessarily prove the approach works for open-world reasoning.
+
+**Method maturity**: The hierarchical latent idea is clever and well-motivated — it's not brute force. The tree structure is a natural fit for planning problems, and SHAP is a sensible engineering choice. However, the paper doesn't deeply explore **why* the specific tree topology matters vs. alternatives (e.g., multi-resolution grids, random hierarchy). There's a risk the tree structure is overfit to the puzzle-like evaluation domain. The coarse-to-fine denoising schedule also feels like it could be more principled — the paper doesn't ablate the number of levels or the granularity boundaries thoroughly.
+
+**Experimental integrity**: The baselines are reasonable — they compare against both streaming autoregressive and bidirectional diffusion approaches. The 76% relative improvement on success rate is impressive, and the 54x inference speedup over bidirectional is the kind of number that matters in practice. The data efficiency result (82.9% with 2% data) is striking but raises a question: are the puzzles so structured that 2% is enough to learn the hierarchy, or does this generalize? The out-of-distribution evaluation is a good sign, but I'd want to see harder, more compositional tasks. The real-world robot experiment is mentioned but feels like a teaser rather than a rigorous evaluation.
+
+**Writing quality**: The paper is reasonably clear but the Related Work section could be tighter — it spends time on general video diffusion rather than focusing on the specific reasoning gap. The method section would benefit from a cleaner separation between the formal description and the intuition. The benchmark contribution (six tasks with OOD cases) is valuable but undersold — a dedicated section analyzing task difficulty and failure modes would elevate the paper significantly.
+
+**Verdict**: weak accept — The hierarchical approach is a genuine structural insight that addresses a real tradeoff, and the results are strong on synthetic tasks. But the evaluation domain is narrow, and the paper doesn't fully convince that this transfers beyond puzzles to open-ended visual reasoning.
+
+## Takeaways
+
+Three things you can steal from this paper:
+
+1. **Hierarchical latent structuring for planning problems**: If your task involves multi-step decisions over sequences, consider imposing a tree structure on your latent space. Coarse latents handle strategy, fine latents handle execution. This isn't limited to video — it applies to any sequential generation where planning matters (code generation, robotic trajectories, long-form text).
+
+2. **The coarse-to-fine denoising schedule as a hypothesis filter**: The idea of preserving uncertainty at coarse levels and only committing at fine levels is a general principle. In any system where you need to explore multiple plans cheaply before selecting one, this "keep hypotheses alive at the top, prune at the bottom" pattern is useful.
+
+3. **Sparse attention by hierarchy, not just by distance**: Most efficient attention mechanisms use sliding windows or dilated patterns based on temporal distance. SHAP instead sparsifies based on **structural role* in the hierarchy — parents see broadly, leaves see narrowly. This is worth trying in any transformer where the sequence has a natural tree structure (parse trees, scene graphs, organizational data).
+:::
+
+:::zh
+**论文**: [2607.15278](https://arxiv.org.org/abs/2607.15278)
+**作者**: Zezhong Qian, Xiaowei Chi, Chak-Wing Mak, Tianze Zhou, Ruibin Yuan, Yuhan Rui, Hengzhe Sun, Zhuoqun Wu, Yuhan Rui, Siyuan Qian
+**分类**: cs.CV
+
+## 缺口
+
+视频生成技术已经高度成熟——我们能合成逼真的视频片段。
+但有一堵顽固的墙：这些模型不会"推理"。
+它们产出的是像素，不是计划。
+
+两个阵营尝试过突破。
+**流式自回归扩散**逐帧生成，速度快、延迟低，
+但每一帧只能看到过去——一旦做出错误假设就无法回头。
+好比一个只会往前走、从不反思的棋手。
+**双向扩散**同时去噪所有帧，允许全局修正，
+但代价高昂：每一步去噪都要对所有帧对做稠密注意力。
+就像一次性盯着所有拼图碎片解谜——强大但缓慢。
+
+具体缺口在于：没有人找到一种方法，
+在复杂的多步推理任务中同时实现全局规划和低延迟流式输出。
+
+```
+问题：视频模型能生成但不能推理
+    |
+    v
+方案一：流式自回归扩散
+    |   + 快速，低延迟
+    |   - 无法全局修正（一旦输出就无法回头）
+    |
+方案二：双向扩散
+    |   + 可以全局修正
+    |   - O(N^2) 注意力开销，推理慢
+    |
+    v
+假设：推理既需要规划也需要流式输出
+    |
+    v
+方法：层次化隐变量（粗到细的树结构）
+    |   + 粗层 = 全局假设
+    |   + 细层 = 具体状态
+    |   + 稀疏注意力 = 低开销
+    |
+    v
+证据：成功率 60.29 vs 基线 34.22（提升76%）
+    |   0.70秒/隐变量 vs 双向扩散（快54倍）
+    |   2%数据保留82.9%性能
+    |
+    v
+结论：层次化结构能在不牺牲流式效率的前提下实现推理
+```
+
+## 增量
+
+**一句话**：这篇论文之前，你必须在"快速但浅层的流式生成"和"缓慢但深入的双向修正"之间二选一；
+这篇论文之后，HDR 通过粗到细的层次结构，让你同时拥有结构化的多步推理和低延迟流式输出。
+
+### 核心机制
+
+HDR 的核心思想是将视频扩散模型的隐空间重构为**树状层次结构**。
+它不再把所有视频隐变量当作扁平的逐帧 token，
+而是组织成层级：树的顶层持有粗糙、抽象的表示（比如"机器人应该朝目标移动"），
+下层逐步填充具体的视觉细节（比如"机械臂在 t=5 时刻旋转30度"）。
+去噪过程中，模型先解析粗粒度假设——在多个方案仍有可行性时保留不确定性——
+然后向下级联，把每个假设精炼为具体的视觉状态。
+
+注意力机制是关键。
+标准双向扩散对所有帧对施加稠密注意力——O(N²) 的开销。
+HDR 用**稀疏层次注意力模式（SHAP）**替代：在同一层内，token 只关注兄弟节点和父节点。
+这意味着粗层 token（数量少）做广泛注意力以进行全局规划，
+而细层 token（数量多）做局部注意力以精炼细节。
+结果是总注意力开销远优于稠密双向注意力，
+同时保留了在粗层修正假设、再落实到细层的能力。
+
+训练遵循标准扩散目标，但按层次分层：
+粗层学习捕获高层结构和目标状态，
+细层学习在父节点条件下填充时间和空间细节。
+这种分层设计自然产生了"先规划后执行"的动态。
+
+```
+输入：含噪视频隐变量（所有帧）
+    |
+    v
+[树结构构建]
+    |   帧隐变量 -> 分组为层次结构
+    |
+    +---> 第0层（根节点）：全局规划 / 目标状态
+    |         |  少量 token，感受野广
+    |         |  关注所有子节点
+    |
+    +---> 第1层（中间层）：子目标 / 中间状态
+    |         |  中等数量 token
+    |         |  关注父节点 + 兄弟节点
+    |
+    +---> 第2层（叶节点）：具体的帧级细节
+    |         大量 token，感受野窄
+    |         只关注父节点 + 兄弟节点
+    |
+    v
+[去噪：从粗到细]
+    |
+    +---> 步骤1：去噪第0层（保留多个假设）
+    +---> 步骤2：去噪第1层（以第0层为条件）
+    +---> 步骤3：去噪第2层（以第1层为条件）
+    |
+    v
+输出：具有连贯多步推理的流式视频
+```
+
+### 核心机制（续）——结构性比喻
+
+想象你和朋友一起规划一次自驾游。
+
+**没有 HDR 的话**，你要么（a）边开边决定每个转弯——快但容易迷路；
+要么（b）出发前在巨幅地图上规划每一个转弯——周全但永远无法出发。
+
+**有了 HDR**，你像一个优秀的旅行规划师一样分层规划：
+
+- **第0层（决策层）**：你勾勒大图景——"我们从北京开车到上海，中途停南京。"
+  这是粗粒度层。可能有两三条可行路线；你暂时全部保留。
+  这一层决策少但影响巨大。
+
+- **第1层（路线层）**：对每条大图景路线，你选定高速路段——
+  "走 G2 到南京，再转 G42 到上海。"
+  这是中间层。第0层的每条路线各自生成一组路段。
+  你仍然可以修改，但选项在收窄。
+
+- **第2层（转弯层）**：对每段高速，你指定具体的出口和转弯。
+  这是叶节点层。到了这一步，计划已经具体且可流式执行——
+  你的导航仪只需要实时读出来就行了。
+
+关键洞察：你永远不会为每条可能路线都规划每一个转弯。
+树结构意味着粗层的不确定性（走哪条路？）在早期就被解决，
+而细层的细节（哪个出口？）只为最终存活的方案生成。
+这正是 HDR 的工作方式——粗去噪保留假设，细去噪把胜出者变成像素。
+
+SHAP 注意力也映射这个比喻：决策层（第0层）有鸟瞰视角，看到下面的一切。
+转弯层（第2层）只看到自己的路段和相邻转弯——它不需要重新评估整趟旅行。
+
+### 关键概念
+
+- **层次化隐变量**：标准扩散模型把隐空间当作扁平的——所有帧都是平级的。
+  层次化隐变量施加一个树结构，其中一些隐变量是其他隐变量的父节点。
+  想象扁平团队 vs. 组织架构图的区别：扁平团队里每个人跟每个人沟通（开销大、混乱）；
+  组织架构里 CEO 做战略决策，经理转化为战术，员工执行。
+  层次结构将全局推理压缩到顶层的少量 token 中，
+  因此规划不需要关注每一个像素。
+
+- **粗到细去噪**：标准扩散中，所有隐变量以相同速率同时去噪。
+  粗到细去噪中，高层隐变量先去噪且更快，建立"骨架"，
+  然后低层隐变量填充血肉。
+  这就像画家先画构图线再上阴影细节——
+  你不会在确定头部位置之前就开始渲染眼睛。
+  实际好处是：粗层可以用少量 token 便宜地探索多个假设，
+  只有当假设被选定后，昂贵的细层 token 才被生成。
+
+- **稀疏层次注意力模式（SHAP）**：这是工程主力。
+  稠密注意力中，每个 token 关注每个其他 token——开销随序列长度二次增长。
+  SHAP 限制每个 token 只关注树中的父节点和兄弟节点。
+  粨层 token（数量少）仍然可以做广泛注意力，因为它们连接很多子节点；
+  细层 token（数量多）只做窄注意力，保持开销接近线性。
+  结果：你在粗层获得双向注意力的推理好处，
+  在细层获得流式输出的效率。
+
+## 框架转变
+
+```
+之前（主流方法）：                    之后（本文方法）：
+
+[帧1] [帧2] ... [帧N]              [    根节点：全局规划     ]
+     |         |          |          /        |        \
+  扁平注意力或因果注意力           [中间1]  [中间2]  [中间3]
+                                   / | \    / | \    / | \
+  双向扩散：                     [叶][叶][叶][叶][叶][叶][叶][叶]
+  所有帧互相可见
+  O(N^2) 开销                   粗到细去噪
+  无法流式输出                   稀疏注意力（父+兄弟）
+                                叶节点层流式输出
+  自回归：
+  每帧只看过去
+  无法修正
+```
+
+从"扁平的全局与局部二选一"到"层次化的粗到细规划"，
+核心转变是**重构隐空间本身，让推理和流式输出通过在不同抽象层次上操作而共存**。
+
+## 专家评审
+
+**选题眼光**：这是一个真实的缺口。
+流式效率与全局推理之间的张力是切实存在的，
+随着视频模型向具身智能和世界模型演进，这个问题只会越来越重要。
+问题不是人造的——它是视频质量趋于饱和后的自然瓶颈。
+不过，所选的任务（迷宫、汉诺塔、推箱子）都是合成谜题，
+有明确的 ground truth，评估很干净，
+但不能直接证明该方法适用于开放世界的推理。
+
+**方法成熟度**：层次化隐变量的想法很巧妙，有充分的动机支撑，不是蛮力。
+树结构天然适合规划问题，SHAP 是合理的工程选择。
+然而，论文没有深入探讨为什么特定的树拓扑比替代方案（如多分辨率网格、随机层次）更好。
+存在一种风险：树结构可能过度适配了谜题式评估领域。
+粗到细去噪调度也可以更有原则——论文没有充分消融层数和粒度边界的设置。
+
+**实验诚意**：基线是合理的——同时与流式自回归和双向扩散方法对比。
+成功率提升76%的相对改进令人印象深刻，
+相比双向扩散54倍的推理加速是实践中真正重要的数字。
+数据效率结果（2%数据保留82.9%性能）很惊人，
+但引出一个问题：是因为谜题结构太规整所以2%就够学层次，
+还是这真的能泛化？
+分布外评估是一个好信号，但我希望看到更难、更具组合性的任务。
+真实世界机器人实验被提及了，但更像是一个预告而非严格评估。
+
+**写作功力**：论文整体清晰，但相关工作部分可以更紧凑——
+它花了不少篇幅在通用视频扩散上，而不是聚焦于具体的推理缺口。
+方法部分应该更清晰地分离形式描述和直觉解释。
+基准测试的贡献（六个任务含OOD情况）很有价值但被低估了——
+一个专门分析任务难度和失败模式的章节会让论文提升一个档次。
+
+**判决**：弱接收——层次化方法是一个真正的结构性洞察，
+解决了真实的权衡问题，在合成任务上的结果很强。
+但评估领域较窄，论文没有完全说服我这种方法能超越谜题推广到开放式的视觉推理。
+
+## 要点总结
+
+从这篇论文中可以"偷"走三样东西：
+
+1. **用层次化隐变量处理规划问题**：如果你的任务涉及序列上的多步决策，
+   考虑在隐空间施加树结构。粗隐变量管策略，细隐变量管执行。
+   这不限于视频——适用于任何规划重要的序列生成
+   （代码生成、机器人轨迹、长文本）。
+
+2. **粗到细去噪调度作为假设过滤器**：
+   在粗层保留不确定性、只在细层做承诺的理念是一个通用原则。
+   在任何需要廉价探索多个方案再选一个的系统中，
+   这个"在顶层保持假设活跃，在底层修剪"的模式都适用。
+
+3. **按层次稀疏注意力，而非按距离**：
+   大多数高效注意力机制用滑动窗口或膨胀模式，基于时间距离稀疏化。
+   SHAP 则基于层次中的**结构角色**稀疏化——父节点看广，叶节点看窄。
+   在任何序列具有天然树结构的 transformer 中都值得尝试
+   （语法树、场景图、组织数据）。
+:::
