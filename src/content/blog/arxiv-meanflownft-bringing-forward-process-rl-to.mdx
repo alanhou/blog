@@ -1,0 +1,304 @@
+---
+title:
+  en: "MeanFlowNFT: Making Reward-Aligned Generation Fast with Average-Velocity Flows"
+  zh: "MeanFlowNFT：用平均速度流实现快速奖励对齐生成"
+description:
+  en: "Bridging DiffusionNFT's reinforcement learning with MeanFlow's fast few-step generators by converting average velocities to instantaneous ones for well-defined reward optimization."
+  zh: "通过将平均速度转换为瞬时速度，将 DiffusionNFT 的强化学习与 MeanFlow 的快速少步生成器打通，实现有效的奖励优化。"
+date: 2026-07-18
+tags: ["arxiv", "ai", "cs.cv", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.15273](https://arxiv.org/abs/2607.15273)
+**Authors**: Yushi Huang, Xiangxin Zhou, Jun Zhang, Liefeng Bo, Tianyu Pang
+**Categories**: cs.CV, cs.LG
+
+## The Gap
+
+Two powerful lines of work have matured in parallel but never properly shaken hands.
+
+**On the fast-sampling side**: MeanFlow generators predict **average velocities* over time intervals, collapsing what used to be 20-50 denoising steps into 1-4 steps. They're fast and produce decent quality. But nobody has figured out how to align them with reward signals using RL.
+
+**On the RL-alignment side**: DiffusionNFT introduced an elegant forward-process RL framework—no need to run reverse trajectories or estimate likelihoods. It optimizes a policy by directly updating instantaneous velocities using reward-weighted gradients. Works great for standard diffusion and flow models.
+
+**The clash**: DiffusionNFT's objective is defined on **instantaneous* velocities. MeanFlow generates by predicting *average* velocities over intervals. You can't just plug one into the other—the RL objective becomes ill-defined when your model doesn't output the quantity the loss expects. Previous RL methods for few-step generators either required reverse-process trajectories (expensive, unstable) or weren't designed for the MeanFlow parameterization at all.
+
+**The bridge**: MeanFlowNFT exploits the **MeanFlow identity*—a mathematical relationship that connects average and instantaneous velocities—to construct a synthetic instantaneous-velocity predictor. DiffusionNFT's objective is applied to this predictor, making reward optimization well-defined. Sampling still uses the average velocity, so you keep the speed.
+
+```
+MeanFlow (fast)        DiffusionNFT (aligned)
+avg velocity           instant velocity
+       \                   /
+        \                 /
+  incompatible objectives
+        |                 |
+        v                 v
+ MeanFlow Identity bridges them
+        |                 |
+        +-----> < --------+
+              |
+              v
+    induced instant-velocity predictor
+              |
+              v
+    DiffusionNFT loss applied here
+              |
+              v
+    sampling still uses avg velocity
+              |
+              v
+    fast + aligned = MeanFlowNFT
+```
+
+## The Increment
+
+**One sentence**: Before this paper, you had to choose between fast generation (MeanFlow) and reward alignment (DiffusionNFT-style RL); after this paper, you can have both simultaneously without sacrificing speed or alignment quality.
+
+### Core Mechanism
+
+MeanFlowNFT has three moving parts that work together cleanly.
+
+**Part 1 — The MeanFlow model** is a neural network that predicts the **average velocity* u over a time interval [t, r]. Given a noisy sample x_t, it outputs u(x_t, t, r), which tells you how to move from time t toward time r on average. This is what makes few-step sampling possible: instead of integrating instantaneous velocities step by step, you jump across intervals.
+
+**Part 2 — The induced instantaneous-velocity predictor** is constructed using the MeanFlow identity. The identity says: the instantaneous velocity v(x_t, t) can be recovered from the average velocity u by a specific formula involving the derivative of t**u with respect to t, plus a correction term. So even though the MeanFlow model doesn't natively output instantaneous velocities, you can *derive* one from it. This derived predictor is never used for sampling—it exists purely to define the RL loss.
+
+**Part 3 — The DiffusionNFT objective** is applied to this induced predictor. DiffusionNFT's loss rewards instantaneous velocities that lead to high-reward samples, using a forward-process formulation (no reverse trajectories needed). The gradient flows back through the induced predictor into the MeanFlow model's parameters. The model learns to generate high-reward outputs while keeping its average-velocity parameterization intact.
+
+```
+[MeanFlow Model]
+  inputs: x_t, t, r
+  outputs: avg velocity u
+       |
+       v
+[MeanFlow Identity Transform]
+  u -> induced instantaneous velocity v*
+       |
+       v
+[DiffusionNFT Reward Loss]
+  reward(x_0) weighted gradient on v*
+       |
+       v
+[Backprop to MeanFlow params]
+  updates u's weights
+       |
+       v
+[Sampling still uses u directly]
+  1-4 steps, fast generation preserved
+```
+
+**The metaphor — a simultaneous translator with two personalities.**
+
+Imagine you have a translator who speaks in long, flowing paragraphs (that's MeanFlow—the average velocity). A coach wants to give feedback on word choice, but the coach only understands individual words spoken one at a time (that's DiffusionNFT—operating on instantaneous velocities).
+
+The solution: you set up a real-time transcription system that breaks the translator's flowing paragraphs into individual words on the fly. The coach critiques those individual words—this word is better, that word is worse. The critique feeds back to the translator, who adjusts how they speak in flowing paragraphs. Crucially, the translator never actually starts speaking word by word—they still deliver full paragraphs. The transcription was just a bridge for the coaching.
+
+In this analogy:
+- The translator = MeanFlow model
+- Flowing paragraphs = average velocity
+- Real-time transcription = the induced instantaneous-velocity predictor
+- The coach = DiffusionNFT reward objective
+- Critique = reward-weighted gradients
+- The translator still speaking in paragraphs = sampling unchanged
+
+### Key Concepts
+
+- **Average vs. Instantaneous Velocity**: Think of driving from A to B. Instantaneous velocity is your speedometer reading at any given second—it changes constantly. Average velocity is the total distance divided by total time—it's one number for the whole trip. MeanFlow models learn to predict the "whole trip" velocity directly, which is why they can skip intermediate steps. Standard flow models predict the instantaneous velocity, requiring many small steps to integrate.
+
+- **The MeanFlow Identity**: This is the mathematical trick that makes everything work. It's a formula that says: if you know the average velocity u over [t, r], you can recover the instantaneous velocity v at time t by computing v = u + (r - t) ** (du/dt). It's like saying: if you know your average speed for a 10-minute drive and how that average changes if you shorten the drive, you can figure out your exact speed at any moment. The paper uses this identity as a translator between MeanFlow's language (average velocities) and DiffusionNFT's language (instantaneous velocities).
+
+- **Forward-Process RL**: Traditional RL for diffusion models requires running the reverse (generation) process, computing log-likelihoods, or estimating score functions—all expensive and unstable. Forward-process RL (from DiffusionNFT) sidesteps this entirely. It works in the **forward* direction (adding noise, not removing it), where the training signal is cheap and stable. The insight: you don't need to know how to trace back from a generated image to a noise vector; you just need to know how noise evolves forward and which forward trajectories lead to good outputs.
+
+## Framework Shift
+
+```
+Before (mainstream):                   After (this paper):
+
+[Diffusion Model]                      [MeanFlow Model]
+   uses instant velocity                  uses avg velocity
+        |                                      |
+        v                                      v
+[DiffusionNFT RL]                      [MeanFlowNFT RL]
+   reward alignment works                 instant velocity
+        |                                 constructed via
+        v                                 MeanFlow Identity
+[Few steps = poor quality]                      |
+   because instant velocity                     v
+   needs many steps to                      [DiffusionNFT loss]
+   integrate accurately                          |
+                                                 v
+                                          [avg velocity still
+                                           used for sampling]
+                                                 |
+                                                 v
+                                          [Few steps + aligned]
+```
+
+From instant-velocity RL requiring many steps to average-velocity RL preserving few-step speed, the core shift is using the MeanFlow identity as a bridge so you can optimize in instantaneous-velocity space while sampling in average-velocity space.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, well-motivated. MeanFlow is gaining significant traction as a practical generation paradigm, and the inability to apply RL alignment to it is a genuine blocker for anyone wanting reward-tuned fast generation. This sits squarely at the intersection of two active research threads—good positioning.
+
+**Method maturity**: Clever, not brute force. The core insight—use the MeanFlow identity to construct an induced predictor—is elegant and principled. It's the kind of thing that looks obvious in retrospect but wasn't obvious before. The policy-improvement guarantee inherited from DiffusionNFT adds theoretical weight. One could ask whether there are simpler approximations that also work (e.g., just treating average velocity as approximately instantaneous and applying the loss directly), but the authors don't address this ablation, which would strengthen the paper.
+
+**Experimental integrity**: Strong. They test on both image (SD3.5-M) and video (Wan 2.1) generation, which is good coverage. The 4-step MeanFlowNFT on Wan 2.1 reaching 84.33 VBench vs. 50-step LongCat-Video RL at 82.57 is a compelling headline result—4 steps beating 50 is the kind of result that makes people pay attention. They report 6 of 8 metrics improved on SD3.5-M, which is honest (not cherry-picking all 8). Baselines include prior few-step RL methods. Minor concern: the Wan 2.1 comparison is against a different model architecture (LongCat-Video), so it's not a pure apples-to-apples ablation—more like a system-level comparison. Fair for a headline, but worth noting.
+
+**Writing quality**: The paper is reasonably well-structured. The connection between MeanFlow identity and the induced predictor is the key contribution and is explained with sufficient rigor. However, the related work section could be tightened—there's some bloat that doesn't directly serve the argument. The experiments section would benefit from a clearer "what we ablated" summary upfront rather than distributing insights across figure captions.
+
+**Verdict**: weak accept — The contribution is genuine and the method is principled, but the novelty ceiling is moderate (it's a well-executed combination of two existing ideas rather than a fundamentally new paradigm). The strong empirical results push it over the line.
+
+## Takeaways
+
+**The bridge-construction pattern**: When you have a method that works on quantity A (instantaneous velocities) and another method that naturally produces quantity B (average velocities), don't force one to speak the other's language. Instead, find the mathematical identity that connects A and B, and build a thin conversion layer. This pattern—deriving a synthetic quantity purely for loss computation while keeping the original quantity for inference—likely transfers to other domains where training and serving objectives operate on different representations.
+
+**RL for fast generators is now on the table**: If you're working with few-step or distillation-based generators and want to align them with reward signals, this paper shows it's feasible without sacrificing speed. The forward-process RL formulation avoids the instability of reverse-trajectory methods, and the MeanFlow identity trick makes it compatible with average-velocity parameterizations. If you're building a system that needs both speed and alignment (e.g., real-time interactive generation), this is directly relevant.
+
+**Policy-improvement guarantees aren't just decoration**: The paper proves that MeanFlowNFT inherits DiffusionNFT's monotonic improvement guarantee. This is worth stealing as a design principle: when building RL wrappers around generative models, structure your objective so that formal guarantees transfer. It's not just about empirical results—it's about knowing your method won't diverge catastrophically.
+:::
+
+:::zh
+**论文**: [2607.15273](https://arxiv.org/abs/2607.15273)
+**作者**: Yushi Huang, Xiangxin Zhou, Jun Zhang, Liefeng Bo, Tianyu Pang
+**分类**: cs.CV, cs.LG
+
+## 缺口
+
+两条成熟的研究线并行发展，却一直没有真正握手。
+
+**快速采样这边**：MeanFlow 生成器预测时间区间上的**平均速度*，把原来需要 20-50 步的去噪压缩到 1-4 步。速度很快，质量也不差。但没人搞清楚怎么用强化学习把它跟奖励信号对齐。
+
+**RL 对齐这边**：DiffusionNFT 提出了一套优雅的前向过程 RL 框架——不需要跑反向轨迹，也不需要估计似然。它直接用奖励加权的梯度更新瞬时速度。在标准扩散模型和流模型上效果很好。
+
+**冲突点**：DiffusionNFT 的目标函数定义在**瞬时*速度上，而 MeanFlow 通过预测区间上的*平均*速度来生成。你不能直接把一个塞进另一个——当模型不输出损失所期望的那个量时，RL 目标就变得定义不明确。此前针对少步生成器的 RL 方法要么需要反向轨迹（贵、不稳定），要么根本不是为 MeanFlow 的参数化设计的。
+
+**桥梁**：MeanFlowNFT 利用 **MeanFlow 恒等式*——一个连接平均速度和瞬时速度的数学关系——来构造一个合成的瞬时速度预测器。DiffusionNFT 的目标函数施加在这个预测器上，使奖励优化变得定义明确。采样仍然使用平均速度，速度优势得以保留。
+
+```
+MeanFlow (快速)        DiffusionNFT (对齐)
+平均速度               瞬时速度
+   \                      /
+    \                    /
+   目标函数不兼容
+    |                    |
+    v                    v
+ MeanFlow 恒等式连接二者
+    |                    |
+    +------> < ----------+
+               |
+               v
+    诱导的瞬时速度预测器
+               |
+               v
+    在此施加 DiffusionNFT 损失
+               |
+               v
+    采样仍用平均速度
+               |
+               v
+    快速 + 对齐 = MeanFlowNFT
+```
+
+## 增量
+
+**一句话**：这篇论文之前，快速生成（MeanFlow）和奖励对齐（DiffusionNFT 式 RL）只能二选一；之后，两者可以同时实现，不牺牲速度也不牺牲对齐质量。
+
+### 核心机制
+
+MeanFlowNFT 有三个核心部件协同工作。
+
+**部件一 — MeanFlow 模型**是一个神经网络，预测时间区间 [t, r] 上的**平均速度* u。给定含噪样本 x_t，它输出 u(x_t, t, r)，告诉你从时刻 t 向时刻 r 平均该怎么移动。这就是少步采样可行的原因：不用一步一步积分瞬时速度，而是直接跨区间跳跃。
+
+**部件二 — 诱导的瞬时速度预测器**通过 MeanFlow 恒等式构造。恒等式说：瞬时速度 v(x_t, t) 可以从平均速度 u 通过特定公式恢复——涉及 t**u 对 t 的导数再加一个修正项。所以即使 MeanFlow 模型本身不输出瞬时速度，你也能从它*推导*出一个。这个推导出来的预测器永远不用于采样——它纯粹是为定义 RL 损失而存在的。
+
+**部件三 — DiffusionNFT 目标函数**施加在这个诱导预测器上。DiffusionNFT 的损失奖励那些能产生高奖励样本的瞬时速度，使用前向过程公式（不需要反向轨迹）。梯度通过诱导预测器回传到 MeanFlow 模型的参数。模型学会生成高奖励输出，同时保持平均速度参数化不变。
+
+```
+[MeanFlow 模型]
+  输入: x_t, t, r
+  输出: 平均速度 u
+       |
+       v
+[MeanFlow 恒等式变换]
+  u -> 诱导的瞬时速度 v*
+       |
+       v
+[DiffusionNFT 奖励损失]
+  reward(x_0) 加权梯度作用于 v*
+       |
+       v
+[反向传播到 MeanFlow 参数]
+  更新 u 的权重
+       |
+       v
+[采样仍直接使用 u]
+  1-4 步，快速生成不变
+```
+
+**核喻 — 一个实时转录的同声传译员。**
+
+想象一位翻译员，说话方式是大段大段的流畅段落（这是 MeanFlow——平均速度）。一位教练想给用词反馈，但教练只懂一个字一个字地说（这是 DiffusionNFT——操作瞬时速度）。
+
+解决方案：设置一套实时转录系统，把翻译员的流畅段落即时拆成单个字词。教练针对这些字词给反馈——这个词好，那个词差。反馈传回翻译员，翻译员调整自己说流畅段落的方式。关键是，翻译员永远不会改成一个字一个字说话——他们仍然输出完整段落。转录系统只是教练和翻译员之间的桥梁。
+
+对应关系：
+- 翻译员 = MeanFlow 模型
+- 流畅段落 = 平均速度
+- 实时转录系统 = 诱导的瞬时速度预测器
+- 教练 = DiffusionNFT 奖励目标
+- 反馈 = 奖励加权梯度
+- 翻译员仍说段落 = 采样不变
+
+### 关键概念
+
+- **平均速度 vs 瞬时速度**：想象开车从 A 到 B。瞬时速度是任何一秒的速度表读数——它不断变化。平均速度是总路程除以总时间——整个旅程只有一个数。MeanFlow 模型直接学习预测"整个旅程"的速度，所以能跳过中间步骤。标准流模型预测瞬时速度，需要很多小步来积分。
+
+- **MeanFlow 恒等式**：这是让一切运转的数学技巧。它是一个公式，说：如果你知道 [t, r] 上的平均速度 u，可以通过 v = u + (r - t) ** (du/dt) 恢复时刻 t 的瞬时速度 v。就像说：如果你知道 10 分钟车程的平均速度，以及如果缩短车程平均速度会怎么变，你就能算出任一时刻的精确速度。论文用这个恒等式充当 MeanFlow 语言（平均速度）和 DiffusionNFT 语言（瞬时速度）之间的翻译器。
+
+- **前向过程 RL**：传统扩散模型 RL 需要跑反向（生成）过程、计算对数似然或估计得分函数——都又贵又不稳定。前向过程 RL（来自 DiffusionNFT）完全绕开了这些。它在**前向*方向（加噪而非去噪）工作，那里的训练信号便宜又稳定。核心洞见：你不需要知道怎么从生成图像追溯到噪声向量；你只需要知道噪声如何向前演化，以及哪些前向轨迹能产生好结果。
+
+## 框架转变
+
+```
+之前（主流方法）：                   之后（本文方法）：
+
+[扩散模型]                          [MeanFlow 模型]
+  使用瞬时速度                         使用平均速度
+       |                                   |
+       v                                   v
+[DiffusionNFT RL]                    [MeanFlowNFT RL]
+  奖励对齐有效                         通过 MeanFlow 恒等式
+       |                              构造瞬时速度
+       v                                   |
+[少步=质量差]                               v
+  因为瞬时速度需要                   [DiffusionNFT 损失]
+  很多步才能精确积分                       |
+                                         v
+                                   [采样仍用平均速度]
+                                         |
+                                         v
+                                   [少步 + 对齐]
+```
+
+从需要很多步的瞬时速度 RL 到保留少步速度的平均速度 RL，核心转变是利用 MeanFlow 恒等式作为桥梁，在瞬时速度空间优化，却在平均速度空间采样。
+
+## 专家评审
+
+**选题眼光**：真缺口，动机扎实。MeanFlow 作为实用生成范式正在快速崛起，无法对它施加 RL 对齐确实是想做奖励调优快速生成的人的真实障碍。这篇论文正好卡在两条活跃研究线的交叉点上，定位很好。
+
+**方法成熟度**：巧劲，不是蛮力。核心洞见——用 MeanFlow 恒等式构造诱导预测器——既优雅又有原理支撑。是那种事后看来显而易见、事前却没人想到的东西。从 DiffusionNFT 继承的策略改进保证增加了理论分量。但论文没有做一个消融实验：直接把平均速度近似为瞬时速度、施加损失会怎样？如果有这个对比，说服力会更强。
+
+**实验诚意**：扎实。同时在图像（SD3.5-M）和视频（Wan 2.1）上测试，覆盖面不错。4 步 MeanFlowNFT 在 Wan 2.1 上达到 84.33 VBench、而 50 步 LongCat-Video RL 只有 82.57——4 步打赢 50 步是那种能让大家停下来看的结果。SD3.5-M 上 8 个指标改进了 6 个，报告方式诚实（没有挑全部 8 个都好）。小问题：Wan 2.1 的对比对象是不同架构（LongCat-Video），不是纯粹的同架构消融——更像是系统级对比。作为头条结果可以接受，但值得留意。
+
+**写作功力**：结构合理，关键贡献（MeanFlow 恒等式与诱导预测器的连接）解释得足够严谨。相关工作部分有些臃肿，没有直接服务于论证的内容可以砍掉。实验部分如果开头就有一个清晰的"我们消融了什么"总结，而不是把洞见分散在图注里，会更好。
+
+**判决**：弱接收 — 贡献是真实的，方法有原理支撑，但新颖度上限中等（是两个已有想法的精巧组合，而非全新范式）。强实验结果把它推过了线。
+
+## 要点总结
+
+**桥梁构造模式**：当你有一个方法作用于量 A（瞬时速度），另一个方法自然产出量 B（平均速度），不要强迫一方说另一方的语言。找到连接 A 和 B 的数学恒等式，建一个薄薄的转换层。这个模式——为损失计算推导一个合成量，同时推理时保留原始量——很可能迁移到其他训练目标和推理目标使用不同表示的领域。
+
+**快速生成器的 RL 现在可行了**：如果你在用少步或蒸馏生成器，想用奖励信号对齐它们，这篇论文证明了这在不牺牲速度的情况下是可行的。前向过程 RL 公式避免了反向轨迹方法的不稳定性，MeanFlow 恒等式技巧让它兼容平均速度参数化。如果你在构建同时需要速度和对齐的系统（比如实时交互生成），这篇论文直接有用。
+
+**策略改进保证不只是装饰**：论文证明了 MeanFlowNFT 继承了 DiffusionNFT 的单调改进保证。这值得当作设计原则偷走：在给生成模型套 RL 包装时，让你的目标函数结构化，使形式化保证能传递。这不只是关于经验结果——是关于知道你的方法不会灾难性发散。
+:::
