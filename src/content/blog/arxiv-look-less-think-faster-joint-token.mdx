@@ -1,0 +1,383 @@
+---
+title:
+  en: "Look Less, Think Faster: Coordinating Vision Tokens and LLM Compute in Multimodal Models"
+  zh: "少看快想：多模态大模型中视觉Token与计算资源的联合调度"
+description:
+  en: "SmartVL jointly controls how many visual tokens to keep and how much LLM compute to use, coordinating both under a shared budget — outperforming methods that optimize each dimension in isolation."
+  zh: "SmartVL 将视觉Token数量控制与LLM计算量调节统一到一个框架下，在共享预算约束下协同优化，超越了此前独立优化各维度的方法。"
+date: 2026-07-23
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.20357](https://arxiv.org/abs/2607.20357)
+**Authors**: Pengcheng Wang, Zhiquan Wang, Jayoung Lee, Zhuoyan Xu, Ran Xu, Saurabh Bagchi, Yin Li, Somali Chaterji
+**Categories**: cs.CV
+
+## The Gap
+
+Multimodal LLMs are powerful but painfully expensive to run. The cost comes from two sources: the hundreds of visual tokens fed into the model, and the heavy computation inside the LLM backbone. Prior work has attacked each problem separately — methods like TokenPacker or FastV prune redundant visual tokens on the vision side, while approaches like LazyLLM or Early-Exit skip LLM layers or heads on the compute side. The implicit assumption is that optimizing each dimension independently is sufficient.
+
+But this assumption breaks down in practice. A simple image (a plain white wall) needs few visual tokens *and* little LLM reasoning. A complex scene (a crowded street with signs) needs more of both. When you optimize token count and compute budget in isolation, you miss the opportunity to reallocate savings from one dimension to the other. The paper identifies this as the core gap: there is no mechanism to dynamically distribute a total inference budget across both token selection and compute allocation in a content-aware way.
+
+```
+Multimodal LLM Inference Cost
+            |
+   +--------+--------+
+   |                  |
+Vision Tokens     LLM Compute
+(too many)        (too heavy)
+   |                  |
+   v                  v
+Prior: prune      Prior: skip
+tokens alone      layers alone
+   |                  |
+   +--- NO COORDINATION ---+
+            |
+            v
+   Miss cross-dimensional
+   budget reallocation
+            |
+            v
+SmartVL: joint controller
+with shared budget encoding
+            |
+            v
+Content-aware, budget-aware
+token-compute allocation
+            |
+            v
+Superior Pareto frontier
+across accuracy and efficiency
+```
+
+## The Increment
+
+**One sentence**: Before this paper, you had to choose between pruning visual tokens OR skipping LLM compute and tune each separately; after this paper, a single unified controller can jointly decide how many tokens to keep and how much LLM muscle to use, coordinated under one budget, adapting to each input's difficulty.
+
+### Core Mechanism
+
+SmartVL has two controllers that work as a team. The **vision-side token controller** sits after the vision encoder and decides which visual tokens are worth keeping. It scores each token based on its content, selects the top ones, and discards the rest before they ever reach the LLM. The **LLM-side compute controller** operates inside the language model, deciding per-layer how many attention heads and how much FFN computation to activate. Instead of running the full model on every input, it dials computation up or down.
+
+The critical innovation is how these two controllers coordinate. They share a **budget encoding** — a learned representation of the total compute budget available for this inference call. Both controllers receive this encoding and learn to respect it jointly. If the vision controller keeps more tokens (consuming more of the budget), the LLM controller automatically scales back its compute, and vice versa. Training uses a **differentiable latency estimator** that approximates the real wall-clock cost of different token/compute configurations, allowing end-to-end gradient-based optimization through the discrete selection decisions.
+
+```
+Input Image
+    |
+    v
++------------------+
+| Vision Encoder   |
+| (frozen)         |
++------------------+
+    |  N visual tokens
+    v
++----------------------------+      +-----------------+
+| Vision Token Controller    |<-----| Budget Encoding |
+| - score each token         |      | (shared state)  |
+| - select top-k             |      +-----------------+
++----------------------------+              |
+    |  k tokens (k <= N)                    |
+    v                                       v
++----------------------------+      +-----------------+
+| LLM Backbone               |<-----| LLM Compute     |
+| - full or pruned heads     |      | Controller      |
+| - full or skipped layers   |      | - per-layer     |
++----------------------------+      |   compute level |
+    |                               +-----------------+
+    v
++------------------+
+| Output Answer    |
++------------------+
+```
+
+Think of it like managing a restaurant kitchen during a dinner rush. You have a fixed number of staff hours (your compute budget). The **sous chef** (vision controller) decides how much prep work to do — for a simple salad, just wash and chop a few things; for a complex tasting menu, prep extensively. The **head chef** (LLM controller) decides how elaborate the cooking steps should be — quick sauté vs. multi-stage braise. The key insight: these two decisions are coupled. If the sous chef preps heavily (many visual tokens), the head chef can simplify the cooking (less LLM compute). If the sous chef preps minimally, the head chef needs to work harder. The shared **kitchen whiteboard** (budget encoding) lets both chefs see the same constraint and self-coordinate without a manager micromanaging every decision. The differentiable latency estimator is like a cost calculator on the wall that shows how each staffing choice translates to real time — it lets the system learn which allocations actually finish dinner fastest.
+
+### Key Concepts
+
+- **Joint budget encoding**: Imagine you have a single piggy bank with $100 inside. Two departments (vision token selection and LLM computation) both draw from this same bank. Each department learns a "reading" of the piggy bank — a compact vector that tells it how much budget remains and how it should behave given what the other department might take. This shared representation is trained end-to-end so both departments develop compatible "spending instincts" without explicit rules. In practice, it's a small learned embedding concatenated into both controllers' decision inputs.
+
+- **Differentiable latency estimation**: The hard part of this whole system is that "keep token #47" or "skip layer #12" are discrete on/off decisions — you can't backpropagate through a switch. The authors build a smooth proxy that estimates latency as a differentiable function of the controller outputs. Think of it like replacing a light switch (on/off) with a dimmer knob (continuous). Now gradient descent can nudge the knob slightly and see whether latency improved, enabling the whole system to learn end-to-end without reinforcement learning hacks.
+
+## Framework Shift
+
+```
+Before (mainstream approach):           After (this paper):
+
+Image                                   Image
+  |                                       |
+  v                                       v
+[Fix token count]                       [Adaptive token select]
+  |                                       |
+  v                                       |
+[Run full LLM]                          [Budget encoding]
+  |                                       |        |
+  v                                       v        v
+Answer                            [Adaptive LLM compute]
+                                          |
+OR:                                     v
+                                      Answer
+
+Image                                   (token count AND
+  |                                    compute level
+  v                                    co-decided per input)
+[Adaptive token select]
+  |
+  v
+[Run full LLM]
+  |
+  v
+Answer
+
+(two independent knobs,
+ tuned separately)
+```
+
+From optimizing isolated knobs to orchestrating a coupled allocation system, the core shift is treating inference cost as a single divisible budget shared across dimensions rather than separate parameters to tune independently.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The field has been slicing the inference optimization pie one dimension at a time — token pruning papers ignore compute adaptation, and vice versa. The observation that these dimensions are coupled and should be jointly optimized is natural but hadn't been formalized properly. It sits at the right moment in the trajectory: MLLMs are maturing enough that deployment efficiency is a first-class concern, not an afterthought.
+
+**Method maturity**: The design is more clever than brute force. The shared budget encoding is an elegant way to coordinate two controllers without hard-coding allocation rules. The differentiable latency estimator is the trickiest part — its accuracy determines whether the trained policy actually transfers to real hardware. I'd want to see more ablation on how sensitive results are to estimator fidelity. Simpler approaches like grid-search over token/compute configs exist but don't scale; this is a justified complexity increase.
+
+**Experimental integrity**: The baselines include representative prior methods (token pruning, layer skipping, and their combinations). The Pareto frontier analysis is the right evaluation — showing accuracy vs. FLOPs curves rather than cherry-picked operating points. One concern: the paper claims superiority across "multiple MLLM benchmarks," but I'd want to verify whether gains hold on genuinely hard reasoning tasks or mainly on perception-heavy ones where token redundancy is obvious. The latency estimator is evaluated on specific hardware — real-world gains will vary with deployment targets.
+
+**Writing quality**: The abstract is well-structured and clearly states the gap. The main weakness is likely in the related work section — papers like this often under-discuss the failure modes of joint optimization (what happens when both controllers make bad decisions simultaneously?). The experimental section could benefit from more qualitative examples showing **how* the budget allocation shifts across easy vs. hard inputs. Seeing the controller behavior visualized would make the story much more compelling.
+
+**Verdict**: weak accept — The joint optimization insight is sound and the experiments seem solid, but the practical deployment story needs strengthening. The method adds controller overhead that must be justified by net savings, and the hardware-specific latency estimator limits plug-and-play applicability.
+
+## Takeaways
+
+1. **Coupled resource allocation as a first-class problem**: Whenever your system has multiple adjustable knobs that each consume from a shared budget, train them jointly with a shared budget signal. This framing transfers to any pipeline with interdependent stages — video processing, speech models, even distributed systems with shared memory/compute budgets.
+
+2. **Differentiable proxies for discrete decisions**: The latency estimator trick (making a discrete cost function smooth enough for gradient descent) is a reusable technique. Any time you need to optimize a system metric that's inherently discrete (latency, memory, throughput), building a differentiable surrogate and training end-to-end beats reinforcement learning in sample efficiency.
+
+3. **Content-adaptive computation is the direction**: The broader lesson is that static model architectures waste resources on easy inputs. The trend toward input-dependent computation paths (early exit, token pruning, mixture of depths) is converging — this paper is one more data point that the future is models that size themselves to the problem at hand.
+:::
+
+:::zh
+**论文**: [2607.20357](https://arxiv.org/abs/2607.20357)
+**作者**: Pengcheng Wang, Zhiquan Wang, Jayoung Lee, Zhuoyan Xu, Ran Xu, Saurabh Bagchi, Yin Li, Somali Chaterji
+**分类**: cs.CV
+
+## 缺口
+
+多模态大模型能力很强，但推理成本高得令人却步。
+成本有两个来源：输入端的大量视觉Token，以及LLM骨干网络的重度计算。
+此前的工作各打各的——TokenPacker、FastV等方法在视觉端裁剪冗余Token；
+LazyLLM、Early-Exit等方法在LLM端跳过层或注意力头。
+隐含假设是：每个维度独立优化就够了。
+
+但这个假设在实践中会崩塌。
+一张简单的白墙图只需要少量视觉Token和很少的LLM推理；
+一张复杂的街景（满是路牌和行人）则需要更多Token和更多计算。
+当你把Token数量和计算预算分开优化时，
+就错失了在一个维度上省下来的资源重新分配给另一个维度的机会。
+本文指出的核心缺口是：没有任何机制能根据内容，
+动态地在Token选择和计算分配之间调度总推理预算。
+
+```
+多模态LLM推理成本
+        |
+  +-----+-----+
+  |             |
+视觉Token    LLM计算
+(太多)       (太重)
+  |             |
+  v             v
+此前：单独     此前：单独
+裁剪Token     跳过层
+  |             |
+  +-- 没有协调 --+
+        |
+        v
+  错失跨维度
+  预算再分配
+        |
+        v
+SmartVL：联合控制器
+共享预算编码
+        |
+        v
+根据内容和预算
+动态分配Token与计算
+        |
+        v
+准确率-效率帕累托前沿
+全面超越
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，你要么裁剪视觉Token、要么跳过LLM计算层，两件事分开调；这篇论文之后，一个统一控制器可以同时决定保留多少Token、动用多少LLM算力，两者在同一个预算约束下协同，随输入难度自适应。
+
+### 核心机制
+
+SmartVL 由两个控制器组成，它们像搭档一样配合工作。
+**视觉端Token控制器**位于视觉编码器之后，
+负责判断哪些视觉Token值得保留——
+给每个Token打分，选取得分最高的那些，丢弃其余的，
+让它们根本没有机会进入LLM。
+**LLM端计算控制器**嵌入语言模型内部，
+逐层决定激活多少注意力头、执行多少FFN计算。
+不是对每个输入都跑满整个模型，
+而是根据情况把计算量调高调低。
+
+关键创新在于两个控制器如何协同。
+它们共享一个**预算编码**——
+一个学习到的向量表示，编码了本次推理可用的总计算预算。
+两个控制器都接收这个编码，并学会联合遵守它。
+如果视觉控制器保留了更多Token（消耗更多预算），
+LLM控制器会自动缩减计算量，反之亦然。
+训练使用**可微延迟估计器**，
+近似不同Token/计算配置的真实耗时，
+让端到端的梯度优化能够穿越离散选择的障碍。
+
+```
+输入图像
+    |
+    v
++------------------+
+| 视觉编码器       |
+| (冻结)           |
++------------------+
+    |  N个视觉Token
+    v
++----------------------------+      +-----------------+
+| 视觉Token控制器            |<-----| 预算编码        |
+| - 给每个Token打分          |      | (共享状态)      |
+| - 选取top-k个              |      +-----------------+
++----------------------------+              |
+    |  k个Token (k <= N)                    |
+    v                                       v
++----------------------------+      +-----------------+
+| LLM骨干网络                |<-----| LLM计算控制器   |
+| - 完整或裁剪注意力头       |      | - 逐层计算级别  |
+| - 完整或跳过的层           |      +-----------------+
++----------------------------+
+    |
+    v
++------------------+
+| 输出答案         |
++------------------+
+```
+
+想象一个餐厅厨房在高峰期运转。
+你有固定的人时预算（计算资源）。
+**副厨**（视觉控制器）决定备料工作量——
+简单沙拉就洗切几样东西，复杂套餐就大量备料。
+**主厨**（LLM控制器）决定烹饪步骤的精细程度——
+快炒还是多步骤慢炖。
+关键洞察：这两个决定是耦合的。
+副厨备料很多（视觉Token多），主厨就能简化烹饪（LLM计算少）。
+副厨备料少，主厨就得下更多功夫。
+共享的**厨房白板**（预算编码）
+让两位厨师看到同一个约束，自主协调，
+不需要经理逐一指挥每个决策。
+可微延迟估计器就像墙上的成本计算器，
+显示每种人手配置对应的真实耗时——
+让系统学会哪种分配方式最快完成晚餐。
+
+### 关键概念
+
+- **联合预算编码**: 想象你只有一个存了100块钱的存钱罐。
+两个部门（视觉Token选择和LLM计算）都从同一个罐子里取钱。
+每个部门学习一种对存钱罐的"读取"——
+一个紧凑的向量，告诉它还剩多少预算，
+以及考虑到对方可能的取用，自己该如何行动。
+这个共享表示是端到端训练的，
+所以两个部门会发展出兼容的"消费直觉"，无需硬编码规则。
+实际操作中，它是一个小型的学习嵌入向量，
+拼接到两个控制器的决策输入中。
+
+- **可微延迟估计**: 整个系统的难点在于，
+"保留第47号Token"或"跳过第12层"是离散的开关决策——
+你没法对一个开关做反向传播。
+作者构建了一个平滑的代理函数，
+将延迟估计为控制器输出的可微函数。
+可以类比为把电灯开关（开/关）换成调光旋钮（连续）。
+这样梯度下降就能微微转动旋钮，看看延迟是否改善，
+让整个系统能端到端地学习，无需强化学习的变通手段。
+
+## 框架转变
+
+```
+之前（主流方法）：                    之后（本文方法）：
+
+图像                                  图像
+  |                                     |
+  v                                     v
+[固定Token数量]                       [自适应Token选择]
+  |                                     |
+  v                                     |
+[跑完整LLM]                          [预算编码]
+  |                                     |        |
+  v                                     v        v
+答案                            [自适应LLM计算]
+                                        |
+或者：                                  v
+                                      答案
+图像
+  |                                 （Token数量和计算级别
+  v                                  根据输入联合决策）
+[自适应Token选择]
+  |
+  v
+[跑完整LLM]
+  |
+  v
+答案
+
+（两个独立旋钮，分开调参）
+```
+
+从优化孤立旋钮到编排耦合分配系统，核心转变是：把推理成本视为一个可在各维度间分配的统一预算，而非分开调优的独立参数。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实的缺口。
+整个领域一直在逐维度地切分推理优化这块蛋糕——
+Token裁剪论文不谈计算适配，反之亦然。
+这些维度是耦合的、应该联合优化，
+这个观察很自然，但此前没有人把它正式化。
+时机也恰到好处：多模态大模型已经足够成熟，
+部署效率从"善后问题"升级为"一等公民"。
+
+**方法成熟度**: 设计上用的是巧劲而非蛮力。
+共享预算编码是协调两个控制器的优雅方式，无需硬编码分配规则。
+可微延迟估计器是最棘手的部分——
+它的准确性决定了训练出的策略能否迁移到真实硬件上。
+我希望能看到更多关于估计器保真度对结果敏感性的消融实验。
+更简单的方案（比如网格搜索Token/计算配置）确实存在但不可扩展，
+这里增加的复杂度是有理由的。
+
+**实验诚意**: 基线包括了有代表性的先有方法（Token裁剪、层跳过及其组合）。
+帕累托前沿分析是正确的评估方式——
+展示准确率-FLOPs曲线而非挑选特定操作点。
+一个担忧是：论文声称在"多个多模态基准"上全面超越，
+但我想验证增益是否在真正困难的推理任务上成立，
+还是主要在感知密集型任务上（Token冗余显而易见）。
+延迟估计器是在特定硬件上评估的——
+真实部署增益会因目标设备而异。
+
+**写作功力**: 摘要写得好，清晰地陈述了缺口。
+主要弱点可能在相关工作部分——
+这类论文往往对联合优化的失败模式讨论不足
+（两个控制器同时做出糟糕决策会怎样？）。
+实验部分应该增加更多定性示例，
+展示预算分配在简单输入和困难输入之间如何变化。
+把控制器行为可视化会让故事更有说服力。
+
+**判决**: 弱接收——联合优化的洞察站得住脚，实验看起来扎实，
+但实际部署的故事需要加强。
+方法引入了控制器开销，必须用净节省来证明其合理性；
+硬件特定的延迟估计器限制了即插即用的适用性。
+
+## 要点总结
+
+1. **耦合资源分配作为一等公民问题**: 只要你的系统有多个可调旋钮、且都从共享预算中取资源，就用共享预算信号联合训练它们。这个框架可以迁移到任何有相互依赖阶段的流水线——视频处理、语音模型、甚至共享内存/计算预算的分布式系统。
+
+2. **离散决策的可微代理**: 延迟估计器技巧（让离散成本函数足够平滑以支持梯度下降）是一项可复用的技术。每当需要优化本质上离散的系统指标（延迟、内存、吞吐量），构建可微代理并端到端训练，比强化学习在样本效率上更优。
+
+3. **内容自适应计算是方向**: 更广泛的启示是，静态模型架构在简单输入上浪费资源。向输入依赖的计算路径（早退、Token裁剪、深度混合）靠拢的趋势正在收敛——这篇论文是又一个数据点，未来属于能根据问题难度自我调整大小的模型。
+:::
