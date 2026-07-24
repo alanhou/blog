@@ -1,0 +1,303 @@
+---
+title:
+  en: "OpenForgeRL: Training Harness-native Agents End-to-End with RL at Scale"
+  zh: "OpenForgeRL：在任意环境中端到端训练 Harness 原生 Agent"
+description:
+  en: "A framework that decouples harness inference from RL training via a lightweight proxy and Kubernetes orchestration, enabling end-to-end training of agents in their native deployment environments."
+  zh: "通过轻量级代理和 Kubernetes 编排将 Harness 推理与 RL 训练解耦，实现在原生部署环境中端到端训练 Agent 的开源框架。"
+date: 2026-07-24
+tags: ["arxiv", "ai", "cs.ai", "cs.cl"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.21557](https://arxiv.org/abs/2607.21557)
+**Authors**: Xiao Yu, Baolin Peng, Ruize Xu, Hao Zou, Qianhui Wu, Hao Cheng, Wenlin Yao, Nikhil Singh, Zhou Yu, Jianfeng Gao
+**Categories**: cs.AI, cs.CL
+
+## The Gap
+
+Modern AI agents live inside elaborate inference harnesses — Claude Code, Codex, OpenClaw — that orchestrate multi-turn reasoning, tool calls, and environment interaction. These harnesses are stateful, multi-process, and deeply entangled with the systems they manage. But here's the problem: if you want to *train* an agent with RL inside one of these harnesses, you're stuck. Existing open RL frameworks (veRL, OpenRLHF, TRL) assume a clean loop — sample from policy, get reward, update parameters. They cannot natively express the messy reality of a harness that spawns sub-processes, makes asynchronous tool calls, and maintains state across dozens of turns. So researchers either (a) train in simplified toy environments and hope it transfers, (b) use proprietary closed systems like OpenAI's internal stacks, or (c) hack together brittle training pipelines that break when the harness changes. The gap is clear: there's no open, general-purpose way to do end-to-end RL training inside real-world harnesses at scale.
+
+```
+Problem: Complex harnesses (stateful, multi-process)
+  |
+  v
+Assumption: RL training needs clean, stateless policy loops
+  |
+  v
+Contradiction: Real harnesses don't fit that abstraction
+  |
+  v
+Prior work: Train in simplified envs OR use proprietary infra
+  |
+  v
+Gap: No open framework for harness-native RL training
+  |
+  v
+Method: Lightweight proxy intercepts harness model calls
+  + Kubernetes orchestrator isolates rollouts in containers
+  |
+  v
+Evidence: Trains agents in ZeroClaw/OpenClaw/Codex + GUI envs
+  + Outperforms open baselines on ClawEval, OSWorld, WebVoyager
+  |
+  v
+Conclusion: Harness-native RL training is now accessible and effective
+```
+
+## The Increment
+
+**One sentence**: Before this paper, training an agent with RL inside a real inference harness required proprietary infrastructure or painful engineering; after this paper, any researcher can do it with an open-source proxy and a Kubernetes cluster.
+
+### Core Mechanism
+
+OpenForgeRL's architecture has two key components that work together to bridge the harness-training gap. The first is a **lightweight proxy server** that sits between the harness and the language model. When the harness makes an API call to the model (e.g., "generate the next action"), the proxy forwards this to the actual training policy, gets a response, and returns it to the harness — exactly like a normal model server. But simultaneously, the proxy records the full context (system prompt, tool schemas, conversation history, model output) as a training trajectory. This recording is formatted into the standard data structures that RL frameworks like veRL expect. The beauty is that the harness doesn't know it's talking to a proxy rather than a real model server — it operates exactly as it would in production.
+
+The second component is a **Kubernetes-based orchestrator** that manages the rollout process. Each training episode gets its own isolated container: the harness environment runs in one pod, the proxy in another, and they communicate over the network. This isolation is critical because harnesses like browser-use agents or coding agents can crash, hang, or leak state — you don't want one broken rollout contaminating the entire training job. The orchestrator handles lifecycle management, timeout enforcement, and resource allocation across hundreds of concurrent rollouts. After a rollout completes, the recorded trajectories flow into a standard RL training loop (PPO, GRPO, etc.) hosted by veRL, which updates the policy parameters. Those updated parameters are then served back through the proxy for the next batch of rollouts.
+
+```
++--------------------------------------------------+
+|              Kubernetes Orchestrator              |
+|                                                  |
+|  +-----------+    +---------+    +-----------+   |
+|  |  Harness  |    |  Proxy  |    | RL Trainer|   |
+|  |  (e.g.    |--->| (record |--->| (veRL w/  |   |
+|  |  OpenClaw)|    |  & fwd) |    |  PPO/GRPO)|   |
+|  |  in pod)  |<---|  in pod)|<---|  in pod)  |   |
+|  +-----------+    +---------+    +-----------+   |
+|       |               |                |         |
+|       v               v                v         |
+|  [Tool calls]   [Trajectories]   [Policy update] |
+|  [Env state]    [to storage]     [to proxy]      |
++--------------------------------------------------+
+```
+
+The structural metaphor: think of OpenForgeRL as a **restaurant kitchen with a secret critic**. The chef (harness) runs the kitchen exactly as always — same recipes, same workflow, same tools. But there's a critic (proxy) sitting at the pass, tasting every dish that goes out. The critic doesn't interfere with the cooking, but meticulously records what was ordered, what was prepared, how it tasted, and whether the diners (environment) were satisfied. After service, the critic sits down with the head chef (RL trainer) and reviews the evening's performance: "this dish overcooked, that sauce was brilliant, here's what to adjust." The next night, the chef's skills are slightly better. The kitchen (Kubernetes orchestrator) ensures each dinner service is fully isolated — if one table catches fire, the rest of the restaurant keeps running. The key insight is that you don't need to redesign the kitchen to train a better chef. You just need someone watching carefully and providing feedback.
+
+### Key Concepts
+
+- **Harness-native training**: Traditional RL training simplifies the agent's operating environment into a clean Markov decision process — state, action, reward, next state. But real agents deployed in harnesses like Claude Code or browser-use frameworks operate in a much messier world: they spawn sub-agents, call external APIs, maintain memory across turns, and interact with tools that have unpredictable behavior. "Harness-native" means training happens **inside* the real harness, not a simplified proxy of it. Concretely, if your agent will be deployed using OpenClaw's tool-calling loop with retry logic and context management, you train it using that exact same loop. The proxy makes this possible by intercepting without interfering.
+
+- **Decoupled training and inference**: In a standard RL setup, the model that generates actions and the model being updated are tightly coupled — often the same process. OpenForgeRL separates them. The proxy handles inference (generating actions for the harness), while veRL handles training (updating policy parameters from collected trajectories). They communicate asynchronously through shared storage. This decoupling means you can use any harness on one side and any RL framework on the other, and swap either without changing the other. It's the difference between a monolithic application and a microservice architecture — each component can evolve independently.
+
+- **Rollout isolation via containers**: Each training episode is a self-contained story with a beginning (task assignment), middle (agent acting in environment), and end (reward computation). In naive implementations, a buggy rollout can corrupt shared memory or leave zombie processes. OpenForgeRL gives each rollout its own container, like giving each patient their own hospital room. If one episode crashes or hangs, the orchestrator kills its container and starts fresh, without affecting the hundreds of other concurrent rollouts. This isn't just good engineering practice — it's essential for RL training stability, where a single corrupted trajectory can destabilize the entire policy update.
+
+## Framework Shift
+
+```
+Before (mainstream approach):              After (this paper):
++-------------------+                     +-------------------+
+| Simplified Env    |                     | Real Harness      |
+| (custom Gym-like) |                     | (OpenClaw, Codex, |
+|                   |                     |  browser-use, ...)|
++--------+----------+                     +--------+----------+
+         |                                         |
+         v                                         v
++-------------------+                     +-------------------+
+| Custom training   |                     | Proxy (record &   |
+| loop, tightly     |                     | forward, transparent|
+| coupled to env    |                     | to harness)       |
++--------+----------+                     +--------+----------+
+         |                                         |
+         v                                         v
++-------------------+                     +-------------------+
+| RL update (in     |                     | K8s Orchestrator  |
+| same process)     |                     | (isolated pods)   |
++-------------------+                     +--------+----------+
+                                                   |
+                                                   v
+                                          +-------------------+
+                                          | veRL / any RL     |
+                                          | framework         |
+                                          +-------------------+
+```
+
+From training in toy environments and hoping for transfer, to training directly in the production harness — the core shift is treating the harness as a first-class citizen in the RL training loop rather than an obstacle to abstract away.
+
+## Expert Assessment
+
+**Problem choice**: This is a genuine and well-identified gap. The field has been producing increasingly complex agent harnesses while training infrastructure lags behind, stuck in the paradigm of simple environment loops. The pain point is real — anyone who's tried to do RL training inside a browser-use agent or a coding harness has hit this wall. It sits at the intersection of systems engineering and ML research, which is exactly where practical progress is bottlenecked right now.
+
+**Method maturity**: The proxy-based decoupling is a clever and principled engineering solution rather than a novel algorithmic contribution. It's more "infrastructure insight" than "scientific insight." The Kubernetes orchestration is solid but not novel — it's applying well-known container orchestration patterns to a new domain. There might be simpler approaches (e.g., a unified API specification that harnesses and RL frameworks both implement), but the proxy approach has the advantage of requiring zero modification to existing harnesses, which is pragmatically valuable.
+
+**Experimental integrity**: The benchmarks span diverse domains (code execution, GUI interaction, web browsing) which is commendable. The results against open baselines are strong — 37.7 on OSWorld-Verified and 72.3 on WebVoyager are competitive numbers. However, the comparison pool is somewhat thin; they're mostly comparing against other open-source efforts of similar scale. The comparison to proprietary systems is absent (understandably, since those numbers aren't public), making it hard to gauge true competitive standing. The ablation on harness choice (showing some harnesses are harder to learn than others) is genuinely useful and adds analytical depth beyond just benchmark numbers.
+
+**Writing quality**: The paper is well-structured and clearly motivated. The gap between the introduction's framing and the experimental depth could be tighter — the introduction promises a general framework, but the experiments cover a specific (though diverse) set of harnesses. Section 4 on harness analysis is the most interesting read and could be expanded; it's where the paper moves from "we built infrastructure" to "we learned something about agents." The limitation that error recovery remains weak is honestly acknowledged but deserves deeper analysis — is this a training data issue, a reward signal issue, or a fundamental capability ceiling?
+
+**Verdict**: weak accept — The paper solves a real infrastructure problem with a clean engineering approach and validates it across diverse settings. It's more of a systems contribution than a scientific one, but the field needs this kind of scaffolding work. The analytical insights on harness difficulty and RL's effect on agent behavior elevate it beyond pure engineering.
+
+## Takeaways
+
+Three concrete ideas worth stealing:
+
+1. **The proxy pattern for RL in complex systems**: If you're trying to add RL training to any complex, stateful system (not just LLM harnesses), the "transparent proxy that records while forwarding" pattern is immediately applicable. You don't need to modify the system — just intercept its model calls.
+
+2. **Harness choice as a training variable**: The finding that some harnesses are substantially harder to learn from than others is a practical insight. Before investing compute in RL training, evaluate whether your harness's control flow is learnable — complex branching, opaque error handling, and implicit state make RL harder.
+
+3. **Container isolation for rollout robustness**: If you're doing any kind of parallel environment simulation (RL, evaluation, data collection), running each episode in an isolated container with timeout enforcement is a pattern that generalizes far beyond this paper's specific application. It prevents the class of bugs where one bad episode poisons the batch.
+:::
+
+:::zh
+**论文**: [2607.21557](https://arxiv.org/abs/2607.21557)
+**作者**: Xiao Yu, Baolin Peng, Ruize Xu, Hao Zou, Qianhui Wu, Hao Cheng, Wenlin Yao, Nikhil Singh, Zhou Yu, Jianfeng Gao
+**分类**: cs.AI, cs.CL
+
+## 缺口
+
+现代 AI Agent 运行在复杂的推理 Harness 中——Claude Code、Codex、OpenClaw——这些系统负责编排多轮推理、工具调用和环境交互。
+它们是有状态的、多进程的，和所管理的系统深度耦合。
+问题来了：如果你想用 RL 在这些 Harness 内部训练 Agent，你就会碰壁。
+现有的开源 RL 框架（veRL、OpenRLHF、TRL）假设一个干净的循环——从策略采样、获取奖励、更新参数。
+它们无法原生表达 Harness 那种混乱的现实：派生子进程、异步工具调用、跨数十轮维持状态。
+所以研究者只能：(a) 在简化玩具环境中训练然后寄希望于迁移，(b) 使用 OpenAI 等的闭源内部系统，(c) 拼凑脆弱的训练管线，Harness 一改就崩。
+缺口很明确：没有一个开源的、通用的方式在真实 Harness 中大规模做端到端 RL 训练。
+
+```
+问题：复杂 Harness（有状态、多进程）
+  |
+  v
+假设：RL 训练需要干净的、无状态的策略循环
+  |
+  v
+矛盾：真实 Harness 不符合这个抽象
+  |
+  v
+此前做法：在简化环境训练 OR 用闭源基建
+  |
+  v
+缺口：无开源框架支持 Harness 原生 RL 训练
+  |
+  v
+方法：轻量代理拦截 Harness 的模型调用
+  + K8s 编排器隔离每个 Rollout 到独立容器
+  |
+  v
+证据：在 ZeroClaw/OpenClaw/Codex + GUI 环境训练
+  + 在 ClawEval、OSWorld、WebVoyager 上超越开源基线
+  |
+  v
+结论：Harness 原生 RL 训练现在可及且有效
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，在真实推理 Harness 内用 RL 训练 Agent 需要闭源基础设施或痛苦的工程；之后，任何研究者用一个开源代理加一个 K8s 集群就能做到。
+
+### 核心机制
+
+OpenForgeRL 的架构有两个核心组件，协同弥合 Harness 与训练之间的鸿沟。
+第一个是**轻量级代理服务器**，位于 Harness 和语言模型之间。
+当 Harness 向模型发起 API 调用时（比如"生成下一步动作"），代理将其转发给实际的训练策略，拿到响应后返回给 Harness——跟一个普通模型服务器一模一样。
+但与此同时，代理把完整的上下文（系统提示、工具 schema、对话历史、模型输出）记录为训练轨迹。
+这些记录被格式化为 veRL 等 RL 框架期望的标准数据结构。
+精妙之处在于 Harness 完全不知道自己在跟代理而非真正的模型服务器对话——它的运行方式和生产环境完全一致。
+
+第二个组件是基于 **Kubernetes 的编排器**，管理整个 Rollout 流程。
+每个训练 Episode 拥有自己独立的容器：Harness 环境跑在一个 Pod，代理跑在另一个 Pod，通过网络通信。
+这种隔离至关重要，因为浏览器 Agent 或编码 Agent 可能崩溃、挂起或泄漏状态——你不想让一个坏掉的 Rollout 污染整个训练任务。
+编排器负责生命周期管理、超时强制和跨数百个并发 Rollout 的资源分配。
+Rollout 完成后，记录的轨迹流入标准 RL 训练循环（PPO、GRPO 等），更新策略参数。
+更新后的参数再通过代理供下一批 Rollout 使用。
+
+```
++--------------------------------------------------+
+|              Kubernetes 编排器                     |
+|                                                  |
+|  +-----------+    +---------+    +-----------+   |
+|  |  Harness  |    |  代理    |    | RL 训练器 |   |
+|  | (如       |--->| (记录    |--->| (veRL 中  |   |
+|  |  OpenClaw)|    |  并转发) |    |  PPO/GRPO)|   |
+|  |  在 Pod 中)|<---|  在 Pod 中)|<---|  在 Pod 中)|  |
+|  +-----------+    +---------+    +-----------+   |
+|       |               |                |         |
+|       v               v                v         |
+|  [工具调用]     [轨迹数据]       [策略更新]       |
+|  [环境状态]     [存入存储]       [送回代理]       |
++--------------------------------------------------+
+```
+
+**核喻**：把 OpenForgeRL 想象成一个**有暗访评委的餐厅厨房**。
+厨师（Harness）照常运转——同样的菜谱、同样的流程、同样的工具。
+但有个评委（代理）坐在出菜口，品尝每一道出去的菜。
+评委不干预烹饪，但一丝不苟地记录：点了什么、做了什么、味道如何、食客（环境）满不满意。
+打烊后，评委和主厨（RL 训练器）坐下来复盘今晚的表现："这道菜过火了，那个酱汁很出色，这里要调整。"
+第二天晚上，厨师的技艺稍有精进。
+厨房（Kubernetes 编排器）确保每一次晚餐服务完全隔离——如果一张桌子着火了，餐厅其他部分照常运转。
+核心洞察是：你不需要重新设计厨房来训练更好的厨师。
+你只需要有人仔细观察并提供反馈。
+
+### 关键概念
+
+- **Harness 原生训练**: 传统 RL 训练把 Agent 的操作环境简化成一个干净的马尔可夫决策过程——状态、动作、奖励、下一状态。
+但部署在 Claude Code 或浏览器使用框架中的真实 Agent 运行在一个更混乱的世界：它们派生子 Agent、调用外部 API、跨轮次维护记忆、和行为不可预测的工具交互。
+"原生"意味着训练发生在真实 Harness 内部，而不是其简化代理中。
+具体来说，如果你的 Agent 将用 OpenClaw 的工具调用循环（含重试逻辑和上下文管理）来部署，你就用那个完全相同的循环来训练。
+代理使得这一切成为可能——拦截但不干扰。
+
+- **解耦训练与推理**: 在标准 RL 设置中，生成动作的模型和被更新的模型紧密耦合——往往是同一个进程。
+OpenForgeRL 把它们分开了。
+代理负责推理（为 Harness 生成动作），veRL 负责训练（从收集的轨迹更新策略参数）。
+它们通过共享存储异步通信。
+这种解耦意味着你可以随意替换任一侧的组件：换 Harness 或换 RL 框架，另一边不用动。
+这就像从单体应用到微服务架构的转变——每个组件可以独立演进。
+
+- **容器隔离的 Rollout**: 每个训练 Episode 是一个自包含的故事：开头（任务分配）、中间（Agent 在环境中行动）、结尾（奖励计算）。
+在朴素实现中，一个有 Bug 的 Rollout 可能污染共享内存或留下僵尸进程。
+OpenForgeRL 给每个 Rollout 自己的容器，就像给每个病人独立的病房。
+如果一个 Episode 崩溃或挂起，编排器杀掉它的容器并重新开始，不影响其他数百个并发 Rollout。
+这不只是好的工程实践——对于 RL 训练稳定性至关重要，一条被污染的轨迹就能破坏整个策略更新。
+
+## 框架转变
+
+```
+之前（主流方法）：                  之后（本文方法）：
++-------------------+              +-------------------+
+| 简化环境           |              | 真实 Harness      |
+|（自定义 Gym 式）   |              |（OpenClaw, Codex, |
+|                   |              | 浏览器 Agent…）    |
++--------+----------+              +--------+----------+
+         |                                   |
+         v                                   v
++-------------------+              +-------------------+
+| 自定义训练循环     |              | 代理（透明记录     |
+| 与环境紧耦合       |              | 并转发，Harness    |
+|                   |              | 毫无感知）         |
++--------+----------+              +--------+----------+
+         |                                   |
+         v                                   v
++-------------------+              +-------------------+
+| RL 更新           |              | K8s 编排器         |
+|（同一进程中）      |              |（独立 Pod 隔离）    |
++-------------------+              +--------+----------+
+                                              |
+                                              v
+                                     +-------------------+
+                                     | veRL / 任意 RL    |
+                                     | 框架              |
+                                     +-------------------+
+```
+
+从在玩具环境训练然后祈祷迁移，到直接在生产 Harness 中训练——核心转变是把 Harness 当作 RL 训练循环的一等公民，而非需要抽象掉的障碍物。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实且定位精准的缺口。领域一直在产出越来越复杂的 Agent Harness，但训练基础设施远远落后，还卡在简单环境循环的范式里。痛点真实存在——任何尝试在浏览器 Agent 或编码 Harness 中做 RL 训练的人都撞过这堵墙。它处在系统工程和 ML 研究的交叉点，正是当前实用进展被卡住的地方。
+
+**方法成熟度**: 基于代理的解耦是一个巧妙且有原则的工程方案，但不是新颖的算法贡献。它更多是"基建洞察"而非"科学洞察"。Kubernetes 编排稳健但不新奇——是把成熟的容器编排模式应用到新领域。可能有更简单的方案（比如统一的 API 规范让 Harness 和 RL 框架共同实现），但代理方案的优势在于不需要修改任何现有 Harness，这在实用层面非常有价值。
+
+**实验诚意**: 基准测试覆盖了多个领域（代码执行、GUI 交互、网页浏览），值得肯定。对开源基线的结果很强——OSWorld-Verified 37.7 和 WebVoyager 72.3 是有竞争力的数字。然而，对比的基线池偏薄，主要是同等规模的开源方案。和闭源系统的比较缺失（可以理解，那些数字不公开），使得很难判断真正的竞争位置。关于 Harness 选择的消融分析（展示某些 Harness 更难学习）真正有实用价值，在"我们建了基建"之上增加了"我们理解了 Agent"的分析深度。
+
+**写作功力**: 论文结构清晰、动机明确。但引言的宏大叙事和实验深度之间存在缝隙——引言承诺通用框架，但实验只覆盖了一组特定（虽然多样）的 Harness。第 4 节关于 Harness 分析是最有趣的阅读部分，可以从"我们建了基建"跃升到"我们从 Agent 中学到了什么"。关于错误恢复仍然薄弱的诚实坦白值得肯定，但需要更深入的分析——这是训练数据问题、奖励信号问题，还是根本的能力天花板？
+
+**判决**: 弱接收——论文用干净的工程方案解决了一个真实的基建问题，并在多样场景中验证了它。这更多是系统贡献而非科学贡献，但领域确实需要这种脚手架工作。关于 Harness 难度和 RL 对 Agent 行为影响的分析洞察将它从纯工程论文中拉高了一截。
+
+## 要点总结
+
+三个可以"偷"走的具体想法：
+
+1. **代理模式用于复杂系统中的 RL 训练**: 如果你要给任何复杂的有状态系统加 RL 训练（不只是 LLM Harness），"透明代理边转发边记录"这个模式可以直接套用。不需要修改系统——只需拦截它的模型调用。
+
+2. **Harness 选择是一个训练变量**: 某些 Harness 比其他 Harness 难学得多，这是一个实用洞察。在投入算力做 RL 训练之前，先评估你的 Harness 控制流是否可学习——复杂的分支、不透明的错误处理、隐式状态都会让 RL 更难。
+
+3. **容器隔离保证 Rollout 鲁棒性**: 如果你在做任何形式的并行环境模拟（RL、评估、数据收集），把每个 Episode 跑在独立容器中并加超时强制，是一个远超本文特定场景的通用模式。它能防住"一个坏 Episode 毒化整个批次"那类 Bug。
+:::
