@@ -1,0 +1,295 @@
+---
+title:
+  en: "Progressive Seed Pruning: Spend Your Inference Budget Where It Matters"
+  zh: "渐进式种子剪枝：把推理算力花在刀刃上"
+description:
+  en: "Instead of denoising every candidate seed to completion, PSP scores intermediate results early and prunes aggressively — concentrating fixed compute on the most promising trajectories."
+  zh: "PSP 不再将所有候选种子完整去噪，而是在早期阶段评分并大幅剪枝——将固定算力集中在最有潜力的轨迹上。"
+date: 2026-07-24
+tags: ["arxiv", "ai", "cs.cv"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.21591](https://arxiv.org/abs/2607.21591)
+**Authors**: Rogerio Guimaraes, Pietro Perona
+**Categories**: cs.CV
+
+## The Gap
+
+Diffusion and flow-matching models are the workhorses of image generation, but their inference-time scaling story is embarrassingly thin compared to what autoregressive LLMs enjoy. The core problem: final image quality is extremely sensitive to the initial noise seed. Change the random seed, get a wildly different result — some great, some mediocre.
+
+Existing approaches handle this in two ways. **Best-of-N** simply denoises N seeds completely and picks the highest-scoring one — wasteful, since you burn full compute on seeds that were obviously bad at step 2. **Tree search / importance sampling** methods maintain a fixed number of candidates at every timestep, spreading compute uniformly across the trajectory. The shared blind spot: they all maintain a **constant memory footprint** throughout inference, never asking whether some seeds deserve more attention than others.
+
+The authors' insight is deceptively simple: you can predict final quality from intermediate denoised images. If a seed looks bad at 25% denoising, it's not going to magically become great at 100%. So why keep evaluating it? Relax the constant-memory constraint, front-load your exploration, and prune hard.
+
+```
+[Seed sensitivity: quality varies wildly across random seeds]
+                            |
+                            v
+[Prior constant-memory methods spread compute uniformly]
+                            |
+                            v
+[Key insight: intermediate scores predict final quality]
+                            |
+                            v
+[PSP: explore many seeds early, prune progressively]
+                            |
+                            v
+[Same total model evaluations, better final winners]
+```
+
+## The Increment
+
+**One sentence**: Before this paper, inference-time scaling for diffusion models meant picking the best from a fixed set; after this paper, it means a dynamic tournament where early losers get eliminated and survivors receive concentrated compute.
+
+### Core Mechanism
+
+Progressive Seed Pruning works in stages. You start with a large pool of N random seeds (say, 64). Instead of denoising all of them to completion, you partially denoise every seed to an intermediate timestep — maybe 25% of the way. At this checkpoint, you score each candidate using a reward model (automated metrics like prompt-alignment scores, or any differentiable/black-box reward). The bottom fraction gets pruned. You repeat: take the survivors, denoise them further to 50%, score again, prune again. By the final stage, you might have just 1–4 candidates completing full denoising.
+
+The critical constraint is that the **total number of model evaluations is fixed**. PSP doesn't add compute — it redistributes it. You spend many cheap, partial evaluations early (where individual steps are fast) and concentrate expensive full evaluations only on the seeds that earned it. This is possible because denoising from timestep 0 to 25% uses fewer resources than denoising from 75% to 100%, so the math works out: exploring broadly early is cheap.
+
+The scoring function is the linchpin. It needs to be predictive of final quality from partial denoising. The paper uses reward models and automated metrics (GenEval), but the framework is agnostic to the specific scorer — any signal that correlates with final quality at intermediate steps will do.
+
+```
+N seeds (64)
+    |
+    v
+[Partial Denoise to 25%]
+    |
+    v
+[Score all 64] --> [Prune to 16]
+    |
+    v
+[Partial Denoise to 50%]
+    |
+    v
+[Score all 16] --> [Prune to 4]
+    |
+    v
+[Partial Denoise to 75%]
+    |
+    v
+[Score all 4] --> [Prune to 1]
+    |
+    v
+[Full Denoise] --> Final image
+```
+
+**The Audition Metaphor**: Imagine you're casting a movie and you have 1,000 audition tapes, but only budget to watch a total of 1,000 minutes of footage. The old way: watch all 1,000 tapes end-to-end (1 minute each), then rank them. PSP's way: watch the first 15 seconds of all 1,000 tapes (250 minutes). You can already tell who has screen presence and who doesn't. Cut to 250 actors. Now watch 1 minute of each (another 250 minutes). Cut to 60. Watch 2 minutes each (120 minutes). Cut to 15. Watch the full tape (375 minutes). You've spent roughly the same total time, but your finalists got 25× more screen time than your early cuts — and your winner is much better than if you'd given everyone exactly 1 minute.
+
+The mapping is load-bearing: audition tapes are noise seeds, watching footage is model evaluations, cutting actors is pruning, and the fixed budget is total compute. The core bet — that you can spot talent in 15 seconds — maps directly to the paper's assumption that intermediate quality predicts final quality.
+
+### Key Concepts
+
+- **Seed sensitivity**: Every diffusion model starts from random noise. The same prompt + different noise = completely different images, ranging from stunning to incoherent. This isn't a bug; it's the nature of the sampling process. The practical consequence is that single-shot generation is a lottery. If you care about quality, you need to generate multiple candidates — but how you spend that extra compute matters enormously.
+
+- **Inference-time scaling**: At training time, you've already baked in the model's capabilities. At inference time, the question is: given a fixed compute budget, how do you extract the best possible output? For LLMs, this is well-studied (chain-of-thought, best-of-N, tree search). For diffusion models, the field has mostly relied on brute-force best-of-N. PSP shows there's a smarter allocation strategy — think of it as the difference between giving every student the same textbook vs. tutoring the promising ones more intensively.
+
+- **Progressive pruning as compute allocation**: The deeper principle is that not all compute is equal. Evaluating a nearly-finished image is expensive (you've already done 90% of the denoising steps). Evaluating a barely-started image is cheap. So early-stage evaluations have a better compute-to-information ratio. PSP exploits this asymmetry: cast a wide net when evaluations are cheap, narrow the field when they get expensive. It's the same logic behind multi-stage hiring processes, drug trial phases, or venture capital funnels.
+
+## Framework Shift
+
+```
+Before (mainstream):                   After (this paper):
+
+seed1 ---------------->[full denoise]  seed1 --+
+seed2 ---------------->[full denoise]  seed2 --+--[denoise 25%]
+seed3 ---------------->[full denoise]  seed3 --+       |
+  ...                                  seed4 --+   [score+prune]
+seedN ---------------->[full denoise]  seed5 --+       |
+      |                                      |    [denoise 50%]
+  [pick best]                               ...       |
+                                                  [score+prune]
+                                              survivors |
+                                                  [denoise 75%]
+                                                      ...
+                                                  [winner]
+
+Equal work per seed, uniform.       Unequal work, earns its keep.
+```
+
+From uniform compute allocation to dynamic compute allocation, the core shift is treating inference as a tournament bracket rather than a parallel race.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, well-positioned. Inference-time scaling for diffusion is genuinely underdeveloped relative to LLMs, and the field has been coasting on best-of-N as the default. The observation that intermediate quality predicts final quality is not new per se — it's implicit in every paper that uses early stopping or guidance schedules — but nobody had systematically exploited it for seed selection. Good instinct to formalize this.
+
+**Method maturity**: Cleverer than brute force, but not over-engineered. The core idea is essentially a compute-reallocating tournament, which is conceptually simple. The risk is that the method's effectiveness is tightly coupled to the quality of the intermediate scoring function — if your reward model is noisy at early timesteps, you might prune good seeds prematurely. The paper would benefit from an ablation on scoring accuracy at different denoising stages. There may be simpler approximations (e.g., just running two stages of pruning instead of many) that capture most of the benefit.
+
+**Experimental integrity**: The baselines are reasonable — best-of-N, importance sampling, and tree search cover the main competing paradigms. GenEval is standard for automated evaluation, and the addition of human evaluation for prompt-alignment is a plus. The "matched compute" framing is the right way to compare. One concern: how sensitive are the results to the number of pruning stages and the pruning schedule? If the method requires careful hyperparameter tuning per model/reward combination, that limits practical adoption. I'd want to see sensitivity analysis.
+
+**Writing quality**: The abstract is crisp and well-structured — it clearly states the gap, the insight, and the evidence. The project page and code availability are good signs. The framing around "relaxing the constant-memory constraint" is a nice way to position the contribution. Without seeing the full paper, I'd flag that the related work section is likely where corners could be cut — there's a rich literature on compute-optimal inference in LLMs that deserves a careful mapping.
+
+**Verdict**: weak accept — Clean idea, solid evaluation framing, addresses a real gap, but the method's practical ceiling depends heavily on scoring function quality, which deserves deeper investigation.
+
+## Takeaways
+
+Three things worth stealing:
+
+1. **The tournament framing for any multi-candidate generation task**: If you're generating multiple candidates and picking the best, ask yourself: can I evaluate intermediate states cheaply? If yes, prune early and reallocate compute. This transfers to video generation, text-to-3D, music synthesis — anywhere you run multiple expensive generation passes.
+
+2. **Compute-as-currency thinking**: Don't treat inference budget as "run N models." Think of it as a budget you allocate dynamically. Early evaluations are cheap and informative; late evaluations are expensive and less discriminative. Front-load your information gathering. This is the same principle behind multi-armed bandit algorithms and Bayesian optimization, just applied to diffusion seeds.
+
+3. **Intermediate quality as a proxy**: If you're building a reward model for generative outputs, consider whether it works on partially-generated outputs. A reward model that only scores finished images forces you into best-of-N. One that scores half-finished images unlocks progressive strategies. This is a design constraint worth building toward from the start.
+:::
+
+:::zh
+**论文**: [2607.21591](https://arxiv.org/abs/2607.21591)
+**作者**: Rogerio Guimaraes, Pietro Perona
+**分类**: cs.CV
+
+## 缺口
+
+扩散模型和流匹配模型是图像生成的主力引擎，但它们在推理时计算扩展方面的故事，与自回归大语言模型相比简直乏善可陈。
+核心问题在于：最终图像质量对初始噪声种子极其敏感。
+换一个随机种子，结果可能天差地别——有的惊艳，有的平庸。
+
+现有方法用两种方式应对。
+**Best-of-N**：把 N 个种子全部完整去噪，然后选得分最高的——浪费严重，因为有些种子在第 2 步就已经明显不行了，却仍然消耗了全部算力。
+**树搜索 / 重要性采样**：在每个时间步维护固定数量的候选，把算力均匀铺开。
+它们的共同盲点：全程维持**恒定内存占用**，从不追问"哪些种子值得更多关注"。
+
+作者的洞察看似简单：你可以从中间去噪结果预测最终质量。
+如果一个种子在 25% 去噪时就已经很丑，它不会在 100% 时突然变美。
+那为什么还要继续评估它？
+放松恒定内存约束，把探索前置，果断剪枝。
+
+```
+[种子敏感性：质量在随机种子间剧烈波动]
+              |
+              v
+[先前的恒定内存方法：均匀分配算力]
+              |
+              v
+[关键洞察：中间分数可预测最终质量]
+              |
+              v
+[PSP：早期广泛探索，渐进剪枝]
+              |
+              v
+[相同总评估次数，更好的最终赢家]
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，扩散模型的推理时扩展意味着从固定集合中挑最好的；
+之后，它变成一场动态锦标赛——早期的落后者被淘汰，幸存者获得更多资源。
+
+### 核心机制
+
+渐进式种子剪枝分阶段运作。
+你从一个大种子池开始（比如 64 个随机种子）。
+不是把它们全部去噪到终点，而是先把每个种子部分去噪到某个中间时间步——比如 25% 的位置。
+在这个检查点，用奖励模型给每个候选打分（可以是提示对齐分数等自动化指标，也可以是任何可微/黑盒奖励）。
+排名靠后的一定比例被淘汰。
+重复这个过程：幸存者继续去噪到 50%，再次打分，再次剪枝。
+到最后阶段，可能只剩 1–4 个候选完成完整去噪。
+
+关键约束是**总模型评估次数固定**。
+PSP 不是增加算力，而是重新分配算力。
+你在早期做大量廉价的部分评估（那时候单步计算量小），只把昂贵的完整评估留给那些"挣到了资格"的种子。
+这之所以可行，是因为从时间步 0 去噪到 25% 的开销远小于从 75% 到 100%，所以数学上说得通：早期广泛探索是便宜的。
+
+评分函数是命脉。
+它需要能从部分去噪结果预测最终质量。
+论文使用奖励模型和自动化指标（GenEval），但框架本身对具体评分器是不可信依赖的——任何在中间步骤与最终质量相关的信号都可以。
+
+```
+64 个种子
+    |
+    v
+[部分去噪到 25%]
+    |
+    v
+[给 64 个打分] --> [剪枝到 16 个]
+    |
+    v
+[部分去噪到 50%]
+    |
+    v
+[给 16 个打分] --> [剪枝到 4 个]
+    |
+    v
+[部分去噪到 75%]
+    |
+    v
+[给 4 个打分] --> [剪枝到 1 个]
+    |
+    v
+[完整去噪] --> 最终图像
+```
+
+**海选比喻**：想象你在为一部电影选角，手上有一千份试镜录像带，但预算只够看总共一千分钟的素材。
+旧做法：把一千份录像带从头看到尾（每份一分钟），然后排名。
+PSP 的做法：先看所有一千份的前 15 秒（250 分钟）。
+这时候你已经能看出谁有镜头感、谁没有了。
+淘汰到 250 人。
+现在每人看 1 分钟（又是 250 分钟）。
+淘汰到 60 人。
+每人看 2 分钟（120 分钟）。
+淘汰到 15 人。
+完整观看最终候选人的录像（375 分钟）。
+总时间差不多，但你的决赛选手获得了 25 倍于早期淘汰者的镜头时间——你的最终选择远比每人一分钟的做法要好。
+
+这个比喻是承重的：试镜录像带就是噪声种子，观看素材就是模型评估，淘汰演员就是剪枝，固定预算就是总算力。
+核心赌注——你能从 15 秒内看出天赋——直接映射到论文的假设：中间质量可预测最终质量。
+
+### 关键概念
+
+- **种子敏感性**: 每个扩散模型都从随机噪声开始。同样的提示词 + 不同的噪声 = 完全不同的图像，从惊艳到乱七八糟都有。这不是缺陷，而是采样过程的本质。实际后果是：单次生成就是买彩票。如果你在乎质量，就必须生成多个候选——但如何花这笔额外算力，差别巨大。
+
+- **推理时计算扩展**: 训练阶段已经把模型能力烘焙进去了。推理时的问题是：给定固定算力预算，如何榨出最佳输出？对大语言模型来说，这已经被充分研究（思维链、Best-of-N、树搜索）。
+对扩散模型来说，学界主要依赖蛮力 Best-of-N。
+PSP 表明存在更聪明的分配策略——想象一下，给每个学生发同一本教材 vs. 给有潜力的学生更多一对一辅导。
+
+- **渐进剪枝作为算力分配**: 更深的原则是，不是所有计算都是等价的。评估一张快完成的图像很贵（你已经做了 90% 的去噪步骤）。
+评估一张刚开始的图像很便宜。
+所以早期评估的"算力-信息比"更高。
+PSP 利用这种不对称性：在评估便宜的时候撒大网，在评估变贵的时候收窄范围。
+这和多阶段招聘流程、药物临床试验分期、风险投资漏斗是同一个逻辑。
+
+## 框架转变
+
+```
+之前（主流方法）：                  之后（本文方法）：
+
+seed1 ------------>[完整去噪]     seed1 --+
+seed2 ------------>[完整去噪]     seed2 --+--[去噪 25%]
+seed3 ------------>[完整去噪]     seed3 --+       |
+  ...                             seed4 --+  [打分+剪枝]
+seedN ------------>[完整去噪]     seed5 --+       |
+      |                                  ...  [去噪 50%]
+  [选最大]                                   |
+                                         [打分+剪枝]
+                                      幸存者 |
+                                         [去噪 75%]
+                                            ...
+                                        [赢家]
+
+每颗种子等量工作，均匀分配。      不等量工作，按表现分配。
+```
+
+从均匀算力分配到动态算力分配，核心转变是把推理过程视为锦标赛而非并行赛跑。
+
+## 专家评审
+
+**选题眼光**: 真实的缺口，定位精准。扩散模型的推理时计算扩展相对于大语言模型确实发展不足，学界一直靠 Best-of-N 吃老本。"中间质量可预测最终质量"这个观察本身不算新——它隐含在每一篇使用早停或引导调度的论文里——但没有人系统地把它用在种子选择上。嗅觉不错。
+
+**方法成熟度**: 比蛮力聪明，但没有过度设计。核心思想本质上是一个算力再分配的锦标赛，概念上简洁。风险在于方法的效果与中间评分函数的质量紧密耦合——如果奖励模型在早期时间步就很嘈杂，你可能会过早剪掉好种子。论文应该补充一个关于不同去噪阶段评分准确率的消融实验。可能有更简单的近似方案（比如只做两级剪枝而非多级）就能抓住大部分收益。
+
+**实验诚意**: 基线选择合理——Best-of-N、重要性采样和树搜索覆盖了主要竞争范式。GenEval 是标准自动化指标，加上人工评估提示对齐是个加分项。"匹配算力"是比较的正确方式。一个疑虑：结果对剪枝阶段数和剪枝调度有多敏感？如果方法需要针对每个模型/奖励组合精心调参，会限制实际采用。我希望能看到敏感性分析。
+
+**写作功力**: 摘要干净利落——清楚地陈述了缺口、洞察和证据。"放松恒定内存约束"的定位方式很巧妙。项目主页和代码开放是好信号。在没看到全文的情况下，我猜测相关工作部分可能是偷工减料的地方——LLM 推理时计算优化有丰富的文献，值得仔细映射。
+
+**判决**: 弱接收 — 想法干净，评估框架扎实，切中真实缺口，但方法的实际上限高度依赖评分函数质量，这一点需要更深入的探讨。
+
+## 要点总结
+
+三件值得偷走的东西：
+
+1. **锦标赛思维适用于任何多候选生成任务**: 如果你在生成多个候选然后挑最好的，问自己：我能廉价地评估中间状态吗？如果能，就尽早剪枝并重新分配算力。这可以迁移到视频生成、文本到 3D、音乐合成——任何需要多次昂贵生成的场景。
+
+2. **把算力当货币来花**: 不要把推理预算想成"跑 N 个模型"。把它想成一笔需要动态分配的资金。早期评估廉价且信息量大；后期评估昂贵且区分度低。把信息收集前置。这和多臂老虎机算法、贝叶斯优化是同一个原则，只是应用到了扩散种子上。
+
+3. **中间质量作为代理信号**: 如果你在为生成式输出构建奖励模型，考虑它能否在部分生成的输出上工作。一个只能给成品打分的奖励模型把你锁死在 Best-N 里。一个能给半成品打分的奖励模型，就能解锁渐进式策略。这是一个从一开始就值得为之设计的约束。
+:::
