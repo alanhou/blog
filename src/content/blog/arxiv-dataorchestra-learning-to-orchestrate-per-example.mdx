@@ -1,0 +1,282 @@
+---
+title:
+  en: "DataOrchestra: Teaching LLMs to Treat Each Data Example Like a Solo Performance"
+  zh: "DataOrchestra：让每条训练数据都享受专属指挥"
+description:
+  en: "A framework that replaces one-size-fits-all pretraining data processing with per-example orchestration, letting an intelligent router decide what each data chunk needs."
+  zh: "一个用逐样本编排取代一刀切预处理的框架，由智能路由为每条数据决定它真正需要的操作。"
+date: 2026-07-28
+tags: ["arxiv", "ai", "cs.cl", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.24717](https://arxiv.org/abs/2607.24717)
+**Authors**: Zhen Huang, Yikun Wang, Shijie Xia, Pengfei Liu
+**Categories**: cs.CL, cs.AI
+
+## The Gap
+
+Everyone working on pretraining data knows the pipeline: deduplicate, filter by quality score, maybe do some rule-based cleaning. The dominant paradigm — from C4 to RedPajama to DCLM — defines these steps at the **corpus or domain level**. You pick a strategy, apply it uniformly to millions of examples, and hope the average behavior works out.
+
+The problem is that "the average" is a fiction. A Wikipedia paragraph with a minor formatting glitch needs surgical editing. A malformed forum post needs to be thrown out entirely. A clean ArXiv abstract needs no touch at all. Applying the same pipeline to all three is either wasteful (cleaning what doesn't need it) or destructive (over-processing what should've been left alone, or under-processing what needed more).
+
+Prior per-example methods exist (e.g., selective filtering via quality classifiers), but they're binary — keep or drop. Nobody has tackled **per-example adaptive processing** where the choice includes **how* to clean, not just *whether* to keep.
+
+```
+Problem: Same pipeline applied uniformly to all examples
+         |
+         v
+Assumption: Not all data needs the same treatment
+         |
+         v
+Method: Per-example orchestrator decides {drop, keep, clean}
+         |                                 |
+         |                                 +-> selects operation(s)
+         |                                 +-> generates instructions
+         |                                 +-> executes via tool models
+         v
+Evidence: Stable gains across 11 benchmarks (0.5B-7B),
+          compute savings from skipping unnecessary ops
+         |
+         v
+Conclusion: Adaptive per-example processing beats uniform pipelines
+```
+
+## The Increment
+
+**One sentence**: Before this paper, data curation was a one-size-fits-all factory line; after, it's a concierge service where each example gets assessed and routed to exactly the treatment it needs.
+
+### Core Mechanism
+
+DataOrchestra has three layers of decision-making that cascade for each data chunk:
+
+**Layer 1 — The Triage.** An orchestrator model (a trained classifier) looks at a chunk of raw web data and makes a three-way decision: **drop** it (too low quality to salvage), **keep** it untouched (already clean enough), or **send it for cleaning**. This is the bottleneck decision — it determines whether expensive downstream processing is even needed.
+
+**Layer 2 — The Prescription.** For chunks that need cleaning, the orchestrator selects which downstream operations to apply from a menu: programmatic fixes (URL removal, whitespace normalization), heuristic rewrites, or LLM-based rewriting with various strategies (paraphrase, expand, restructure). Crucially, it can select **multiple* operations in sequence, building a custom mini-pipeline per example.
+
+**Layer 3 — The Instruction.** For each LLM-based rewriting step, the orchestrator generates a concrete, example-specific instruction — not a generic "clean this up" but something like "remove the navigation artifacts in lines 3-7 and rewrite the fragmented sentence in line 12 as a complete thought." A downstream tool model (e.g., a smaller LLM) executes this instruction.
+
+```
+Raw Data Chunk
+      |
+      v
++------------------+
+|   Orchestrator   |  <-- trained to make routing decisions
++------------------+
+      |
+      +-----> Drop (low quality, unsalvageable)
+      |
+      +-----> Keep (already clean)
+      |
+      +-----> Clean
+                |
+                v
+         +-------------+
+         | Select Ops   |  <-- programmatic / heuristic / LLM-rewrite
+         +-------------+
+                |
+                v
+         +-------------+
+         | Gen Instruct |  <-- per-example, per-op instructions
+         +-------------+
+                |
+                v
+         +-------------+
+         | Tool Model   |  <-- executes the rewrite
+         +-------------+
+                |
+                v
+         Curated Example
+```
+
+**The metaphor that makes it click:** Think of DataOrchestra as a **hospital emergency room triage system**. A patient (data chunk) arrives. The triage nurse (orchestrator) doesn't treat everyone the same — they assess severity. Some patients get sent home (keep — they're fine). Some are beyond help (drop — too damaged). The rest get routed to specific specialists (operations), each of whom receives a tailored treatment plan (instruction) rather than a generic protocol. The key insight is the same as in medicine: the most expensive resource isn't the treatment — it's the **wrong* treatment applied to the wrong patient.
+
+### Key Concepts
+
+- **Per-example orchestration**: Imagine you're a teacher grading 100 essays. The old way: every essay gets the same red-pen treatment — circle errors, add comments, done. The DataOrchestra way: first scan each essay. Some are perfect (return immediately). Some are incomprehensible (return with a note to rewrite). The rest get custom feedback — "fix your thesis statement," "this paragraph needs a transition," "your conclusion contradicts your intro." The orchestrator is the teacher's judgment call, made automatically and at scale. The concrete example: two web pages might both have quality score 0.6, but one is a coherent blog post with some HTML junk (clean it — remove the junk) while the other is a SEO keyword dump (drop it — nothing to salvage).
+
+- **Instruction generation**: This is the trickiest part. Instead of having a fixed rewriting prompt like "make this text cleaner," the orchestrator writes a **specific* prescription for each example. It's the difference between a doctor prescribing "take medicine" versus "take 200mg of X twice daily with food for 7 days." The instruction is conditioned on the specific problems detected in the specific example. This matters because generic cleaning instructions tend to over-rewrite good content or under-fix bad content.
+
+- **Compute-aware processing**: Not every chunk is worth spending LLM inference tokens on. DataOrchestra's triage step is cheap (a small classifier), and it saves expensive LLM calls by skipping examples that don't need them. This is the "don't do surgery when a band-aid will do" principle. The paper reports reduced processing compute alongside better quality — a rare win-win.
+
+## Framework Shift
+
+```
+Before (mainstream approach):
+                                  
+  Raw Data -----> Uniform Pipeline -----> Clean Data
+                (same for all)           (one quality level)
+
+  [filter] -> [dedup] -> [clean] -> [score] -> [keep/drop]
+       applied identically to every example
+
+
+After (this paper):
+
+  Raw Data -----> Orchestrator -----> Drop
+                       |
+                       +-------------> Keep (untouched)
+                       |
+                       +-------------> Custom Pipeline -> Clean Data
+                                         op1 -> op2 -> ...
+                                         (example-specific sequence)
+```
+
+From uniform corpus-level pipelines to per-example adaptive routing, the core shift is treating data processing as a *classification and planning* problem rather than a *transformation* problem.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The field has been stuck in a "design one pipeline, apply it everywhere" mindset for years. DCLM, FineWeb, and others all define quality at the corpus level. The observation that different examples need different treatments is obvious once stated, but nobody has built a principled framework for it. Good timing too — with inference-time compute and tool-use models becoming mainstream, the "orchestrator + tool" pattern is natural.
+
+**Method maturity**: The orchestrator-as-classifier approach is pragmatic rather than elegant. Training the router requires labeled examples of what "good processing" looks like, which introduces a bootstrapping problem: you need curated data to train the curator. The instruction generation step is clever but adds latency and complexity. I'd like to see an ablation that separates the value of routing from the value of instruction generation — is the per-example routing alone responsible for most of the gain, or do the custom instructions actually matter?
+
+**Experimental integrity**: The baselines are reasonable — they compare against individual processing methods and show consistent (if modest) gains across 11 benchmarks. The 0.5B to 7B scale range is appropriate for a data processing paper. The math continued pretraining experiment adds breadth. One concern: the "reduced compute" claim needs more scrutiny — they save on downstream ops but spend on the orchestrator itself. The net savings aren't fully quantified. Also, the gains are described as "stable" rather than "large," which is honest but means this is an incremental quality-of-life improvement, not a paradigm shift in model capability.
+
+**Writing quality**: The paper is competent but not exciting. The related work section likely compresses too much nuance. The most interesting part — how the orchestrator learns to route — deserves more depth. What features does it use? How does it fail? What's the error analysis? The experimental section could benefit from more qualitative examples showing the orchestrator's decisions in action.
+
+**Verdict**: weak accept — The problem framing is genuinely useful and the approach is practical. The gains are real but modest. The paper's lasting contribution may be the conceptual framework (per-example adaptive processing) more than the specific method.
+
+## Takeaways
+
+**Steal this**: The "triage before treatment" pattern transfers immediately to any data pipeline. Instead of designing a single processing chain, build a cheap classifier that routes examples to different sub-pipelines. This works for dataset cleaning, active learning, and even prompt engineering pipelines.
+
+**Steal this too**: The instruction-generation step — where the system writes its own task specification per example — is a powerful pattern. Any time you find yourself writing one generic prompt to process a heterogeneous batch of items, ask: "What if I wrote a custom prompt for each item instead?" The orchestrator decides **what* to say, the tool model does *the work*.
+
+**Skip this if**: You're looking for a breakthrough in model quality. This is a data engineering paper, not a capabilities paper. The gains are real but in the "1-2% across the board" category. If your data pipeline is already reasonably tuned, the marginal effort of implementing DataOrchestra may not be worth it.
+:::
+
+:::zh
+**论文**: [2607.24717](https://arxiv.org/abs/2607.24717)
+**作者**: Zhen Huang, Yikun Wang, Shijie Xia, Pengfei Liu
+**分类**: cs.CL, cs.AI
+
+## 缺口
+
+做预训练数据处理的人都熟悉那套流程：去重、质量过滤、规则清洗。从 C4 到 RedPajama 到 DCLM，主流做法都是在**语料库或领域层面**定义处理策略——选一套方案，均匀地应用到百万条数据上，然后祈祷平均效果够好。
+
+问题是，"平均"是个幻觉。一段维基百科文本只有轻微格式问题，需要精细手术；一篇残缺的论坛帖子应该直接扔掉；一段干净的 ArXiv 摘要根本不需要动。对三者施加同样的流程，要么浪费算力（清洗不需要清洗的东西），要么搞破坏（该扔的没扔，该精修的草草了事）。
+
+此前有逐样本的过滤方法（比如用质量分类器做保留/丢弃的二元决策），但仅限于二选一。没有人真正解决**逐样本自适应处理**的问题——即不仅决定"要不要处理"，还决定"怎么处理"。
+
+```
+问题：所有数据走同一条流水线
+      |
+      v
+假设：不同数据需要不同处理
+      |
+      v
+方法：逐样本编排器，决策 {丢弃, 保留, 清洗}
+      |                        |
+      |                        +-> 选择操作组合
+      |                        +-> 生成具体指令
+      |                        +-> 工具模型执行
+      v
+证据：11 个基准稳定提升（0.5B-7B），
+      跳过不必要操作节省算力
+      |
+      v
+结论：自适应逐样本处理优于统一流水线
+```
+
+## 增量
+
+**一句话**：这篇论文之前，数据处理是一条千篇一律的流水线；之后，每条数据都能获得量身定制的处理方案。
+
+### 核心机制
+
+DataOrchestra 对每条数据进行三层决策：
+
+**第一层——分流。** 一个编排器模型（小型分类器）审视一条原始网页数据，做出三选一决策：**丢弃**（质量太差，无法挽救）、**保留不动**（已经足够干净）、**送去清洗**。这是瓶颈决策——它决定了是否要投入昂贵的下游处理。
+
+**第二层——开方。** 需要清洗的数据，编排器从菜单中选择下游操作：程序化修复（去除 URL、规范空白）、启发式改写、或基于 LLM 的多种改写策略（转述、扩展、重组）。关键是可以选择**多种操作按序组合**，为每条数据搭建定制化微流水线。
+
+**第三层——写指令。** 对每个 LLM 改写步骤，编排器生成具体的、针对当前样本的指令——不是笼统的"清理一下"，而是"删掉第 3-7 行的导航残留，把第 12 行的碎片化句子重写为完整表述"。下游工具模型（如较小的 LLM）执行该指令。
+
+```
+原始数据块
+      |
+      v
++------------------+
+|     编排器       |  <-- 训练好的路由决策器
++------------------+
+      |
+      +-----> 丢弃（质量太差）
+      |
+      +-----> 保留（已经干净）
+      |
+      +-----> 清洗
+                |
+                v
+         +-------------+
+         |  选择操作    |  <-- 程序化/启发式/LLM改写
+         +-------------+
+                |
+                v
+         +-------------+
+         |  生成指令    |  <-- 针对当前样本的具体指令
+         +-------------+
+                |
+                v
+         +-------------+
+         |  工具模型    |  <-- 执行改写
+         +-------------+
+                |
+                v
+         清洗后的数据
+```
+
+**承重比喻：** 把 DataOrchestra 想象成**医院急诊分诊系统**。病人（数据）到场后，分诊护士（编排器）不会对所有人做同样的处理——他们先评估严重程度。轻症患者直接回家（保留——没问题）。无法救治的放弃（丢弃——损坏太重）。其余的分配给对应专科医生（操作），每位医生收到的是量身定制的治疗方案（指令），而非通用协议。核心洞见和医学一样：最贵的资源不是治疗本身，而是给错误的病人施以错误的治疗。
+
+### 关键概念
+
+- **逐样本编排**：想象你是一位老师在批改 100 篇作文。旧做法：每篇作文都用同样的红笔——圈错、批注、完事。DataOrchestra 的做法：先扫一眼每篇作文。完美的直接发回（保留）。不可理喻的打回重写（丢弃）。剩下的逐篇给针对性反馈——"修改你的论点"、"这段需要过渡句"、"结论和开头矛盾了"。编排器就是老师的判断，只是自动化、大规模地做。具体例子：两条网页质量分都是 0.6，但一篇是带点 HTML 杂质的连贯博客（清洗——去掉杂质），另一篇是 SEO 关键词堆砌（丢弃——没有挽救价值）。
+
+- **指令生成**：这是最巧妙的部分。不是用一个固定的改写提示（如"让这段文字更干净"），而是为每条数据写出**具体的处方**。就像医生不开"吃药"的笼统医嘱，而是写"每天两次随餐服用 200 毫克 X，连用 7 天"。指令基于当前样本检测到的具体问题来生成。这很重要，因为通用清洗指令要么过度改写好内容，要么修不好坏内容。
+
+- **算力感知处理**：不是每条数据都值得花 LLM 推理 token。DataOrchestra 的分流步骤很轻量（小分类器），通过跳过不需要处理的样本来节省昂贵的 LLM 调用。这就是"能贴创可贴就别做手术"的原则。论文报告了处理算力降低、同时质量提升的结果——少见的双赢。
+
+## 框架转变
+
+```
+之前（主流方法）：
+
+  原始数据 -----> 统一流水线 -----> 清洗后数据
+                （所有人一样）       （单一质量层级）
+
+  [过滤] -> [去重] -> [清洗] -> [评分] -> [保留/丢弃]
+       对每条数据施加完全相同的操作
+
+
+之后（本文方法）：
+
+  原始数据 -----> 编排器 -----> 丢弃
+                    |
+                    +-------------> 保留（不动）
+                    |
+                    +-------------> 定制流水线 -> 清洗后数据
+                                     操作1 -> 操作2 -> ...
+                                     （针对当前样本的序列）
+```
+
+从统一的语料库级流水线到逐样本自适应路由，核心转变是把数据处理从**变换问题**重新定义为**分类与规划问题**。
+
+## 专家评审
+
+**选题眼光**：这是一个真实的缺口。这个领域被"设计一套流水线、到处套用"的思维困了好几年。DCLM、FineWeb 等都是在语料库层面定义质量。"不同数据需要不同处理"这个观察一旦说出来就显得显然，但之前没人搭出系统性框架。时机也好——推理时计算和工具调用已经成熟，"编排器+工具"的模式很自然。
+
+**方法成熟度**：编排器用分类器实现，务实但不算优雅。训练路由需要标注"什么是好的处理"，引入了自举问题：你需要清洗过的数据来训练清洗器。指令生成步骤巧妙但增加了延迟和复杂度。我想看到一个消融实验：单独路由的贡献和指令生成的贡献分别是多少？单靠逐样本路由是否就撑起了大部分增益？
+
+**实验诚意**：基线合理——与单个处理方法对比，在 11 个基准上展示了一致（虽然幅度不大）的增益。0.5B 到 7B 的规模范围对数据处理论文来说恰到好处。数学继续预训练实验拓宽了覆盖面。一个隐忧："节省算力"的说法需要更多审视——下游操作省了，但编排器本身要花算力。净节省并没有充分量化。另外，增益被描述为"稳定的"而非"显著的"，这很诚实，但意味着这是一个增量的工程改进，不是模型能力的范式转变。
+
+**写作功力**：论文写得合格但不令人兴奋。相关工作部分可能压缩了太多细节。最有意思的部分——编排器如何学习路由——值得更深入的探讨。它用了什么特征？怎么失败的？错误分析是什么？实验部分如果能多一些编排器实际决策的定性展示会更好。
+
+**判决**：弱接收 —— 问题框架确实有用，方法也务实。增益真实但幅度不大。论文的持久贡献可能更多在概念层面（逐样本自适应处理），而非具体方法本身。
+
+## 要点总结
+
+**直接偷走的**：先分流再处理的模式可以立刻迁移到任何数据管线。别再设计单一处理链，而是搭一个廉价分类器把数据路由到不同子管线。这在数据集清洗、主动学习、甚至 prompt 工程管线中都适用。
+
+**也可以偷走的**：指令生成这一步——系统为每条数据自己写出任务规格——是一个强大的模式。每当你发现自己在用一个通用 prompt 批量处理异构数据时，问自己："如果我为每条数据写一个定制 prompt 呢？"编排器决定**说什么**，工具模型**去干活**。
+
+**不用偷的**：如果你在找模型质量的突破，这不是你需要的。这是一篇数据工程论文，不是能力论文。增益真实但在"全基准 1-2%"的量级。如果你的数据管线已经调得不错，实现 DataOrchestra 的边际工作量可能不值得。
+:::
