@@ -1,0 +1,352 @@
+---
+title:
+  en: "PDD: Skip Steps, Not Quality — Trajectory Distillation for Fast Video Generation"
+  zh: "PDD：跳步不降质——轨迹蒸馏加速视频生成"
+description:
+  en: "A simplified distillation method that teaches diffusion models to take bigger steps by learning from full trajectories, achieving state-of-the-art fast generation with better diversity than adversarial approaches."
+  zh: "一种简化的蒸馏方法，通过学习完整轨迹教会扩散模型迈大步，实现最先进的快速生成效果，同时保持比对抗方法更好的多样性。"
+date: 2026-07-29
+tags: ["arxiv", "ai", "cs.cv", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.26004](https://arxiv.org/abs/2607.26004)
+**Authors**: Neta Shaul, Chao Liu, Arash Vahdat, Julius Berner
+**Categories**: cs.CV, cs.LG
+
+## The Gap
+
+Current state-of-the-art diffusion acceleration relies on Variational Score Distillation (VSD) and adversarial losses to compress multi-step generators into few-step models. These approaches work — they produce stunning video — but they come with serious baggage: training instability, mode collapse, loss of video diversity, and motion that feels frozen. The field has been stuck in a local optimum: you can have speed or quality, but getting both without headaches has remained elusive.
+
+The logical path from problem to solution:
+
+```
+Problem:
+Diffusion/flow models need 20-50 denoising steps
+for good generation -- too slow for video.
+
+        |
+        v
+
+Prior solutions:
+VSD + adversarial losses compress steps
+but cause mode collapse and training pain.
+
+        |
+        v
+
+Key insight:
+What if we learn to skip steps directly
+from teacher trajectories instead of
+optimizing complex objectives?
+
+        |
+        v
+
+PDD method:
+Train student to predict multi-step
+velocity from teacher demonstrations.
+No adversarial losses. No VSD.
+
+        |
+        v
+
+Evidence:
+SOTA on LTX-2.3, Wan 14B, Qwen-Image
+at 4-8 NFE with improved diversity.
+
+        |
+        v
+
+Conclusion:
+Simpler objective, better results.
+The field's complexity was unnecessary.
+```
+
+## The Increment
+
+**One sentence**: Before this paper, fast video generation required wrestling with unstable adversarial training; after this paper, you can distill any diffusion model into a fast generator using straightforward trajectory supervision — and get better diversity as a bonus.
+
+### Core Mechanism
+
+PDD works by training a student model to mimic a pretrained teacher's denoising behavior, but with a crucial twist: the student learns to predict where the teacher would be after multiple steps, not just the next step. The teacher runs its full denoising process (say, 50 steps) on various inputs, recording the trajectory of intermediate states. The student then learns to jump from a noisy state directly to a state several teacher-steps ahead.
+
+The architecture mirrors the teacher model, which means PDD is plug-and-play with any existing pretrained diffusion or flow matching model. During training, for each noisy input, the teacher computes its velocity field across the trajectory. The student receives the same noisy input plus timestep information and learns to output a velocity that corresponds to the mean trajectory over multiple steps — not the instantaneous derivative. This is the key simplification: you don't need JVPs (Jacobian-vector products) or finite-difference approximations to approximate derivatives.
+
+The student's output can be evaluated with varying NFE at inference time. With 4 steps, you get fast generation; with 8 steps, you get better quality. This flexibility is built into the training procedure, not bolted on afterward.
+
+```
+Teacher (frozen):
+  x_noisy --> [Teacher net] --> v_t (velocity at step t)
+                    |
+                    v
+              trajectory recording
+              v_t, v_{t+1}, ..., v_{t+k}
+
+Student (training):
+  x_noisy + t --> [Student net] --> v_predicted
+                                     |
+                                     v
+                              loss against mean velocity
+                              over [t ... t+k] from teacher
+
+At inference:
+  x_noisy --> [Student net] --> v_predicted --> x_less_noisy
+       repeat 4-8 times --> clean output
+```
+
+**Structural metaphor: Learning to drive with a GPS**
+
+Imagine teaching someone to navigate a city. The old way (adversarial/VSD) is like giving them a driving instructor who constantly critiques every micro-movement — "too far left, now brake harder, why did you turn there?" — and the student gets so anxious they only memorize one route and freeze on new streets. That's mode collapse.
+
+PDD is different. You record an expert driver taking a full journey (the teacher trajectory), then teach the student: "From this intersection, after 5 minutes of expert driving, you'll end up here." The student doesn't need to learn the physics of steering or the derivative of acceleration. They learn the mapping: "current position + 5 minutes of expert driving = this destination." During practice, they make big jumps — one confident turn instead of five hesitant corrections. At test time, they can choose to take 4 big jumps or 8 smaller ones depending on how much time they have. The expert driver's GPS data is the trajectory; the student's confident multi-block jumps are the multi-step predictions. No adversarial instructor needed.
+
+### Key Concepts
+
+- **Trajectory-based distillation**: Instead of optimizing complex objectives that try to match distributions (like VSD does with its variational approach), PDD simply watches the teacher solve the problem repeatedly and learns the patterns. Think of it like learning math: the VSD approach is like trying to derive the formula from first principles (hard, many ways to fail), while trajectory distillation is like studying worked examples until you see the pattern (straightforward, scales with data). The teacher's trajectory is a sequence of "here's what happened at each step," and the student learns to predict multiple steps at once from that data.
+
+- **Mean velocity prediction**: In diffusion models, at each denoising step, the model predicts a "velocity" — the direction and magnitude to push the noisy image toward cleanliness. PDD doesn't predict the velocity at just one timestep. Instead, it predicts the average velocity across several timesteps. Why? Because averaging smooths out the noise (pun intended). If the teacher's velocity fluctuates between steps 10-15, the mean velocity captures the overall trajectory direction. This makes the student's job easier and more robust — it's the difference between following a GPS that recalculates every second versus one that gives you the overall direction.
+
+- **NFE flexibility (Number of Function Evaluations)**: This is how many times you run the neural network to generate one output. Traditional distilled models are fixed at one NFE. PDD supports varying NFE — you can use 4 steps for speed or 8 for quality, with the same trained model. This matters in practice because real deployments have varying latency budgets. Think of it as a zoom lens: want a quick sketch? Use 4 NFE. Want a polished result? Use 8. Same model, same weights.
+
+## Framework Shift
+
+```
+Before (mainstream):                    After (this paper):
+
+  Teacher                                Teacher
+    |                                      |
+    v                                      v
+  [Complex objectives]                   [Record trajectories]
+  VSD + adversarial                       |
+  losses                                  v
+    |                                   [Simple velocity loss]
+    v                                      |
+  GAN-like training dynamics              v
+  Mode collapse risk                    Student (multi-step)
+  Hard to tune                             |
+    |                                      v
+    v                                   [Plug and play]
+  Student (few-step)                     Works with any model
+  Fragile, limited diversity              |
+                                           v
+                                         Better diversity
+                                         + SOTA quality
+```
+
+From complex adversarial distillation to simple trajectory learning, the core shift is recognizing that you don't need to fight the training dynamics — just watch the expert and learn to skip ahead.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. The field has been aware for a while that VSD-based distillation is painful to work with, but few alternatives have matched its quality. The problem is genuine and practically important — every team building video generation products struggles with inference latency.
+
+**Method maturity**: The approach is elegant in its simplicity. Learning from trajectories rather than optimizing adversarial objectives is a cleaner path. That said, the "predict mean velocity" idea isn't entirely novel conceptually — it echoes ideas from consistency models and progressive distillation. The contribution is in showing it works at scale with modern architectures and that the NFE flexibility emerges naturally. It's more of a "right framing at the right time" than a fundamental theoretical breakthrough.
+
+**Experimental integrity**: The baselines are reasonable and the models tested (LTX-2.3, Wan 14B, Qwen-Image) are genuinely state-of-the-art, not toy setups. The diversity improvements are demonstrated, though I'd want to see more rigorous diversity metrics — FVD and human evaluations can miss subtle collapses. The 4-8 NFE results are compelling. One concern: how does PDD degrade gracefully with very few NFE (1-2)? The paper focuses on 4-8, which might be the sweet spot but limits understanding of the method's boundaries.
+
+**Writing quality**: The paper reads clearly and the method is well-motivated. However, the ablation study could be stronger — I want to see what happens when you remove individual components (mean velocity vs. instantaneous, trajectory length, etc.). Section 4 could benefit from a failure case analysis: when does PDD struggle? Every method has limitations, and transparency builds trust.
+
+**Verdict**: weak accept — The simplicity is the selling point, and the results on modern large-scale models are convincing, but the paper needs deeper ablations to fully earn confidence in the method's robustness.
+
+## Takeaways
+
+Three concrete things to steal:
+
+1. **Trajectory supervision beats adversarial objectives for distillation.** If you're distilling any generative model, consider recording the teacher's full trajectories and training the student on multi-step targets. This is simpler, more stable, and often works just as well. The insight transfers beyond video to any iterative generation process (audio, 3D, molecules).
+
+2. **NFE flexibility as a first-class design goal.** When building deployed generation systems, train with variable computation budgets baked in. This is underappreciated — most distilled models are fixed-step. PDD shows you can have a single model that adapts to latency constraints. Design your loss to support this from the start.
+
+3. **Mean over instantaneous.** When the target signal is noisy or oscillatory, predict the average over a window rather than the point value. This is a general principle: smoothing the learning target often makes training easier without sacrificing final quality. If you're working with noisy labels or unstable targets, try averaging before predicting.
+:::
+
+:::zh
+**论文**: [2607.26004](https://arxiv.org/abs/2607.26004)
+**作者**: Neta Shaul, Chao Liu, Arash Vahdat, Julius Berner
+**分类**: cs.CV, cs.LG
+
+## 缺口
+
+当前最先进的扩散加速方法依赖于变分分数蒸馏（VSD）和对抗损失，将多步生成器压缩为少步模型。
+这些方法能用——生成的视频确实惊艳——但代价沉重：训练不稳定、模式坍塌、视频多样性丧失、运动僵硬。
+领域陷入了一个局部最优：速度和质量难以兼得，且过程痛苦。
+
+从问题到解决方案的逻辑路径：
+
+```
+问题：
+扩散/流模型需要 20-50 步去噪
+才能生成高质量视频——太慢了。
+
+        |
+        v
+
+此前方案：
+VSD + 对抗损失压缩步数
+但导致模式坍塌和训练痛苦。
+
+        |
+        v
+
+关键洞察：
+能否直接从教师轨迹
+学习跳步，而非优化复杂目标？
+
+        |
+        v
+
+PDD 方法：
+训练学生预测多步速度，
+基于教师示范。
+无对抗损失。无 VSD。
+
+        |
+        v
+
+证据：
+在 LTX-2.3、Wan 14B、Qwen-Image 上
+4-8 NFE 达到 SOTA，多样性更好。
+
+        |
+        v
+
+结论：
+更简单的目标，更好的结果。
+领域的复杂性本可避免。
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，快速视频生成需要与不稳定的对抗训练搏斗；在这篇论文之后，你可以用简单的轨迹监督蒸馏任何扩散模型——还意外获得了更好的多样性。
+
+### 核心机制
+
+PDD 的工作原理是训练学生模型模仿预训练教师的去噪行为，但有一个关键转折：学生学习预测教师在多步之后的状态，而非仅仅是下一步。
+教师在各种输入上运行完整的去噪过程（比如50步），记录中间状态的轨迹。
+学生学习从一个噪声状态直接跳到教师多步之后的状态。
+
+架构与教师模型镜像，这意味着 PDD 可以即插即用地用于任何现有的预训练扩散或流匹配模型。
+训练时，对每个噪声输入，教师计算其在整个轨迹上的速度场。
+学生接收相同的噪声输入加上时间步信息，学习输出对应多步平均轨迹的速度——而不是瞬时导数。
+这是关键简化：你不需要 JVP（雅可比向量积）或有限差分近似来逼近导数。
+
+学生的输出在推理时可以使用不同的 NFE（函数评估次数）。
+用 4 步可以快速生成；用 8 步质量更好。
+这种灵活性是内置于训练过程中的，不是事后附加的。
+
+```
+教师（冻结）：
+  x_noisy --> [教师网络] --> v_t（时间步 t 的速度）
+                    |
+                    v
+              轨迹记录
+              v_t, v_{t+1}, ..., v_{t+k}
+
+学生（训练中）：
+  x_noisy + t --> [学生网络] --> v_predicted
+                                     |
+                                     v
+                              与教师 [t ... t+k]
+                              的平均速度做损失
+
+推理时：
+  x_noisy --> [学生网络] --> v_predicted --> x_less_noisy
+       重复 4-8 次 --> 干净输出
+```
+
+**核喻：用 GPS 学开车**
+
+想象教一个人在城市里导航。
+旧方法（对抗/VSD）就像给他一个驾驶教练，不断批评每个微动作——"太靠左了，刹车用力点，你为什么在那儿转弯？"——学生太紧张了，只记住一条路，到新街道就僵住。
+这就是模式坍塌。
+
+PDD 不同。
+你录下专业司机的完整旅程（教师轨迹），然后教学生："从这个路口开始，经过5分钟专业驾驶，你会到达这里。"
+学生不需要学转向的物理原理，也不需要学加速度的导数。
+他们学习的映射是："当前位置 + 5分钟专家驾驶 = 这个目的地。"
+练习时，他们大胆跳跃——一个自信的转弯取代五个犹豫的修正。
+测试时，他们可以选择跳4大步或8小步，取决于有多少时间。
+专家司机的 GPS 数据就是轨迹；学生自信的跨街区跳跃就是多步预测。
+不需要对抗性教练。
+
+### 关键概念
+
+- **基于轨迹的蒸馏**: 不去优化试图匹配分布的复杂目标（像 VSD 用变分方法做的那样），PDD 只是观察教师反复解决问题，然后学习规律。
+想象学数学：VSD 方法像试图从第一性原理推导公式（困难，容易出错的地方很多），而轨迹蒸馏像研究例题直到你看到规律（直接，随数据量扩展）。
+教师的轨迹是"每一步发生了什么"的序列，学生学习从中一次预测多步。
+
+- **平均速度预测**: 在扩散模型中，每一步去噪，模型预测一个"速度"——将噪声图像推向干净方向的向量。
+PDD 不只预测一个时间步的速度，而是预测多个时间步的平均速度。
+为什么？因为平均能平滑波动。
+如果教师的速度在第10-15步之间波动，平均速度能捕捉到总体轨迹方向。
+这让学生的任务更容易更稳健——这就像跟踪一个每秒重新计算的 GPS 和一个给你总体方向的 GPS 之间的区别。
+
+- **NFE 灵活性（函数评估次数）**: 这是生成一个输出需要运行神经网络的次数。
+传统蒸馏模型固定为一个 NFE。
+PDD 支持可变 NFE——同一个训练好的模型，你可以用4步求速度，或用8步求质量。
+这在实际部署中很重要，因为不同场景有不同的延迟预算。
+把它想成变焦镜头：要快速草图？用4 NFE。
+要精致成品？用8 NFE。
+同一个模型，同样的权重。
+
+## 框架转变
+
+```
+之前（主流方法）：                  之后（本文方法）：
+
+  教师                               教师
+    |                                  |
+    v                                  v
+  [复杂目标]                        [记录轨迹]
+  VSD + 对抗损失                      |
+  训练动态                            v
+    |                               [简单速度损失]
+    v                                  |
+  类 GAN 训练动态                     v
+  模式坍塌风险                      学生（多步预测）
+  难以调参                            |
+    |                                  v
+    v                               [即插即用]
+  学生（少步）                       适用于任何模型
+  脆弱，多样性有限                    |
+                                     v
+                                   更好的多样性
+                                   + SOTA 质量
+```
+
+从复杂的对抗蒸馏到简单的轨迹学习，核心转变是认识到你不需要与训练动态搏斗——只需观察专家，学会跳步前进。
+
+## 专家评审
+
+**选题眼光**: 这是一个真实的缺口。
+领域早就知道基于 VSD 的蒸馏很痛苦，但很少有替代方案能达到同等质量。
+这个问题真实且实际重要——每个构建视频生成产品的团队都在为推理延迟挣扎。
+
+**方法成熟度**: 这种方法因其简洁而优雅。
+从轨迹学习而非优化对抗目标是更干净的路径。
+不过，"预测平均速度"的想法在概念上并不全新——它呼应了一致性模型和渐进蒸馏的思想。
+贡献在于展示它在现代架构上大规模有效，且 NFE 灵活性自然涌现。
+这更像是"在正确的时间找到正确的框架"，而非根本性的理论突破。
+
+**实验诚意**: 基线合理，测试的模型（LTX-2.3、Wan 14B、Qwen-Image）确实是当前最先进的，不是玩具设置。
+多样性改进已展示，但我希望看到更严格的多样性指标——FVD 和人类评估可能遗漏微妙的坍塌。
+4-8 NFE 的结果令人信服。
+一个疑虑：PDD 在极低 NFE（1-2）时表现如何？
+论文聚焦于 4-8，这可能是甜蜜点，但限制了对方法边界的理解。
+
+**写作功力**: 论文读起来清晰，方法动机充分。
+但消融实验可以更强——我想看看移除各个组件（平均速度 vs. 瞬时速度、轨迹长度等）会发生什么。
+第4节可以加一个失败案例分析：PDD 什么时候会挣扎？
+每个方法都有局限性，透明度建立信任。
+
+**判决**: 弱接收——简洁性是卖点，在现代大规模模型上的结果令人信服，但论文需要更深入的消融来充分赢得对方法稳健性的信心。
+
+## 要点总结
+
+三个可以"偷"走的具体想法：
+
+1. **轨迹监督优于对抗目标蒸馏。** 如果你在蒸馏任何生成模型，考虑记录教师的完整轨迹并训练学生预测多步目标。这更简单、更稳定，效果往往一样好。这个洞见可以迁移到视频之外——音频、3D、分子生成等任何迭代生成过程。
+
+2. **NFE 灵活性作为一等设计目标。** 构建部署生成系统时，从一开始就将可变计算预算融入训练。这被低估了——大多数蒸馏模型是固定步数的。PDD 展示了单一模型可以适应延迟约束。在设计损失函数时就考虑这一点。
+
+3. **平均值优于瞬时值。** 当目标信号有噪声或波动时，预测窗口内的平均值而非点值。这是一个通用原则：平滑学习目标通常让训练更容易，且不牺牲最终质量。如果你在处理噪声标签或不稳定目标，试试先平均再预测。
+:::

@@ -1,0 +1,313 @@
+---
+title:
+  en: "Relay On-Policy Distillation: Passing the Baton When Students Go Astray"
+  zh: "接力策略蒸馏：学生迷路时教师接棒"
+description:
+  en: "A clean fix for the prefix failure problem in on-policy distillation: let the teacher briefly take over when the student veers off course, producing shorter and more useful training trajectories."
+  zh: "针对在线策略蒸馏中的前缀失败问题提出简洁解法：当学生偏离方向时让教师短暂接管，生成更短、更有用的训练轨迹。"
+date: 2026-07-29
+tags: ["arxiv", "ai", "cs.cl", "cs.ai"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.26057](https://arxiv.org/abs/2607.26057)
+**Authors**: Haolei Xu, Xiaowen Xu, Haiwen Hong, Zixuan Ni, Hongxing Li, Yiwen Qiu, Weiming Lu, Yongliang Shen
+**Categories**: cs.CL, cs.AI
+
+## The Gap
+
+On-policy distillation (OPD) is the go-to method for transferring reasoning ability from a large teacher to a small student: let the student generate its own trajectory, then supervise it with teacher logits at every token. The "on-policy" part matters — the student learns from its own explorations, not the teacher's. But this very property creates a nasty failure mode the field has largely papered over.
+
+**Prefix failure.** Once the student commits to a wrong reasoning direction in the first few tokens, every subsequent token is generated conditioned on that mistake. The teacher's supervision is now anchored to a trajectory the teacher itself would never have produced. The result: misdirected continuations, unreliable gradients, and a lot of wasted compute. FastOPD (Hong et al., 2025) tried to fix this by skipping teacher logit computation for "easy" tokens, but it treats the symptom (compute waste) without addressing the root cause (wrong prefixes poisoning the entire trajectory).
+
+The authors identify a subtle but exploitable pattern: **teacher-student continuation asymmetry**. When facing a failed prefix, the teacher tends to redirect — it would produce tokens that pivot away from the mistake. The student, by contrast, just keeps barreling along the wrong path. This asymmetry is detectable without extra labels, and that's the key insight.
+
+```
+On-policy distillation
+         |
+         v
+Student commits to wrong prefix
+         |
+         v
+All subsequent tokens conditioned on mistake
+         |
+         v
+Teacher would redirect, student continues wrong
+(continuation asymmetry)
+         |
+         v
+Detect asymmetry as trigger signal
+(no additional labels needed)
+         |
+         v
+Relay-OPD: teacher takes over at trigger point
+produces "teacher leg" trajectory
+         |
+         v
+Student resumes on corrected path
+optimized on relay trajectory
+         |
+         v
++5.73% over OPD, +1.49% over FastOPD
+50%+ reduction in training trajectory length
+```
+
+## The Increment
+
+**One sentence**: Before this paper, on-policy distillation blindly let the student generate entire trajectories even when early mistakes made the rest worthless; after this paper, the teacher can step in at critical moments to reroute the trajectory, turning wasted compute into useful supervision.
+
+### Core Mechanism
+
+Relay-OPD has three moving parts: a **trigger detector**, a **relay mechanism**, and a **relay budget**. The training loop starts the same way as standard OPD — the student generates tokens autoregressively. But at each token position, a lightweight check compares the student's next-token distribution against what the teacher would do. When the divergence crosses a threshold (the asymmetry signal), a trigger fires.
+
+At the trigger point, the teacher takes over and generates a short "relay leg" — a continuation that reflects the teacher's preferred reasoning direction. This leg is typically just a few tokens. Once the relay leg is complete, the baton is passed back to the student, which now resumes generating from this corrected vantage point. The full trajectory (student prefix + teacher leg + student continuation) becomes the supervision signal. Crucially, the student is optimized on the *entire* relay trajectory, learning from the teacher's redirection as if it were its own.
+
+The relay budget is the final piece. Not every trigger leads to an intervention. The budget caps the total number of relay tokens per training example, forcing the system to concentrate its interventions on the most critical early positions — exactly where prefix failure does the most damage. This keeps the student's policy from drifting too far from its own distribution (you still want on-policy learning) while fixing the worst mistakes.
+
+```
+Student generates tokens
+         |
+         v
+[trigger detector]
+   |            |
+   v            v
+no trigger     trigger fired
+   |            |
+   v            v
+continue       teacher generates relay leg
+student        (short continuation)
+generation        |
+                  v
+               student resumes from
+               corrected context
+                  |
+                  v
+               optimize student on
+               full relay trajectory
+                  |
+                  v
+               decrement relay budget
+```
+
+Here's the structural metaphor that makes this click. Think of a **relay race with a coach on the sidelines**. The student is the first runner on the track. Most of the time, the runner does fine — keep running. But the coach (teacher) is watching for moments when the runner starts veering toward the wrong lane. When that happens, the coach doesn't yell instructions (token-level KL doesn't help when the prefix is already poisoned). Instead, the coach calls a baton pass — an experienced anchor runner (the teacher) takes over for a leg, gets the baton back on course, then hands it back to the original runner. The relay budget is the rule that says "you only get three substitutions per race" — you can't just have the anchor runner do the whole thing, because the first runner still needs to learn to run. The relay leg is short because the anchor runner only needs to correct the trajectory, not finish the race. And the whole resulting path — including the anchor's leg — becomes the training example for the first runner to study afterward. The genius is that the coach doesn't need a separate signal to know when to call the pass: the asymmetry between what the anchor runner would do and what the first runner is doing **is* the signal.
+
+### Key Concepts
+
+- **Prefix failure**: Imagine you're writing an essay and your first sentence sets up the wrong frame — say, you start arguing the opposite side. Every paragraph after that is technically well-written but arguing the wrong thing. In OPD, the student model generates tokens left-to-right. If the first few tokens commit to a flawed reasoning path (say, applying the wrong formula), every subsequent token is generated conditioned on that mistake. The teacher's supervision at position 100 is trying to correct the student's output, but the student's context at position 100 already contains 99 tokens of wrong reasoning. The supervision becomes unreliable because the teacher is being asked to score a trajectory it would never have produced. The fix isn't better supervision — it's preventing the trajectory from going off the rails in the first place.
+
+- **Teacher-student continuation asymmetry**: This is the paper's key empirical observation. Take a context where the student has just gone wrong. Now ask: what would the teacher generate next? And what would the student generate next? The teacher tends to produce tokens that redirect — acknowledging the mistake and pivoting. The student tends to produce tokens that continue the mistake. This divergence is measurable and reliable. It's not about which model is "smarter" — it's about the fact that the teacher has seen enough correct reasoning paths that it knows when to course-correct, while the student hasn't. The paper converts this observation into a trigger: when the asymmetry is large, intervene.
+
+- **Relay budget**: A hard cap on how many tokens the teacher is allowed to generate per training example. This is the constraint that keeps Relay-OPD actually on-policy. Without a budget, you'd just have the teacher generate everything — that's standard off-policy distillation, and it loses the benefits of on-policy learning. The budget forces the system to be strategic: spend your intervention tokens where they matter most (early positions where prefix failure occurs) and let the student handle the rest. The paper shows that even a small budget (concentrated on critical early positions) is enough to get most of the gains.
+
+## Framework Shift
+
+```
+Before (standard OPD):              After (Relay-OPD):
+
+Student: [A B C D E F G ...]        Student: [A B]
+            |                              |
+            v                              v
+      all tokens generated          C is wrong -> trigger
+      by student                         |
+            |                            v
+            v                       Teacher: [C'] (relay leg)
+      teacher supervises                   |
+      every token                          v
+      (including wasted ones        Student: [D E F G ...]
+       on wrong prefix)                   |
+            |                              v
+            v                       teacher supervises
+      full-length trajectories       relay trajectory
+      lots of wasted compute         shorter, more useful
+```
+
+From blind generation to targeted intervention, the core shift is treating on-policy distillation as a collaborative relay rather than a solo performance.
+
+## Expert Assessment
+
+**Problem choice**: This is a real gap. Prefix failure has been acknowledged informally in the distillation community but nobody attacked it head-on with a clean mechanism. The observation that teacher and student diverge on failed prefixes is genuinely useful and probably underlies failure modes in other on-policy methods too. It sits at the intersection of efficient training and knowledge transfer — both hot areas — so the timing is good.
+
+**Method maturity**: Clever insight, not brute force. The relay mechanism is simple enough to implement (trigger detection + teacher takeover + budget) and doesn't require architectural changes or extra learned components. The trigger based on distributional asymmetry is elegant — it repurposes information that's already being computed. One concern: the threshold for triggering might be sensitive and the paper could be more forthcoming about how much tuning it requires. There may be simpler heuristics (e.g., entropy spikes) that achieve 80% of the benefit with 20% of the complexity, but the authors don't explore this.
+
+**Experimental integrity**: Solid but not exhaustive. Eight mathematical reasoning benchmarks with two student sizes (0.6B and 1.7B) using Qwen3 models — this is a fair and representative setup for the claimed contribution. The gains are consistent across benchmarks and model sizes, which is reassuring. The +5.73% over OPD and +1.49% over FastOPD are meaningful. The 50% trajectory length reduction is a strong efficiency story. Red flags: only mathematical reasoning is tested — no general language tasks, no code generation, no commonsense reasoning. The teacher (4B) is not that much larger than the student (1.7B), which raises the question of whether the method helps more with larger teacher-student gaps. Ablations on relay budget and trigger threshold are present but could be deeper.
+
+**Writing quality**: Generally clean and well-structured. The title "Pass the Baton" is memorable and accurate. The core contribution is communicated clearly within the first two pages. Where they cut corners: the related work section is thin — they cite FastOPD and standard OPD but don't engage with the broader landscape of distillation interventions (e.g., speculative decoding parallels, curriculum learning). The discussion section is brief and doesn't address failure modes or when relay intervention might hurt. A stronger discussion of **why* the teacher's relay leg produces better supervision (beyond "it redirects") would elevate the theoretical contribution.
+
+**Verdict**: weak accept — Clean method on a real problem with solid but not exhaustive experiments; the core insight is transferable and the efficiency gains are compelling, but the narrow evaluation domain and thin theoretical analysis keep it from a strong accept.
+
+## Takeaways
+
+Three things worth stealing:
+
+1. **The asymmetry-as-signal pattern**: You don't need extra labels or a separate classifier to detect when distillation is going wrong. Just compare what the teacher and student would generate from the same context — large divergence means trouble. This is applicable to any teacher-student setup where both models are available during training.
+
+2. **Intervention budgeting**: If you're doing any kind of corrective intervention during training (not just distillation — could be reward shaping, data augmentation, etc.), cap the intervention with a budget and spend it on the highest-leverage positions. The paper shows you don't need to intervene everywhere to get most of the benefit.
+
+3. **The relay framing itself**: Instead of thinking of distillation as "teacher supervises student end-to-end," think of it as a collaborative relay where different agents can contribute legs of the trajectory. This framing opens up possibilities beyond just teacher-student — multiple specialist models could contribute relay legs for different parts of the reasoning process.
+:::
+
+:::zh
+**论文**: [2607.26057](https://arxiv.org/abs/2607.26057)
+**作者**: Haolei Xu, Xiaowen Xu, Haiwen Hong, Zixuan Ni, Hongxing Li, Yiwen Qiu, Weiming Lu, Yongliang Shen
+**分类**: cs.CL, cs.AI
+
+## 缺口
+
+在线策略蒸馏（OPD）是目前将大模型推理能力迁移到小模型的主流方法：让学生自己生成轨迹，然后在每个 token 上用教师的 logits 做监督。"在线"这个属性很关键——学生从自己的探索中学习，而非照搬教师的输出。但这个优势本身藏着一个学界一直没正面解决的硬伤。
+
+**前缀失败。** 学生在推理开头几个 token 就走偏了，之后所有 token 都建立在这个错误之上。
+教师的监督现在锚定在一条教师自己绝不会走的轨迹上。
+结果就是：后续生成全是无用功，梯度信号不可靠，算力白白浪费。
+FastOPD（Hong et al., 2025）尝试过跳过"简单"token 的教师 logit 计算来省算力，
+但它治的是症状（算力浪费），没治根因（错误前缀污染整条轨迹）。
+
+作者发现了一个微妙但可利用的模式：**师生续写不对称性**。
+面对一段错误前缀，教师倾向于"转弯"——生成能纠正方向的 token。
+学生则继续沿着错误路径往下冲。这种不对称不需要额外标签就能检测到，这就是关键。
+
+```
+在线策略蒸馏
+       |
+       v
+学生在前缀阶段走错方向
+       |
+       v
+后续所有 token 都基于错误条件生成
+       |
+       v
+教师会转弯，学生继续冲
+（续写不对称性）
+       |
+       v
+将不对称性作为触发信号
+（无需额外标注）
+       |
+       v
+Relay-OPD：教师在触发点接管
+生成"教师接力段"轨迹
+       |
+       v
+学生在纠正后的路径上继续
+在接力轨迹上做优化
+       |
+       v
+比 OPD 高 +5.73%，比 FastOPD 高 +1.49%
+训练轨迹长度缩短 50% 以上
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，在线策略蒸馏在学生早期犯错时仍然盲目生成整条轨迹，后续 token 全是浪费；这篇论文之后，教师可以在关键时刻介入纠正路线，把浪费的算力变成有用的监督信号。
+
+### 核心机制
+
+Relay-OPD 有三个核心部件：**触发检测器**、**接力机制**和**接力预算**。
+训练循环的开头和标准 OPD 一样——学生自回归地生成 token。
+但在每个 token 位置，一个轻量级检查会比较学生和教师的下一个 token 分布。
+当两者分歧超过阈值（不对称信号），触发器激活。
+
+触发后，教师接管并生成一小段"接力段"——一个反映教师偏好推理方向的续写。
+这段接力通常只有几个 token。
+接力段结束后，控制权交还学生，学生从这个被纠正过的上下文继续生成。
+完整轨迹（学生前缀 + 教师接力段 + 学生续写）成为监督信号。
+关键点是，学生在整条接力轨迹上被优化，把教师的纠偏当成自己的经验来学习。
+
+接力预算是最后一环。不是每次触发都会真正介入。
+预算限制了每个训练样本上教师可生成的 token 总数，
+迫使系统把干预集中在最关键的早期位置——那里正是前缀失败危害最大的地方。
+这样既保持了策略的在线性（学生仍然主要用自己的分布），又修了最严重的错误。
+
+```
+学生开始生成 token
+       |
+       v
+[触发检测器]
+  |            |
+  v            v
+未触发         触发
+  |            |
+  v            v
+学生继续      教师生成接力段
+生成           （短续写）
+  |            |
+  v            v
+              学生从纠正后
+              的上下文继续
+                 |
+                 v
+              在完整接力轨迹上
+              优化学生
+                 |
+                 v
+              扣减接力预算
+```
+
+用一个结构性比喻来解释。
+想象一场**接力赛，教练站在场边**。
+学生是跑道上的第一棒选手。
+大部分时候跑得好好的——继续跑就行。
+但教练（教师）在盯着，一旦发现选手开始偏道，就吹哨换人。
+注意，教练不是在旁边喊"往左！往右！"（token 级 KL 散度在前缀已错的情况下没用），
+而是让一个经验丰富的主力选手（教师）接过棒跑一小段，
+把路线带正，再把棒交回第一棒选手。
+接力预算就是"全场比赛只能换三次人"的规则——不能让主力选手全程代跑，
+因为第一棒选手还是得自己学会跑。
+接力段很短，因为主力选手只需要修正方向，不需要跑完全程。
+而整条跑出来的路线——包括主力选手的那一段——成为第一棒选手赛后复盘的教材。
+妙处在于教练不需要单独的信号来判断什么时候换人：
+主力选手和第一棒选手之间的路径偏差本身就是信号。
+
+### 关键概念
+
+- **前缀失败**: 想象你在写一篇议论文，第一句话就立错了靶子——你开始论证反方观点。后面每一段写得都不错，但全在论证错误的东西。OPD 里学生模型是逐 token 从左到右生成的。如果头几个 token 就走上了错误的推理路径（比如套错了公式），后面所有 token 都在这个错误上叠砖。教师在第 100 个 token 位置的监督，是在给一条它自己绝不会走的轨迹打分，信号自然不可靠。问题不在于监督质量，而在于整条轨迹从一开始就被带偏了。
+
+- **师生续写不对称性**: 这是本文最关键的经验观察。给定一段学生刚走错的上下文，分别问：教师接下来会生成什么？学生接下来会生成什么？教师倾向于生成能转弯的 token——承认错误、调转方向。学生倾向于继续错下去。这种分歧是可测量且稳定的。不是谁更聪明的问题，而是教师见过足够多正确的推理路径，知道什么时候该转弯，学生还没见过。论文把这个观察转化成了触发机制：分歧大就介入。
+
+- **接力预算**: 对每个训练样本，教师可生成 token 数量的硬上限。这是让 Relay-OPD 保持"在线"属性的关键约束。没有预算的话，干脆让教师全程生成就行了——那就退化成标准离线蒸馏，失去了在线学习的好处。预算迫使系统做出取舍：把干预 token 花在刀刃上（前缀失败发生的早期位置），其余交给学生。论文证明即使预算很小（集中在关键早期位置），也能拿到大部分收益。
+
+## 框架转变
+
+```
+之前（标准 OPD）：                 之后（Relay-OPD）：
+
+学生: [A B C D E F G ...]        学生: [A B]
+           |                            |
+           v                            v
+     所有 token 都由              C 走偏 -> 触发
+     学生生成                           |
+           |                            v
+           v                       教师: [C']（接力段）
+     教师在每个 token                    |
+     上做监督                            v
+     （包括在错误前缀上              学生: [D E F G ...]
+      浪费的那些）                        |
+           |                            v
+           v                       教师在接力轨迹上
+     轨迹很长                       做监督
+     算力浪费大                     更短、更有效
+```
+
+从盲目生成到精准干预，核心转变是把在线策略蒸馏从独跑变成接力。
+
+## 专家评审
+
+**选题眼光**: 这是个真缺口。前缀失败在蒸馏社区被非正式地承认过，但没人用干净的机制正面攻克。师生在失败前缀上的分歧这个观察很有价值，很可能也是其他在线方法失败的底层原因之一。选题卡在高效训练和知识迁移的交叉点上，时机不错。
+
+**方法成熟度**: 巧劲而非蛮力。接力机制足够简单（触发检测 + 教师接管 + 预算），不需要改架构或加额外学习组件。基于分布不对称性的触发器很优雅——复用了本已存在的信息。一个隐患：触发阈值可能比较敏感，论文在这一点上交代得不够充分。也许有更简单的启发式方法（比如熵值突增）能用更少的复杂度拿到 80% 的收益，但作者没有探索这条路线。
+
+**实验诚意**: 扎实但不够全面。八个数学推理 benchmark，两个学生规模（0.6B 和 1.7B），用 Qwen3 模型——对于声称的贡献来说这是公平且有代表性的设置。各 benchmark 和模型规模上的一致增益让人放心。+5.73%（对比 OPD）和 +1.49%（对比 FastOPD）是有意义的。轨迹长度缩短 50% 是很强的效率故事。需要警惕的地方：只测了数学推理——没有通用语言任务、代码生成、常识推理。教师（4B）和学生（1.7B）的规模差距不算大，更大的师生差距下效果如何未可知。接力预算和触发阈值的消融实验有但不够深。
+
+**写作功力**: 整体清晰、结构好。标题"Pass the Baton"既好记又准确。核心贡献在前两页就讲清楚了。偷懒的地方：相关工作部分偏薄，只引了 FastOPD 和标准 OPD，没和更广的蒸馏干预文献对话（比如推测解码的平行工作、课程学习）。讨论部分太简短，没有讨论失败模式或接力介入什么时候可能帮倒忙。如果能更深入地解释为什么教师的接力段能产生更好的监督（不只是"它会转弯"），理论贡献会更强。
+
+**判决**: 弱接收 — 对一个真实问题提出了干净的方法，实验扎实但不够全面；核心洞见可迁移，效率增益有说服力，但评估领域偏窄、理论分析偏薄，够不上强接收。
+
+## 要点总结
+
+三个值得偷走的东西：
+
+1. **不对称性即信号**: 不需要额外标签或独立分类器就能检测蒸馏何时出了问题。只要比较教师和学生在同一上下文下会生成什么——分歧大就意味着出了状况。这在任何师生训练框架中都适用。
+
+2. **干预预算化**: 如果你在训练中做任何类型的纠正性干预（不只是蒸馏，奖励塑造、数据增强等都行），给干预设一个预算上限，把额度花在杠杆最大的位置上。论文证明了不需要处处干预就能拿到大部分收益。
+
+3. **接力思维本身**: 把蒸馏从"教师端到端监督学生"的思路，换成"不同智能体贡献轨迹的不同段"。这个框架打开了超越师生二元关系的可能性——多个专家模型可以分别在推理的不同阶段贡献接力段。
+:::
