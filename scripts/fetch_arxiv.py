@@ -8,6 +8,7 @@ import sys
 import traceback
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import time
@@ -37,7 +38,12 @@ from render_manim import VISUALS_DIR, render_scene, validate_scene_code
 
 BLOG_DIR = Path(__file__).resolve().parent.parent / "src" / "content" / "blog"
 LAST_FETCH_FILE = Path(__file__).resolve().parent / ".last_fetch"
-ARXIV_API_URL = "http://export.arxiv.org/api/query"
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
+ARXIV_RSS_URL = "https://rss.arxiv.org/rss/{category}"
+ARXIV_REQUEST_HEADERS = {
+    "User-Agent": "alanhou-blog/1.0 (https://github.com/alanhou/blog)",
+    "Accept": "application/atom+xml",
+}
 CATEGORIES = ["cs.AI", "cs.LG", "cs.CL", "cs.CV"]
 ARXIV_IMAGE = "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
 
@@ -86,53 +92,42 @@ def save_last_fetch():
     LAST_FETCH_FILE.write_text(datetime.now(timezone.utc).isoformat())
 
 
-def fetch_recent_papers(categories, max_results=20):
-    """Query arxiv API for recent papers in given categories."""
-    cat_query = " OR ".join(f"cat:{c}" for c in categories)
-    query = f"({cat_query})"
-    params = {
-        "search_query": query,
-        "start": 0,
-        "max_results": max_results,
-        "sortBy": "submittedDate",
-        "sortOrder": "descending",
-    }
-
-    # Retry logic for rate limiting
-    max_retries = 5
-    retry_delay = 10  # seconds
-
-    # Add initial delay to respect arxiv rate limits
-    time.sleep(3)
+def _request_arxiv(url, *, params=None, accept="application/atom+xml", max_retries=3):
+    """Request arXiv metadata politely, retrying transient API failures."""
+    headers = {**ARXIV_REQUEST_HEADERS, "Accept": accept}
+    retry_delay = 10
 
     for attempt in range(max_retries):
         try:
-            resp = requests.get(ARXIV_API_URL, params=params, timeout=30)
-            resp.raise_for_status()
-            break  # Success, exit retry loop
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:  # Rate limit
-                if attempt < max_retries - 1:
-                    wait_time = retry_delay * (attempt + 1)
-                    print(f"Rate limited by arxiv API. Waiting {wait_time} seconds before retry {attempt + 2}/{max_retries}...")
-                    time.sleep(wait_time)
-                else:
-                    print("Max retries reached. Arxiv API rate limit exceeded.")
-                    raise
-            else:
-                raise
-        except Exception as e:
-            if attempt < max_retries - 1:
-                wait_time = retry_delay * (attempt + 1)
-                print(f"Error fetching papers: {e}")
-                print(f"Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-            else:
-                print(f"Error fetching papers: {e}")
+            response = requests.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=(10, 45),
+            )
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as exc:
+            if attempt == max_retries - 1:
                 raise
 
+            retry_after = getattr(exc.response, "headers", {}).get("Retry-After")
+            try:
+                wait_time = max(3, int(retry_after))
+            except (TypeError, ValueError):
+                wait_time = retry_delay * (attempt + 1)
+
+            print(f"arXiv request failed: {exc}")
+            print(f"Retrying in {wait_time} seconds...")
+            time.sleep(wait_time)
+
+    raise RuntimeError("arXiv request retry loop exited unexpectedly")
+
+
+def _parse_atom_papers(xml_text):
+    """Parse papers returned by arXiv's Atom API."""
     ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
-    root = ET.fromstring(resp.text)
+    root = ET.fromstring(xml_text)
     papers = []
     for entry in root.findall("atom:entry", ns):
         arxiv_id_url = entry.find("atom:id", ns).text.strip()
@@ -154,6 +149,108 @@ def fetch_recent_papers(categories, max_results=20):
             "published": published,
         })
     return papers
+
+
+def _parse_rss_papers(xml_text):
+    """Parse papers from an arXiv category RSS feed."""
+    ns = {"dc": "http://purl.org/dc/elements/1.1/"}
+    root = ET.fromstring(xml_text)
+    papers = []
+
+    for item in root.findall("./channel/item"):
+        link = (item.findtext("link") or "").strip()
+        match = re.search(r"arxiv\.org/abs/([^/?#]+)", link)
+        if not match:
+            continue
+
+        description = item.findtext("description") or ""
+        announce_match = re.search(r"Announce Type:\s*(\w+)", description)
+        if announce_match and announce_match.group(1).lower() not in {"new", "cross"}:
+            continue
+        abstract_match = re.search(r"Abstract:\s*(.*)", description, re.DOTALL)
+        summary = abstract_match.group(1).strip() if abstract_match else description.strip()
+
+        creator = (item.findtext("dc:creator", default="", namespaces=ns) or "").strip()
+        authors = [author.strip() for author in creator.split(",") if author.strip()]
+        categories = [
+            category.text.strip()
+            for category in item.findall("category")
+            if category.text and category.text.strip()
+        ]
+        published_text = (item.findtext("pubDate") or "").strip()
+        try:
+            published = parsedate_to_datetime(published_text).isoformat()
+        except (TypeError, ValueError):
+            published = published_text
+
+        papers.append({
+            "id": re.sub(r"v\d+$", "", match.group(1)),
+            "title": re.sub(r"\s+", " ", (item.findtext("title") or "").strip()),
+            "summary": summary,
+            "authors": authors,
+            "categories": categories,
+            "published": published,
+        })
+
+    return papers
+
+
+def _fetch_rss_papers(categories, max_results):
+    """Fetch category RSS feeds as a fallback for the rate-limited Atom API."""
+    papers_by_id = {}
+    last_error = None
+
+    for index, category in enumerate(categories):
+        if index:
+            time.sleep(3)
+        try:
+            response = _request_arxiv(
+                ARXIV_RSS_URL.format(category=category),
+                accept="application/rss+xml",
+            )
+            category_papers = _parse_rss_papers(response.text)
+        except (requests.exceptions.RequestException, ET.ParseError) as exc:
+            last_error = exc
+            print(f"RSS fallback failed for {category}: {exc}")
+            continue
+
+        for paper in category_papers:
+            existing = papers_by_id.get(paper["id"])
+            if existing:
+                existing["categories"] = sorted(set(existing["categories"] + paper["categories"]))
+            else:
+                papers_by_id[paper["id"]] = paper
+
+    if not papers_by_id and last_error:
+        raise last_error
+
+    papers = sorted(
+        papers_by_id.values(),
+        key=lambda paper: (paper["published"], paper["id"]),
+        reverse=True,
+    )
+    return papers[:max_results]
+
+
+def fetch_recent_papers(categories, max_results=20):
+    """Query arXiv for recent papers, falling back to category RSS feeds."""
+    cat_query = " OR ".join(f"cat:{category}" for category in categories)
+    params = {
+        "search_query": f"({cat_query})",
+        "start": 0,
+        "max_results": max_results,
+        "sortBy": "submittedDate",
+        "sortOrder": "descending",
+    }
+
+    # arXiv asks API clients to leave at least three seconds between requests.
+    time.sleep(3)
+    try:
+        response = _request_arxiv(ARXIV_API_URL, params=params)
+        return _parse_atom_papers(response.text)
+    except (requests.exceptions.RequestException, ET.ParseError) as exc:
+        print(f"Atom API unavailable ({exc}); falling back to arXiv RSS feeds")
+        return _fetch_rss_papers(categories, max_results)
 
 
 def get_existing_arxiv_ids():
