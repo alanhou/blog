@@ -1,0 +1,366 @@
+---
+title:
+  en: "πR²: Making Robot Policies Reactive Without Losing Their Brains"
+  zh: "πR²：让机器人策略既反应灵敏又不丢掉大脑"
+description:
+  en: "A clever split of fast proprioception and slow vision channels lets heavy flow policies replan 4× faster, closing the gap between powerful generalist models and real-time closed-loop control."
+  zh: "将快速本体感觉与慢速视觉通道分离，让笨重的流策略重规划速度提升4倍，弥合了强大通用模型与实时闭环控制之间的鸿沟。"
+date: 2026-07-29
+tags: ["arxiv", "ai", "cs.ro", "cs.ai", "cs.lg"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+:::en
+**Paper**: [2607.26055](https://arxiv.org/abs/2607.26055)
+**Authors**: Sungjae Park, Shubham Tulsiani
+**Categories**: cs.RO, cs.AI, cs.LG
+
+## The Gap
+
+The field of generalist robot manipulation has converged on a recipe: large pretrained vision-language backbones feed into flow-matching policies that predict action *chunks* (sequences of future actions at once). Think of models like GR00T, Octo, or π₀. These work beautifully for slow, structured tasks — but they share a fatal assumption: **the world stays still while you're thinking**.
+
+Here's the problem. An action chunk of, say, 16 timesteps runs open-loop. Once the chunk is emitted, the policy is blind until the chunk finishes and a new perception cycle begins. In dynamic environments — a human nudging an object, a drawer springing shut — this blindness causes failures. The obvious fix is to replan more frequently. But each replan requires passing observations through a massive backbone *and* running multiple denoising steps (flow matching is iterative). On an A5000 GPU, this pipeline takes ~100ms+ per call, capping replanning at ~10Hz. That's too slow for 40ms-tick closed-loop control.
+
+So the field is stuck at a tradeoff frontier: *either* you get powerful, expressive multi-modal policies *or* you get real-time reactivity, but not both.
+
+πR² breaks this tradeoff.
+
+```
+Action-chunk flow policies (GR00T, Octo, pi_0)
+    |
+    +-- Large backbone + multi-step denoising = high latency (~100ms)
+    |
+    +-- Chunks run open-loop = no mid-execution reaction
+    |
+    v
+Fail on dynamic / contact-rich tasks
+    |
+    Why not replan faster?
+    |
+    v
+Perception pipeline too slow for 25Hz closed-loop
+    |
+    +-- Assumption: vision+language+action must process synchronously
+    |
+    v
+pi-R2: Decouple fast and slow channels
+    |
+    +-- Proprioception (fast, every tick) bypasses backbone
+    +-- Vision-language (slow, async) updates when ready
+    +-- 1-step flow emission with inpainting of in-flight actions
+    |
+    v
+4x faster replan (~25Hz), +23% sim / +30% real success
+```
+
+## The Increment
+
+**One sentence**: Before this paper, you had to choose between a smart-but-slow policy and a fast-but-dumb one; after πR², you get a single model that is both smart **and* fast, by splitting its sensory diet into two channels with different update rates.
+
+### Core Mechanism
+
+πR² builds on **diffusion forcing** — a variant of flow matching where each timestep in the action sequence gets its own noise level (a per-position noise schedule). This is crucial because it lets you treat some positions as "clean" (already decided) and others as "noisy" (still being generated), which is exactly what you need for the inpainting trick.
+
+The method has two architectural ideas:
+
+**Idea 1: Two-speed conditioning.** The policy's input is split into two channels. The **fast channel* carries proprioception — joint positions, velocities, gripper state. This is cheap to compute and available every control tick (~40ms). The *slow channel* carries vision-language features from the large backbone. This is expensive and updates asynchronously — the policy runs multiple fast ticks using a slightly stale VLA embedding, then swaps in a fresh one when the backbone finishes. Crucially, the fast channel is injected into the denoising network at a position that lets it override stale vision when there's a conflict (e.g., contact forces contradict the visual estimate of object pose).
+
+**Idea 2: Latency-adaptive flow schedule.** Instead of generating an entire action chunk from scratch each tick, πR² treats actions that are already **in-flight* (executed or committed) as fixed conditioning via inpainting. Only the future portion of the chunk is denoised. And here's the kicker: it does this in **one denoising step** per call. The per-position noise schedule of diffusion forcing makes this natural — positions further in the future get higher noise, so you're effectively "continuing" the flow from where you left off. The model adapts to whatever latency the hardware imposes: if the GPU is slow, more actions are already in-flight (more inpainting, less generation); if it's fast, fewer are committed.
+
+```
+Input Observation
+    |
+    v
++-------------------+     +---------------------+
+|  Fast Channel     |     |  Slow Channel       |
+|  (proprioception) |     |  (vision-language)  |
+|  Fresh every tick |     |  Async update       |
+|  ~1ms             |     |  ~100ms (stale OK)  |
++--------+----------+     +---------+-----------+
+         |                          |
+         +----------+---------------+
+                    |
+                    v
+           +------------------+
+           | Denoising Network |
+           | (shared weights)  |
+           +--------+---------+
+                    |
+                    v
+           +------------------+
+           | Inpainting Logic |
+           |                  |
+           | [committed][new] |
+           |  actions  actions|
+           |  (fixed)  (denoised)
+           +--------+---------+
+                    |
+                    v
+           1-step flow emission
+                    |
+                    v
+           Action to robot (~40ms tick)
+```
+
+**The Emergency Room Metaphor.** Imagine an ER doctor treating a trauma patient. The doctor has two information streams. The **fast stream* is the patient's real-time vital signs — heart rate, blood pressure, oxygen — displayed on monitors that update every second. The *slow stream* is the specialist consultation: the radiologist is reading the CT scan, the lab is running blood panels. These take minutes to arrive.
+
+A naive approach would be: doctor waits for *all* information before acting. That's the old flow policy — wait for the full perception pipeline. A reactive approach: doctor acts on vitals immediately, *expecting* the specialist report to arrive shortly and course-correct if needed. That's πR².
+
+The "inpainting" trick is like this: the doctor has already ordered an IV line and intubation (committed actions). Those are done — they're "in-flight." The doctor doesn't reconsider them. But the next set of interventions (fluid bolus? surgery consult?) is still being decided, informed by the latest vital signs. Each new vital sign update refines the plan for *future* actions without re-litigating past ones.
+
+The "one denoising step" is the doctor's decision speed. An experienced ER doctor doesn't need ten rounds of deliberation per decision — they pattern-match and act, because the structure of the problem (years of training = the pretrained backbone) lets them compress the reasoning into a single gut call.
+
+## Key Concepts
+
+- **Diffusion Forcing**: In standard diffusion/flow models, all positions in the output sequence share the same noise level — they're all equally "uncertain." Diffusion forcing gives each timestep its own noise level. Think of it like editing a document: in standard diffusion, you're rewriting the entire page at once. In diffusion forcing, the first paragraph is already printed (noise=0), the second is in pencil (low noise), and the third is just a vague outline (high noise). This structure is what lets πR² treat committed actions as "printed" and future actions as "still being sketched."
+
+- **Action Chunking**: Instead of predicting one action at a time, the policy predicts a **sequence* of future actions (say, the next 16 timesteps) all at once. This lets the model capture temporal correlations — if you're reaching for a cup, the trajectory is smooth, and predicting it as a chunk enforces that smoothness. The downside (and πR²'s target): chunks run open-loop. The paper's insight is that you don't have to *run* the entire chunk before replanning — you can partially regenerate it each tick.
+
+- **Inpainting Conditioning**: Borrowed from image generation, inpainting means "keep some pixels fixed and generate the rest." πR² applies this to actions: the first few actions in the chunk are already committed (maybe the robot's arm is already mid-motion), so those positions are "fixed pixels." Only the remaining positions are generated fresh. This is what makes one-step denoising possible — you're not starting from pure noise, you're **continuing* from a partially clean state.
+
+## Framework Shift
+
+```
+Before (mainstream approach):             After (pi-R2):
+
+  Obs --> [VLA Backbone] --> Chunk       Obs --> [VLA Backbone] --. (async)
+              |                                |                  |
+              v                                v                  v
+         [Multi-step denoising]          [1-step denoising]   Stale VLA OK
+              |                                |
+              v                                v
+         Execute full chunk              Fast channel (proprio)
+         (open-loop, ~10Hz)              overrides when stale
+              |                                |
+              v                                v
+         Next observation                Execute partial chunk
+                                         Replan every tick (~25Hz)
+```
+
+From **synchronous monolithic pipelines** to **asynchronous two-speed perception**, the core shift is treating latency as a **design constraint to exploit* rather than a *bottleneck to minimize*.
+
+## Expert Assessment
+
+**Problem choice**: This is a real and well-identified gap. The open-loop chunk problem has been noted informally in the robotics community, but prior work mostly either (a) used smaller/faster models sacrificing capability, or (b) accepted the latency. πR² names the problem precisely and addresses it without sacrificing model capacity. The paper sits at the right moment in the field's trajectory — flow policies have matured enough that their deployment-time limitations are the next frontier.
+
+**Method maturity**: The two ideas (fast/slow channel split, latency-adaptive inpainting) are genuinely clever — not brute force. The insight that diffusion forcing's per-position noise schedule **naturally supports* inpainting without architectural changes is elegant. One concern: the paper assumes the fast channel (proprioception) is sufficient to "override" stale vision during critical moments like contact. This works for the tested tasks (pick-and-place, drawer opening), but it's unclear how well proprioception alone handles scenarios requiring fine visual reasoning (e.g., inserting a key into a lock). The method may have a ceiling on vision-critical precision tasks.
+
+**Experimental integrity**: The baselines are reasonable — they compare against the base GR00T policy and ablated variants. The 4× speedup and 23-30% success rate improvements are compelling. One potential issue: the real-world tasks are relatively structured (xArm6+XHand platform, tabletop manipulation). It would be good to see results on more dynamic scenarios (catching, human-robot handover). The sim-to-real gap analysis is absent — we don't know which failure modes simulation hides. Also, the "one denoising step" claim deserves more ablation: how much does quality degrade compared to 2-3 steps?
+
+**Writing quality**: The paper is clearly written with good motivation. The related work section could be tighter — it spends time on general diffusion policy history when the real comparison is with other latency-aware approaches. Section 4 (experiments) would benefit from a failure analysis: **when* does πR² fail, and is it the fast/slow split or the one-step denoising that causes it? The project page is well-done.
+
+**Verdict**: weak accept — The core insight (two-speed conditioning + inpainting for flow policies) is novel and practically impactful, but the experimental scope is narrow enough that we don't yet know how far the approach generalizes.
+
+## Takeaways
+
+1. **The "fast/slow channel" split is a general pattern.** Any system with an expensive perception backbone and a fast control loop can benefit: autonomous driving (expensive scene understanding vs. fast steering), drone navigation, even game AI. If your policy has a "big brain" and a "reflex arc," formalize the split.
+
+2. **Treat latency as a feature, not a bug.** Instead of minimizing pipeline latency to some target, design the policy to **adapt* to whatever latency exists. The inpainting trick is essentially saying: "whatever actions I've already committed are now constraints, not decisions." This framing transfers to any sequential decision-making under latency.
+
+3. **Per-position noise schedules are underexplored.** Diffusion forcing's per-timestep noise isn't just a training trick — it's a **control structure*. It lets you mix "done" and "to-do" in the same forward pass. If you're working on diffusion/flow models for sequential data, this is worth stealing.
+
+4. **Minimal modification, maximal impact.** The paper finetunes from a pretrained GR00T checkpoint with minimal architectural changes. This is the right way to ship: don't rebuild the model, just wrap the latency-sensitive parts. Practitioners should look for similar "deployment-aware fine-tuning" opportunities in their own pipelines.
+:::
+
+:::zh
+**论文**: [2607.26055](https://arxiv.org/abs/2607.26055)
+**作者**: Sungjae Park, Shubham Tulsiani
+**分类**: cs.RO, cs.AI, cs.LG
+
+## 缺口
+
+通用机器人操作领域近年收敛到了一套配方：大型预训练视觉-语言骨干网络，接上流匹配策略，一次性输出一段*动作序列*（action chunk）。
+GR00T、Octo、π₀ 都是这个思路。
+这套方法在慢节奏、结构化任务上表现出色，但它共享一个致命假设——**你思考的时候世界不会动**。
+
+问题在于，一个16步的动作序列是开环执行的。
+序列一发出，策略就"失明"了，直到整段执行完、下一次感知循环开始。
+在动态环境中——人碰了一下物体、抽屉弹簧弹回——这种失明直接导致失败。
+显而易见的修复方案是更频繁地重规划。
+但每次重规划都要把观测塞进巨大的骨干网络，再跑多步去噪。
+在A5000上，这条流水线要100ms以上，重规划频率被卡在~10Hz。
+对于40ms节拍的闭环控制来说，这太慢了。
+
+于是领域卡在了一条权衡曲线上：**要么**拥有强大、表达力强的多模态策略，**要么**拥有实时反应能力，两者不可兼得。
+
+πR² 打破了这条曲线。
+
+```
+动作序列流策略（GR00T, Octo, pi_0）
+    |
+    +-- 大型骨干 + 多步去噪 = 高延迟（~100ms）
+    |
+    +-- 序列开环执行 = 执行中途无法反应
+    |
+    v
+动态/接触丰富任务上频繁失败
+    |
+    为什么不提高重规划频率？
+    |
+    v
+感知流水线太慢，无法支撑25Hz闭环
+    |
+    +-- 隐含假设：视觉+语言+动作必须同步处理
+    |
+    v
+pi-R2：解耦快慢两个通道
+    |
+    +-- 本体感觉（快，每节拍更新）绕过骨干
+    +-- 视觉-语言（慢，异步更新）就绪后替换
+    +-- 1步流发射 + 飞行中动作的修补
+    |
+    v
+4倍更快重规划（~25Hz），仿真+23% / 真机+30%成功率
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，你必须在"聪明但慢"和"快但笨"的策略之间做选择；πR² 之后，一个模型同时做到两者——诀窍是把策略的感知"饮食"分成两条通道，以不同速率更新。
+
+### 核心机制
+
+πR² 建立在**扩散强迫**（diffusion forcing）之上——流匹配的一个变体，其中动作序列的每个时间步有自己的噪声水平（逐位置噪声调度）。
+这一点至关重要，因为它让你可以把某些位置当作"干净的"（已决定），其他位置当作"有噪声的"（仍在生成），而这正是修补技巧所需要的。
+
+方法有两个架构层面的创意：
+
+**创意一：双速条件输入。** 策略的输入被拆成两条通道。**快速通道*承载本体感觉——关节位置、速度、夹爪状态。这个计算量小，每个控制节拍（~40ms）都能拿到。*慢速通道*承载来自大骨干的视觉-语言特征。这个计算量大，异步更新——策略用略微陈旧的VLA嵌入跑多个快速节拍，骨干算完后替换为新的。关键设计：快速通道被注入到去噪网络的一个位置，当两者冲突时可以覆盖陈旧的视觉信息（比如接触力与视觉估计的物体姿态矛盾）。
+
+**创意二：延迟自适应流调度。** 每个节拍不是从头生成整个动作序列，而是把**已经在执行中*的动作（已提交或已执行的部分）通过修补当作固定条件。只有序列的未来部分需要去噪。更妙的是：每次调用只做**一步去噪**。扩散强迫的逐位置噪声调度让这变得自然——越远的未来位置噪声越高，所以你本质上是从上次停下的地方"继续"流过程。模型自动适应硬件延迟：GPU慢则更多动作已在飞行中（更多修补、更少生成），GPU快则更少被提交。
+
+```
+输入观测
+    |
+    v
++-----------------+     +-------------------+
+|  快速通道        |     |  慢速通道          |
+|  （本体感觉）    |     |  （视觉-语言）     |
+|  每节拍刷新      |     |  异步更新          |
+|  ~1ms            |     |  ~100ms（可过期）  |
++--------+--------+     +---------+---------+
+         |                        |
+         +--------+---------------+
+                  |
+                  v
+         +----------------+
+         | 去噪网络        |
+         | （共享权重）    |
+         +--------+-------+
+                  |
+                  v
+         +----------------+
+         | 修补逻辑        |
+         |                |
+         | [已提交][新]   |
+         |  动作   动作   |
+         | （固定）（去噪）|
+         +--------+-------+
+                  |
+                  v
+         1步流发射
+                  |
+                  v
+         发送给机器人（~40ms节拍）
+```
+
+**急诊室医生的比喻。** 想象一位急诊科医生在处理创伤患者。
+医生有两条信息流。
+*快速流*是患者的实时生命体征——心率、血压、血氧——监护仪每秒刷新。
+*慢速流*是专科会诊：放射科在读CT，化验室在跑血常规。
+这些需要几分钟才能出结果。
+
+天真的做法是：医生等**所有**信息到齐才行动。
+这就是老式流策略——等整个感知流水线跑完。
+反应式的做法是：医生根据生命体征立刻行动，*预判*专科报告很快会到，届时再纠正。
+这就是πR²。
+
+"修补"技巧是这样的：医生已经下了医嘱——挂上了静脉通路、插了气管导管（已执行的动作）。
+这些做完了——它们是"飞行中"的。
+医生不会重新考虑这些。
+但下一组干预措施（液体冲击？外科会诊？）仍在决策中，由最新的生命体征来指导。
+每次新的生命体征刷新都细化*未来*的动作计划，而不会推翻已经做了的事。
+
+"一步去噪"就是医生的决策速度。
+一个经验丰富的急诊医生不需要十轮深思熟虑——他们模式匹配然后行动，因为问题的结构（多年训练 = 预训练骨干）让他们把推理压缩成一个直觉判断。
+
+## 关键概念
+
+- **扩散强迫**：在标准扩散/流模型中，输出序列的所有位置共享同一噪声水平——它们同样"不确定"。
+扩散强迫给每个时间步分配自己的噪声水平。
+想象编辑一份文档：标准扩散是整页一起重写。
+扩散强迫是第一段已经印刷了（噪声=0），第二段用铅笔写（低噪声），第三段只有一个模糊大纲（高噪声）。
+这种结构正是πR²能把已提交的动作当作"印刷好的"、未来的动作当作"还在打草稿"的基础。
+
+- **动作序列**：策略不是一次预测一个动作，而是**一次性*预测未来一段时间的动作序列（比如接下来16步）。
+这让模型能捕捉时间相关性——如果你在伸手够杯子，轨迹是平滑的，预测整段序列能强制这种平滑性。
+代价（也是πR²的目标）：序列开环执行。
+论文的洞见是：你不必*执行完*整个序列才能重规划——每个节拍可以部分地重新生成它。
+
+- **修补条件**：借用自图像生成的概念，修补意思是"保持一些像素不变，生成其余的"。
+πR² 把这个应用到动作上：序列的前几个动作已经提交了（机器人的手臂可能已经在运动途中），所以那些位置是"固定像素"。
+只有剩余位置需要新生成。
+这就是一步去噪成为可能的原因——你不是从纯噪声开始，而是从一个部分干净的状态*继续*。
+
+## 框架转变
+
+```
+之前（主流方法）：                     之后（πR²）：
+
+  观测 --> [VLA骨干] --> 动作序列      观测 --> [VLA骨干] --.（异步）
+              |                            |                |
+              v                            v                v
+         [多步去噪]                   [1步去噪]        可用过期VLA
+              |                            |
+              v                            v
+         执行整个序列                   快速通道（本体感觉）
+         （开环，~10Hz）               过期时覆盖
+              |                            |
+              v                            v
+         下一次观测                     执行部分序列
+                                       每节拍重规划（~25Hz）
+```
+
+从**同步单体流水线**到**异步双速感知**，核心转变是把延迟当作**可以利用的设计约束*而非*必须最小化的瓶颈*。
+
+## 专家评审
+
+**选题眼光**：这是一个真实且定位精准的缺口。
+开环序列问题在机器人社区已被非正式地注意到，但此前的工作要么（a）用更小/更快的模型牺牲能力，要么（b）接受延迟。
+πR² 精确地命名了问题，并在不牺牲模型容量的前提下解决了它。
+论文处于领域发展轨迹的正确位置——流策略已经成熟，部署时的局限性是下一个前沿。
+
+**方法成熟度**：两个创意（快慢通道拆分、延迟自适应修补）确实巧妙，不是蛮力。
+扩散强迫的逐位置噪声调度*天然支持*修补而无需架构改动，这个洞察很优雅。
+一个担忧：论文假设快速通道（本体感觉）足以在关键时刻（如接触）"覆盖"过期视觉。
+这在测试任务上成立（取放、开抽屉），但本体感觉单独处理精细视觉推理场景（比如把钥匙插进锁孔）的能力尚不清楚。
+在视觉关键的精密任务上，方法可能存在天花板。
+
+**实验诚意**：基线合理——与基础GR00T策略和消融变体做了比较。
+4倍加速和23-30%的成功率提升有说服力。
+一个潜在问题：真机任务相对结构化（xArm6+XHand平台，桌面操作）。
+在更动态的场景（接住物体、人机交接）上会怎样？缺失仿真到真实差距分析——我们不知道仿真隐藏了哪些失败模式。
+另外，"一步去噪"的说法值得更多消融：与2-3步相比，质量退化多少？
+
+**写作功力**：论文写作清晰、动机充分。
+相关工作部分可以更紧凑——在通用扩散策略的历史上花了太多篇幅，真正的比较对象应该是其他延迟感知方法。
+第4节（实验）需要一个失败分析：πR² 什么时候失败？是快慢拆分还是一步去噪导致的？
+项目页面做得不错。
+
+**判决**: 弱接收 — 核心洞见（双速条件 + 流策略修补）新颖且有实际影响力，但实验范围足够窄，我们还不清楚方法能走多远。
+
+## 要点总结
+
+1. **"快慢通道"拆分是一个通用模式。** 任何有昂贵感知骨干和快速控制环路的系统都能受益：自动驾驶（昂贵的场景理解 vs. 快速转向）、无人机导航、甚至游戏AI。
+如果你的策略有一个"大脑"和一个"反射弧"，就把这个拆分形式化。
+
+2. **把延迟当特性，不当缺陷。** 与其把流水线延迟最小化到某个目标值，不如设计策略去**适应*任何存在的延迟。
+修补技巧本质上是说："任何我已经承诺的动作，现在是约束条件，不是决策。"
+这个框架可以迁移到任何延迟下的序贯决策。
+
+3. **逐位置噪声调度被低估了。** 扩散强迫的逐时间步噪声不只是一个训练技巧——它是一种**控制结构*。
+它让你在同一次前向传播中混合"已完成"和"待完成"。
+如果你在做序贯数据的扩散/流模型，这值得借鉴。
+
+4. **最小修改，最大影响。** 论文从预训练的GR00T检查点微调，架构改动极小。
+这是正确的发布方式：不要重建模型，只包装延迟敏感的部分。
+实践者应该在自己的流水线中寻找类似的"部署感知微调"机会。
+:::
