@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 
 /**
- * Validates MDX files for common syntax issues that break builds
+ * Validates MDX files for common syntax issues that break builds.
+ *
+ * Pass --fix to rewrite the issues that have a deterministic repair
+ * (raw "<" in prose becomes the &lt; entity, <*> gets wrapped in backticks).
+ * Issues without a repair (frontmatter problems) are still reported and
+ * still fail the run.
  */
 
-import { readFileSync, readdirSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, readdirSync, statSync } from 'fs';
 import { join, extname } from 'path';
 import matter from 'gray-matter';
 
@@ -15,6 +20,12 @@ const ISSUES = {
     fix: (match) => `\`${match}\``
   }
 };
+
+// MDX renders these entities back as literal < and > in the published page,
+// so escaping is invisible to the reader and keeps prose out of code styling.
+function escapeAngles(text) {
+  return text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
 
 // Additional runtime checks for raw < that break the MDX/JSX parser even if not matching the above regex.
 // These are things like bit-shift notation (r << d), generic-like <T>, or plain comparisons in prose.
@@ -108,14 +119,10 @@ function findRawAngleBracketIssues(content, filePath) {
           continue;
         }
 
-        // Only flag the patterns proven to reliably break the MDX JSX parser with the exact error
-        // "Unexpected character `<` before name":
-        //   - <<   (the original crash: "r << d" in prose)
-        //   - >>   (symmetric)
-        //   - <=   (and < followed by space or -) because after the < the JSX tag parser
-        //          sees "=" / " " / "-" instead of a valid name-start char (letter/$/_).
-        //          These appear in comparisons ("x < 5", "score <= 100", "health < 30%")
-        //          and arrows in text. Wrap them in backticks.
+        // A JSX tag name must start with a letter, `$` or `_`, so any other character
+        // after a raw `<` makes the parser fail with "Unexpected character ... before name".
+        // That covers everything seen in generated prose: `r << d`, `x <= 5`,
+        // `health < 30%`, `p < 10^-70`, `x<3`, and `<--` arrows.
         const isDoubleShift = (next === '<' || next === '>');
         if (isDoubleShift) {
           const snippet = line.slice(j, j + 2);
@@ -126,22 +133,24 @@ function findRawAngleBracketIssues(content, filePath) {
             issue: 'RAW_DOUBLE_ANGLE_BRACKET_IN_PROSE',
             message: 'Raw "<<" or ">>" in prose is parsed as JSX tag start and fails with "Unexpected character `<` before name". Wrap in backticks (e.g. `r << d`) or in $math$.',
             match: snippet,
-            fix: `\`${snippet}\``
+            fix: `\`${snippet}\``,
+            autofix: { length: 2, replacement: escapeAngles(snippet) }
           });
           j++; // skip the second one too
         }
 
-        // Catch the cases that actually broke the build: <= , "x < 5", "<-- arrows" etc. in prose.
-        if (!isDoubleShift && (next === '=' || next === ' ' || next === '-')) {
+        // Catch the cases that actually broke the build: <= , "x < 5", "x<3", "<-- arrows" etc.
+        if (!isDoubleShift && next !== '' && !/[A-Za-z$_/!]/.test(next)) {
           const snippet = line.slice(j, j + 2);
           errors.push({
             file: filePath,
             line: i + 1,
             column: j + 1,
             issue: 'RAW_ANGLE_BRACKET_IN_PROSE',
-            message: 'Raw "<" (comparison <= / < 30% or arrow <--) in prose is parsed as JSX tag start and fails with "Unexpected character `=` (or other) before name". Wrap the operator/expression in backticks, e.g. `<= 500`, `health < 30%`, or use $math$.',
+            message: 'Raw "<" (comparison <= / < 30% / x<3, or arrow <--) in prose is parsed as JSX tag start and fails with "Unexpected character `=` (or other) before name". Escape it as &lt;, wrap the expression in backticks (e.g. `health < 30%`), or use $math$.',
             match: snippet,
-            fix: `\`${snippet}\``
+            fix: `\`${snippet}\``,
+            autofix: { length: 1, replacement: '&lt;' }
           });
           if (next !== ' ') {
             j++; // advance past the second char for <= or <-
@@ -266,7 +275,10 @@ function validateFile(filePath) {
         issue: issueKey,
         message: issue.message,
         match: match[0],
-        fix: issue.fix ? issue.fix(match[0]) : null
+        fix: issue.fix ? issue.fix(match[0]) : null,
+        autofix: issue.fix
+          ? { length: match[0].length, replacement: issue.fix(match[0]) }
+          : null
       });
     }
   }
@@ -277,11 +289,67 @@ function validateFile(filePath) {
   return errors;
 }
 
+/**
+ * Applies every autofixable error in one pass and writes the file back.
+ * Edits are applied right-to-left within each line so that earlier columns
+ * stay valid as the line grows. Returns the number of repairs made.
+ */
+function fixFile(filePath, errors) {
+  const fixable = errors.filter((e) => e.autofix);
+  if (fixable.length === 0) {
+    return 0;
+  }
+
+  const lines = readFileSync(filePath, 'utf-8').split('\n');
+  const byLine = new Map();
+  for (const error of fixable) {
+    if (!byLine.has(error.line)) {
+      byLine.set(error.line, []);
+    }
+    byLine.get(error.line).push(error);
+  }
+
+  for (const [lineNumber, lineErrors] of byLine) {
+    let line = lines[lineNumber - 1];
+    if (line === undefined) {
+      continue;
+    }
+    for (const error of lineErrors.sort((a, b) => b.column - a.column)) {
+      const start = error.column - 1;
+      const { length, replacement } = error.autofix;
+      line = line.slice(0, start) + replacement + line.slice(start + length);
+    }
+    lines[lineNumber - 1] = line;
+  }
+
+  writeFileSync(filePath, lines.join('\n'));
+  return fixable.length;
+}
+
 function main() {
+  const shouldFix = process.argv.includes('--fix');
   const contentDir = join(process.cwd(), 'src/content/blog');
   const mdxFiles = findMdxFiles(contentDir);
 
   console.log(`Validating ${mdxFiles.length} MDX files...\n`);
+
+  if (shouldFix) {
+    let fixedFiles = 0;
+    let fixedIssues = 0;
+    for (const file of mdxFiles) {
+      const repairs = fixFile(file, validateFile(file));
+      if (repairs > 0) {
+        fixedFiles++;
+        fixedIssues += repairs;
+        console.log(`  fixed ${repairs} issue(s) in ${file}`);
+      }
+    }
+    console.log(
+      fixedIssues === 0
+        ? 'Nothing to auto-fix.\n'
+        : `\nAuto-fixed ${fixedIssues} issue(s) in ${fixedFiles} file(s). Re-validating...\n`
+    );
+  }
 
   let totalErrors = 0;
   const fileErrors = [];
@@ -299,7 +367,11 @@ function main() {
     process.exit(0);
   }
 
-  console.error(`✗ Found ${totalErrors} issue(s) in ${fileErrors.length} file(s):\n`);
+  console.error(
+    shouldFix
+      ? `✗ ${totalErrors} issue(s) in ${fileErrors.length} file(s) have no automatic repair:\n`
+      : `✗ Found ${totalErrors} issue(s) in ${fileErrors.length} file(s) (run \`npm run fix:mdx\` to repair the mechanical ones):\n`
+  );
 
   for (const { file, errors } of fileErrors) {
     console.error(`\n${file}:`);
