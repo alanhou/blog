@@ -1,0 +1,410 @@
+---
+title:
+  en: "EnvACE: Training Agents by Making the Policy Play the Environment"
+  zh: "EnvACE：让策略自己扮演环境来训练智能体"
+description:
+  en: "Agentic RL usually needs an executable environment to train against, and building one is expensive. EnvACE removes it: the policy alternates between emitting a tool call and rehearsing the environment's response, with both roles optimized end-to-end."
+  zh: "智能体强化学习通常需要一个可执行环境来训练，而搭环境很贵。EnvACE 干脆把它去掉：策略在「发出工具调用」和「预演环境响应」之间交替，两个角色端到端联合优化。"
+date: 2026-08-07
+tags: ["arxiv", "ai", "cs.ai"]
+image: "/arxiv-visuals/arxiv-envace-internalizing-environment-dynamics-via-world.png"
+---
+:::en
+**Paper**: [2608.06197](https://arxiv.org/abs/2608.06197)
+**Authors**: Zishan Xu, Zhiyuan Yao, Yuxin Chen, Yifu Guo, Zhengxi Lu, Yuquan Lu, Jinyang Huang, Yan Xu, Yasheng Wang, Weinan Zhang, Xingshan Zeng, Weiwen Liu
+**Categories**: cs.AI
+
+## The Gap
+
+Training an LLM agent for long-horizon tool use has a hard prerequisite: something has to answer the tool calls. The field has settled into two ways of providing that something, and both have a ceiling.
+
+The first is to build real or synthesized executable environments. This is what most serious agentic RL work does, and it works — but the cost is brutal and it is the wrong kind of cost. Every new tool domain needs its environment constructed, and then *verified*, because an environment that returns subtly wrong responses trains an agent to be subtly wrong. Verification does not amortize: it scales with the number of domains you want coverage over. This is why "environment scaling" has become its own research direction, and why the ceiling on agent training increasingly looks like an environment-engineering ceiling rather than a modeling one.
+
+The second is to use an external simulator. Cheaper to run, but hard to ground — the simulator's notion of how a tool behaves drifts from how it actually behaves, and the policy learns the simulator's physics instead of the world's.
+
+Both approaches share a structural assumption worth noticing: that environment dynamics live *outside* the policy, in a separate artifact that has to be built, maintained, and kept faithful. The knowledge of "what happens when I call this tool with these arguments" sits in the environment, and the policy only ever accesses it through interaction.
+
+```
+Long-horizon tool-use training needs a responder
+         |
+         +-----------------------+
+         |                       |
+         v                       v
+  executable envs          external simulators
+  (costly to build          (cheap but hard
+   AND verify)               to ground)
+         |                       |
+         +-----------+-----------+
+                     |
+                     v
+      Shared assumption: dynamics live OUTSIDE the policy
+                     |
+                     v
+      [This paper] What if the policy holds them?
+                     |
+                     v
+      World rehearsal: policy acts, then plays
+      the environment; both roles trained jointly
+                     |
+                     v
+      Evidence: beats environment-scaling baselines on
+      BFCL-v4, tau^2-Bench, VitaBench, FinMCP-Bench
+                     |
+                     v
+      An agent world model in the parameters --
+      usable at train time AND at test time
+```
+
+## The Increment
+
+**One sentence**: Before this paper, scaling agentic RL meant scaling the environments you train against; after it, the policy can generate its own environment responses during training and carry the resulting world model in its weights.
+
+### Core Mechanism
+
+EnvACE replaces external environment interaction during training with **world rehearsal**. The policy alternates between two roles within a single rollout. First it acts: given the task and history, it generates a tool call. Then it rehearses: it switches roles and plays the environment, producing the response that call would induce. It then conditions its next decision on that rehearsed response, and the loop continues. From the outside, the rollout looks like a normal multi-turn tool-use trajectory; internally, the model wrote both halves of the conversation.
+
+The critical design choice is that both roles are **jointly optimized end-to-end using task-success rewards**. There is no separate environment-modeling loss, no supervised imitation of real responses. The rehearsal role is trained by the same signal that trains the acting role: did the trajectory succeed at the task. This is what keeps rehearsal honest in the way that matters. A rehearsal that hallucinates a convenient response leads the policy down a path that fails the task, and the task-success reward pushes back on both the action and the fabricated response that enabled it. The environment model is shaped not to be maximally realistic in general, but to be realistic enough that decisions conditioned on it succeed.
+
+The consequence is that dynamics get **internalized into the parameters**. The policy is not consulting an environment; it holds a model of how actions map to responses. The paper calls this an agent world model, and its most interesting property is that it does not stay confined to training. At test time, the policy can perform **private rehearsal before committed execution** — imagining what a tool call would return, evaluating whether that leads somewhere useful, and only then actually issuing the call against the real environment. Under a moderate rehearsal budget this yields further gains with no additional external interaction, which is the payoff of having put the dynamics somewhere the model can query for free.
+
+```
+   Training rollout under world rehearsal
+
+   [Task]
+     |
+     v
+  +------------------+
+  | ACT role         |  policy emits tool call a_t
+  +------------------+
+     |
+     v
+  +------------------+
+  | REHEARSE role    |  SAME policy plays environment,
+  | (no external env)|  produces response o_t
+  +------------------+
+     |
+     v
+  condition on o_t --> next decision a_t+1
+     |
+     v
+   ... repeat to horizon ...
+     |
+     v
+  +----------------------------+
+  | task-success reward        |
+  | trains BOTH roles jointly  |
+  +----------------------------+
+
+
+   Test time: the internalized model becomes optional lookahead
+
+   candidate call --> private rehearsal --> worth it?
+                                             |
+                              no <-----------+-----------> yes
+                              |                            |
+                         revise call              commit to REAL env
+```
+
+Here is the structural metaphor. Think about how a chess player trains without an opponent. The obvious method is to hire sparring partners — real opponents, expensive, and you need a lot of them at many strengths to get coverage. That is the executable-environment approach. The alternative is to buy a chess computer, but a weak or quirky engine teaches you to beat *it*, not to beat people. That is the external simulator, ungrounded.
+
+What strong players actually do is play both sides themselves. You make your move, then you turn the board around and think as hard as you can about the reply, then you turn it back and respond to that reply. Crucially, you are not trying to produce the reply a specific opponent would make — you are trying to produce a reply good enough that a plan surviving it is a plan worth having. And you keep yourself honest not by grading the realism of your imagined replies, but by whether the resulting lines actually win when you finally play a real game. That is the task-success reward training both roles.
+
+The metaphor also explains the test-time behavior exactly. A player who has trained this way does not stop turning the board around once real games start. Before committing to a move, they play it out in their head first — private rehearsal before committed execution. The board-turning habit built during training became the calculation ability used during play. The same parameters serve both.
+
+### Key Concepts
+
+- **World rehearsal**: The policy generating the environment's response to its own action, then conditioning on it. The word "rehearsal" is doing precise work here — it is not simulation in the sense of a separate faithful model, and it is not hallucination in the sense of unconstrained invention. It is a dry run, performed by the actor, and judged by whether the performance it prepares for succeeds. A concrete instance: the agent emits a call to a flight-booking API with a malformed date. In a real environment it gets an error response. Under world rehearsal the policy must itself produce that error response — and if it instead rehearses a cheerful success, the trajectory proceeds on a false premise and fails the task, and gradient flows back through the fabricated response.
+
+- **Internalized dynamics as an agent world model**: The distinction between having access to an environment and having a model of one. An agent with API access knows what happens when it calls, but only by calling. An agent with internalized dynamics knows before it calls. This matters for exactly one reason: knowledge you hold in parameters is free to query, while knowledge that lives behind an interaction is not. Every lookahead step against a real environment costs a call, has latency, may have side effects, and may not be reversible. Every lookahead step against internalized dynamics costs a forward pass. That asymmetry is what makes test-time rehearsal viable at all.
+
+- **Private rehearsal before committed execution**: The test-time use of the world model, and the reason the training method has value beyond training. "Private" means the rehearsed calls never touch the real environment — nothing is booked, nothing is sent, nothing is deleted. "Committed" means only the surviving call is actually executed. This is a safety-relevant structure that comes along for free: the agent gets to be wrong in imagination rather than wrong in production, which is the single most useful property you can give an agent that operates on real systems.
+
+## Framework Shift
+
+```
+Before (environment scaling):        After (world rehearsal):
+
+  policy                              policy
+    |                                   |
+    | tool call                         | tool call
+    v                                   v
+  +-------------------+              +-------------------+
+  | external env      |              | SAME policy,      |
+  | built + verified  |              | rehearse role     |
+  | per domain        |              +-------------------+
+  +-------------------+                  |
+    |                                    | rehearsed response
+    | response                           v
+    v                                 next decision
+  next decision                          |
+    |                                    v
+    v                              task-success reward
+  task-success reward              trains act AND rehearse
+  trains policy only                     |
+                                         v
+  scaling knob:                    scaling knob:
+  build more environments          more rehearsal, same weights
+
+                                   bonus: rehearsal survives
+                                   into test time as lookahead
+```
+
+From treating environment dynamics as external infrastructure to be constructed, to treating them as knowledge the policy can hold, the core shift is moving the world model from outside the parameters to inside them — where it can be queried for free at inference.
+
+## Expert Assessment
+
+**Problem choice**: The gap is real and the framing is sharp. Environment construction genuinely is the bottleneck in agentic RL right now, and the observation that verification cost scales with domain coverage rather than amortizing is the correct reason it is a bottleneck. Positioning against "environment-scaling baselines" is the honest comparison to pick, since that is the approach with momentum. There is also a satisfying conceptual tidiness to the move: model-based RL has always argued that learning dynamics beats querying them, and this is that argument arriving in the LLM agent setting with the twist that the dynamics model and the policy are the same network.
+
+**Method maturity**: This is a clever insight rather than brute force, and the cleverness is concentrated in one decision — training the rehearsal role with task-success reward instead of a supervised environment-modeling objective. That choice is what prevents the obvious failure mode where the policy learns to rehearse whatever response makes its life easiest. But I would not call the problem fully solved by it, only fully *pressured*. Task-success reward penalizes self-serving rehearsals that lead to failure; it does not penalize self-serving rehearsals that lead to success for the wrong reasons. A policy that systematically rehearses a simpler world than the real one, and learns a policy that works in that simpler world, gets rewarded during training and discovers the discrepancy only at deployment. The transferability results across four benchmarks are the relevant evidence against this, and they are reassuring, but the concern is structural rather than empirical and would show up worst exactly where it is hardest to test: novel tools with dynamics unlike anything in pretraining.
+
+**Experimental integrity**: Four benchmarks spanning general function calling, multi-turn interaction, and a domain-specific financial suite is a reasonable spread, and evaluating against environment-scaling baselines rather than against no-training-at-all is the fair comparison. The controlled studies showing the effect holds across model scales are the most valuable table in the paper for a reader deciding whether to adopt this, because a technique that only works at one scale is usually exploiting something other than what it claims. The result I would probe hardest is the test-time rehearsal gain: "moderate rehearsal budget" is doing unspecified work, and the honest accounting compares that budget against simply spending the same tokens on longer reasoning without the rehearsal framing. Code release helps here.
+
+**Writing quality**: The abstract is well-constructed and the central mechanism is stated crisply enough to be understood on one reading, which is rarer than it should be. The weakest point is that "internalizes the relationship between actions and their environment responses in its parameters" is asserted more than it is interrogated — the paper would be stronger with a direct probe of what the rehearsal role actually learned, ideally comparing rehearsed responses against real ones on held-out tools. That section would convert the central claim from plausible to demonstrated.
+
+**Verdict**: weak accept — A genuinely good idea with the right training signal, held back from a stronger verdict by the unexamined question of what happens when the rehearsed world is consistently simpler than the real one.
+
+## Takeaways
+
+Three things a practitioner can steal:
+
+1. **Train the simulator with the downstream reward, not with a modeling loss.** This is the transferable core. Whenever you need a component that stands in for something expensive — an environment, a user, a grader, a retrieval corpus — the instinct is to train it to be accurate. Training it instead on whether the *downstream task* succeeds under it is a different and often better objective, because it concentrates fidelity where fidelity affects decisions and spends nothing on realism that does not. This applies well outside agents.
+
+2. **Separate rehearsal from commitment as a deployment pattern.** Even without adopting the training method, the test-time structure is independently useful: let the agent imagine the result of a consequential action, evaluate it, and only then execute against the real system. For any agent touching production — sending messages, moving money, mutating databases — the ability to be wrong in a rehearsal rather than wrong in the world is worth engineering for directly. The paper shows this can be learned rather than hand-built.
+
+3. **Notice when your scaling knob is infrastructure rather than compute.** The reframe worth internalizing: if progress on your system requires building more artifacts by hand — more environments, more graders, more labeled sets — ask whether the model can hold that knowledge instead. The answer is often no, but the question is asked too rarely, and when it is yes the cost curve changes shape rather than shifting down.
+:::
+
+:::zh
+**论文**: [2608.06197](https://arxiv.org/abs/2608.06197)
+**作者**: Zishan Xu, Zhiyuan Yao, Yuxin Chen, Yifu Guo, Zhengxi Lu, Yuquan Lu, Jinyang Huang, Yan Xu, Yasheng Wang, Weinan Zhang, Xingshan Zeng, Weiwen Liu
+**分类**: cs.AI
+
+## 缺口
+
+训练一个能做长程工具调用的 LLM 智能体，有一个硬前提：得有东西来回应工具调用。
+领域目前沉淀出两种提供「那个东西」的方式，而两种都有天花板。
+
+第一种是搭建真实或合成的可执行环境。
+多数认真的智能体 RL 工作都这么做，它也确实有效——但代价残酷，而且是那种性质不对的代价。
+每一个新的工具域都要把环境构建出来，然后**验证**，因为一个返回微妙错误响应的环境，会把智能体训得微妙地错。
+验证成本无法摊薄：它随你想覆盖的域数量线性增长。
+这就是「环境规模化」为什么会变成一个独立研究方向，也是为什么智能体训练的天花板越来越像一堵环境工程的墙，而不是建模的墙。
+
+第二种是用外部模拟器。
+跑起来便宜，但难以接地——模拟器对「一个工具会如何表现」的理解，会和它实际的表现漂移开，策略学到的是模拟器的物理，不是世界的物理。
+
+两条路共享一个值得注意的结构性假设：环境动力学住在策略**之外**，在一个必须被构建、维护、保真的独立产物里。
+「用这些参数调这个工具会发生什么」这份知识存在环境里，策略只能通过交互访问它。
+
+```
+长程工具调用训练需要一个应答者
+     |
+     +-----------------------+
+     |                       |
+     v                       v
+  可执行环境              外部模拟器
+  （构建 AND 验证          （便宜但
+    都很贵）                难以接地）
+     |                       |
+     +-----------+-----------+
+                 |
+                 v
+   共享假设：动力学住在策略之外
+                 |
+                 v
+   [本文] 如果让策略自己持有它呢？
+                 |
+                 v
+   世界预演：策略先行动，再扮演环境；
+   两个角色联合训练
+                 |
+                 v
+   证据：在 BFCL-v4、tau^2-Bench、VitaBench、
+   FinMCP-Bench 上胜过环境规模化基线
+                 |
+                 v
+   参数里的智能体世界模型 ——
+   训练时能用，测试时也能用
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，扩展智能体 RL 意味着扩展你用来训练的环境；这篇论文之后，策略可以在训练中自己生成环境响应，并把由此得到的世界模型带在权重里。
+
+### 核心机制
+
+EnvACE 用**世界预演**（world rehearsal）替换掉训练期的外部环境交互。
+在一次 rollout 内，策略在两个角色之间交替。
+先行动：给定任务和历史，生成一个工具调用。
+然后预演：切换角色扮演环境，产出这次调用会引出的响应。
+接着它以这个预演出来的响应为条件做下一个决策，循环继续。
+从外面看，这条 rollout 像一条正常的多轮工具调用轨迹；在内部，对话的两半都是模型自己写的。
+
+关键设计选择是：两个角色用**任务成功奖励端到端联合优化**。
+没有单独的环境建模损失，没有对真实响应的监督模仿。
+预演角色由训练行动角色的同一个信号来训练：这条轨迹在任务上成功了没有。
+这正是让预演在要紧之处保持诚实的机制。
+一次幻觉出便利响应的预演，会把策略引上一条任务失败的路径，而任务成功奖励会同时推回那个动作和那个使它成为可能的编造响应。
+环境模型被塑造的目标不是「总体上尽可能逼真」，而是「逼真到以它为条件的决策能够成功」。
+
+后果是动力学被**内化进参数**。
+策略不是在查询一个环境；它持有一个「动作如何映射到响应」的模型。
+论文称之为智能体世界模型，而它最有意思的性质是不止步于训练。
+测试时，策略可以执行**提交执行前的私下预演**——想象一次工具调用会返回什么，评估这是否通向有用的地方，然后才真正对真实环境发出调用。
+在中等预演预算下，这带来额外增益，且不需要任何额外外部交互——这就是把动力学放在模型可以免费查询之处的回报。
+
+```
+   世界预演下的训练 rollout
+
+   [任务]
+     |
+     v
+  +------------------+
+  | 行动角色          |  策略发出工具调用 a_t
+  +------------------+
+     |
+     v
+  +------------------+
+  | 预演角色          |  同一个策略扮演环境，
+  | （无外部环境）     |  产出响应 o_t
+  +------------------+
+     |
+     v
+  以 o_t 为条件 --> 下一决策 a_t+1
+     |
+     v
+   ... 重复到时域末端 ...
+     |
+     v
+  +----------------------------+
+  | 任务成功奖励                |
+  | 联合训练两个角色             |
+  +----------------------------+
+
+
+   测试时：内化的模型变成可选的前瞻
+
+   候选调用 --> 私下预演 --> 值得吗？
+                              |
+                否 <----------+----------> 是
+                |                          |
+            修改调用                 提交到真实环境
+```
+
+下面是**结构性比喻**。
+想想一个棋手在没有对手的情况下怎么训练。
+显而易见的办法是雇陪练——真人对手，贵，而且你需要很多个、很多不同强度的，才能拿到覆盖度。
+那是可执行环境路线。
+另一个选择是买个下棋计算机，但一个弱的或者路子怪的引擎，教会你的是赢**它**，不是赢人。
+那是未接地的外部模拟器。
+
+强棋手实际做的是自己下两边。
+你走一步，然后把棋盘转过来，尽全力去想对方会怎么应，再把棋盘转回来，应对那步应手。
+关键在于：你并不是想复现某个特定对手会走的应手——你是想走出一步足够好的应手，好到「能扛住它的计划」才算值得拥有的计划。
+而你让自己保持诚实的方式，不是去给想象出来的应手打「逼真度」分，而是看这些变化在你真正下一盘实战时到底赢不赢。
+那就是同时训练两个角色的任务成功奖励。
+
+这个比喻也精确解释了测试时的行为。
+一个这样训练出来的棋手，在真实对局开始后并不会停止转棋盘。
+落子之前，他先在脑子里把这步走完——提交执行前的私下预演。
+训练时养成的转棋盘习惯，变成了对局时使用的计算能力。
+同一套参数服务两者。
+
+### 关键概念
+
+- **世界预演**: 策略为自己的动作生成环境响应，然后以它为条件继续。
+「预演」这个词在这里做的是精确的工作——它不是「另有一个保真模型」意义上的模拟，也不是「无约束编造」意义上的幻觉。
+它是一次带妆彩排，由演员本人执行，并由「它所准备的那场演出成不成功」来评判。
+一个具体实例：智能体对订机票 API 发出一个日期格式错误的调用。
+在真实环境里它会收到一个报错响应。
+在世界预演下，策略必须自己产出那个报错响应——如果它反而预演出一个喜气洋洋的成功，轨迹就在一个假前提上继续，任务失败，梯度会穿过那个编造的响应回流。
+
+- **内化动力学作为智能体世界模型**: 「能访问一个环境」和「拥有一个环境的模型」之间的区别。
+有 API 权限的智能体知道调用会发生什么，但只能通过调用才知道。
+内化了动力学的智能体在调用之前就知道。
+这只因为一个理由而重要：你持有在参数里的知识，查询是免费的；而住在一次交互背后的知识不是。
+每一步针对真实环境的前瞻都要花一次调用、有延迟、可能有副作用、可能不可逆。
+每一步针对内化动力学的前瞻只花一次前向传播。
+正是这个不对称，让测试时预演在根本上成为可能。
+
+- **提交执行前的私下预演**: 世界模型在测试时的用法，也是这套训练方法价值超出训练本身的原因。
+「私下」意味着被预演的调用从不触碰真实环境——没订到票，没发出消息，没删掉数据。
+「提交」意味着只有幸存下来的那次调用才被真正执行。
+这是一个白送的、与安全相关的结构：智能体获得了「在想象里犯错而不是在生产里犯错」的能力，而这是你能赋予一个操作真实系统的智能体的、最有用的单项性质。
+
+## 框架转变
+
+```
+之前（环境规模化）：                之后（世界预演）：
+
+  策略                               策略
+    |                                  |
+    | 工具调用                          | 工具调用
+    v                                  v
+  +-------------------+             +-------------------+
+  | 外部环境           |             | 同一个策略，       |
+  | 逐域构建 + 验证     |             | 预演角色           |
+  +-------------------+             +-------------------+
+    |                                  |
+    | 响应                              | 预演出的响应
+    v                                  v
+  下一决策                            下一决策
+    |                                  |
+    v                                  v
+  任务成功奖励                        任务成功奖励
+  只训练策略                          训练行动 AND 预演
+                                       |
+                                       v
+  规模化旋钮：                        规模化旋钮：
+  搭更多环境                          更多预演，同一套权重
+
+                                    附赠：预演能力延续到
+                                    测试时，变成前瞻
+```
+
+从「把环境动力学当作需要手工构建的外部基础设施」，到「把它当作策略可以持有的知识」，核心转变是把世界模型从参数之外搬进参数之内——在那里推理时查询是免费的。
+
+## 专家评审
+
+**选题眼光**: 缺口是真的，框架也切得准。
+环境构建确实是当下智能体 RL 的瓶颈，而「验证成本随域覆盖度增长而非摊薄」是它成为瓶颈的正确理由。
+把自己定位为对标「环境规模化基线」是诚实的比较对象选择，因为那才是当下有动量的路线。
+这个动作在概念上也有一种令人满意的整洁：基于模型的 RL 一直主张「学习动力学优于查询动力学」，而这是那个主张抵达 LLM 智能体场景的版本，附带一个转折——动力学模型和策略是同一张网络。
+
+**方法成熟度**: 这是巧劲而非蛮力，而巧劲集中在一个决策上——用任务成功奖励而非监督式环境建模目标来训练预演角色。
+这个选择挡住了那个显而易见的失败模式：策略学会预演出任何让自己日子最好过的响应。
+但我不会说问题因此被完全解决，只能说被完全**施压**。
+任务成功奖励惩罚「导致失败的自利预演」；它不惩罚「因错误理由而导致成功的自利预演」。
+一个系统性地预演出比真实世界更简单的世界、并学出一个在那个简化世界里有效的策略的模型，在训练中会被奖励，而只有在部署时才发现落差。
+跨四个基准的可迁移性结果是针对这一点的相关证据，也确实让人安心，但这个隐忧是结构性的而非经验性的，而且它会在最难测试的地方表现得最糟：动力学与预训练中任何东西都不像的新工具。
+
+**实验诚意**: 四个基准横跨通用函数调用、多轮交互和一个特定领域金融套件，跨度合理；对标环境规模化基线而不是对标「完全不训练」，是公平的比较。
+对一个正在决定要不要采用此法的读者来说，展示效应在不同模型规模上都成立的受控实验是全文最有价值的一张表，因为一个只在单一规模上有效的技术，通常是在利用它所声称之外的东西。
+我最想深挖的结果是测试时预演增益：「中等预演预算」在做一些未被指明的工作，而诚实的账应该把这个预算和「把同样的 token 花在更长的推理上、但不套预演框架」做比较。
+开源代码在这里有帮助。
+
+**写作功力**: 摘要构造得好，核心机制陈述得足够干脆，读一遍就能懂——这比它应有的频率要罕见。
+最弱的一点是，「在参数中内化了动作与环境响应之间的关系」这句话是被断言的，而非被拷问的——如果论文能直接探查预演角色究竟学到了什么，理想情况下在留出的工具上把预演响应和真实响应做对比，说服力会强得多。
+那一节能把核心论断从「可信」变成「已证」。
+
+**判决**: 弱接收 —— 一个配上了正确训练信号的好想法，被「当预演出来的世界持续比真实世界更简单时会怎样」这个未经检视的问题拦在了更强的评价之外。
+
+## 要点总结
+
+实践者可以从这篇论文「偷」走三样东西：
+
+1. **用下游奖励训练模拟器，而不是用建模损失**。
+这是可迁移的内核。
+每当你需要一个组件去顶替某个昂贵的东西——一个环境、一个用户、一个评分器、一个检索语料——本能是把它训得准确。
+改成用「**下游任务**在它之下成不成功」来训练它，是一个不同且往往更好的目标，因为它把保真度集中在保真度会影响决策的地方，而对不影响决策的逼真度一分不花。
+这一条远远适用于智能体之外。
+
+2. **把「预演」和「提交」分开，作为一种部署模式**。
+即使不采用这套训练方法，它的测试时结构本身就有独立价值：让智能体先想象一个有后果的动作的结果，评估它，然后才对真实系统执行。
+对任何触碰生产的智能体——发消息、动钱、改数据库——「在预演里犯错而不是在世界里犯错」这个能力值得直接为之做工程。
+本文说明了它可以被学出来，而不必手工搭建。
+
+3. **注意你的规模化旋钮是不是基础设施而不是算力**。
+值得内化的重构是：如果你的系统要进步就得手工造更多产物——更多环境、更多评分器、更多标注集——那就问一句，模型能不能把那份知识直接持有。
+答案往往是不能，但这个问题被问得太少了；而当答案是能的时候，成本曲线改变的是形状，不只是高度。
+:::
