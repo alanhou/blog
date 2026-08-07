@@ -279,35 +279,57 @@ def slugify(title):
 
 
 def call_llm(client, model, provider, messages, temperature=0.5, max_tokens=4096, retries=3):
-    """Unified LLM call supporting both Anthropic and OpenAI APIs with retry logic."""
+    """Unified LLM call supporting both Anthropic and OpenAI APIs with retry logic.
+
+    Always streams. A full bilingual post takes minutes to generate, and a
+    non-streamed request sits silent the whole time, so any reverse proxy in
+    front of the endpoint (Cloudflare's 100s idle limit, for one) kills the
+    connection before the first byte arrives. Streaming keeps the socket busy.
+    """
     for attempt in range(retries):
         try:
             if provider == "anthropic":
-                response = client.messages.create(
+                chunks = []
+                with client.messages.stream(
                     model=model,
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens
-                )
-                return response.content[0].text
+                ) as stream:
+                    for text in stream.text_stream:
+                        chunks.append(text)
+                return "".join(chunks)
             else:  # openai
-                response = client.chat.completions.create(
+                stream = client.chat.completions.create(
                     model=model,
                     messages=messages,
                     temperature=temperature,
-                    max_tokens=max_tokens
+                    max_tokens=max_tokens,
+                    stream=True
                 )
-                # Debug: check response type
-                if isinstance(response, str):
-                    print(f"  WARNING: OpenAI client returned string instead of object")
-                    return response
-                return response.choices[0].message.content
+                chunks = []
+                for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        chunks.append(delta)
+                return "".join(chunks)
         except Exception as e:
             err_str = str(e)
-            # Retry on transient errors (timeouts, server errors, rate limits, 404s)
-            is_transient = any(code in err_str for code in ["404", "524", "529", "500", "502", "503", "429", "overloaded"])
+            # Retry on transient errors (timeouts, server errors, rate limits, 404s).
+            # 403 is in the list because the gateway in front of the endpoint
+            # returns bare "403 Forbidden" HTML when it throttles, and the same
+            # key succeeds again minutes later.
+            is_transient = any(
+                code in err_str
+                for code in ["403", "404", "524", "529", "500", "502", "503", "429",
+                             "overloaded", "Connection", "timeout", "Timeout"]
+            )
             if is_transient and attempt < retries - 1:
-                wait = 2 ** (attempt + 1)
+                # Long waits on purpose: short backoff just re-hits a gateway
+                # that is still saturated.
+                wait = 15 * (attempt + 1)
                 print(f"  LLM call failed (attempt {attempt + 1}/{retries}): {err_str[:120]}")
                 print(f"  Retrying in {wait}s...")
                 time.sleep(wait)
@@ -988,12 +1010,15 @@ def main():
         print(f"  - {p['title']}")
 
     # Generate blog posts
+    written = 0
+    skipped_existing = 0
     for paper in selected:
         slug = slugify(paper["title"])
         filename = f"arxiv-{slug}.mdx"
         filepath = BLOG_DIR / filename
         if filepath.exists():
             print(f"Skipping {filename} (already exists)")
+            skipped_existing += 1
             continue
 
         print(f"Generating post for: {paper['title']}...")
@@ -1046,10 +1071,22 @@ def main():
             continue
 
         filepath.write_text(content + "\n")
+        written += 1
         print(f"Wrote {filepath}")
 
     save_last_fetch()
-    print("Done!")
+    print(f"Done! Wrote {written} post(s).")
+
+    # A run that picked papers and produced nothing means every generation call
+    # failed. Exiting 0 there commits only .last_fetch, which looks like a
+    # healthy no-op run -- that is how the endpoint outage went unnoticed for a
+    # week. Fail loudly instead.
+    if written == 0 and skipped_existing < len(selected):
+        print(
+            f"Error: selected {len(selected)} paper(s) but wrote none "
+            "(all generations failed)"
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

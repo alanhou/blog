@@ -92,5 +92,66 @@ class FetchRecentPapersTests(unittest.TestCase):
         )
 
 
+class CallLlmTests(unittest.TestCase):
+    """The endpoint sits behind a gateway that drops silent connections, so
+    every call has to stream."""
+
+    def _anthropic_client(self, chunks):
+        stream = Mock()
+        stream.text_stream = iter(chunks)
+        client = Mock()
+        client.messages.stream.return_value.__enter__ = Mock(return_value=stream)
+        client.messages.stream.return_value.__exit__ = Mock(return_value=False)
+        return client
+
+    def _openai_client(self, chunks):
+        def make_chunk(text):
+            chunk = Mock()
+            chunk.choices = [Mock(delta=Mock(content=text))]
+            return chunk
+
+        client = Mock()
+        client.chat.completions.create.return_value = iter(
+            [make_chunk(text) for text in chunks]
+        )
+        return client
+
+    def test_anthropic_streams_and_joins_chunks(self):
+        client = self._anthropic_client(["Hello", " ", "world"])
+
+        result = fetch_arxiv.call_llm(client, "claude-x", "anthropic", messages=[])
+
+        self.assertEqual("Hello world", result)
+
+    def test_openai_requests_a_stream(self):
+        client = self._openai_client(["Hello", " world"])
+
+        result = fetch_arxiv.call_llm(client, "gpt-x", "openai", messages=[])
+
+        self.assertEqual("Hello world", result)
+        self.assertTrue(client.chat.completions.create.call_args.kwargs["stream"])
+
+    def test_openai_tolerates_chunks_without_choices(self):
+        """Usage-only chunks arrive with an empty choices list."""
+        client = self._openai_client(["Hi"])
+        empty = Mock()
+        empty.choices = []
+        client.chat.completions.create.return_value = iter([empty])
+
+        self.assertEqual("", fetch_arxiv.call_llm(client, "gpt-x", "openai", messages=[]))
+
+    @patch("fetch_arxiv.time.sleep")
+    def test_gateway_403_is_retried(self, _sleep):
+        client = Mock()
+        client.chat.completions.create.side_effect = [
+            Exception("<h1>403 Forbidden</h1> openresty"),
+            iter([]),
+        ]
+
+        fetch_arxiv.call_llm(client, "gpt-x", "openai", messages=[])
+
+        self.assertEqual(2, client.chat.completions.create.call_count)
+
+
 if __name__ == "__main__":
     unittest.main()
