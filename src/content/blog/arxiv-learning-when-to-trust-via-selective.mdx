@@ -1,0 +1,443 @@
+---
+title:
+  en: "Selective Trust: Why 'Ignore the Context' Is Not Robustness"
+  zh: "选择性信任：把上下文全当噪音，不叫鲁棒"
+description:
+  en: "MIST renders each item under four matched context conditions and SC2W counts how often a misleading signal flips a right answer to wrong; SCOPE then fixes it with plain DPO over condition-balanced pairs. The framing is the contribution, not the optimizer."
+  zh: "MIST 让同一道题在四种配对条件下各跑一遍，SC2W 只数“本来做对、被误导后做错”的翻转；SCOPE 用条件均衡的配对做普通 DPO。真正的贡献是问题的重新定义，而不是优化器。"
+date: 2026-08-07
+tags: ["arxiv", "ai", "cs.cl", "cs.ai", "cs.lg"]
+image: "/arxiv-visuals/arxiv-learning-when-to-trust-via-selective.png"
+---
+:::en
+**Paper**: [2608.06377](https://arxiv.org/abs/2608.06377)
+**Authors**: Xian Sun, Wei Chow, Yingshuo Wang, Junhao Liu, Wei Gao, Qing Wu, Lingdong Kong
+**Categories**: cs.CL, cs.AI, cs.LG
+
+## The Gap
+
+The knowledge-conflict literature has spent a few years on one question: when retrieved or user-supplied context contradicts what the model knows, who wins? The standard experimental setup injects a counterfactual passage, measures the accuracy drop, and calls the drop "susceptibility." The standard fix is some flavour of resistance training or robustness prompting: teach the model to hold its ground, penalize it for following the bad passage, reward it for the parametric answer.
+
+The hole in that setup is a scoring artifact. If your evaluation only ever shows the model misleading context, then the highest-scoring policy is a model that has learned to treat the context field as noise. It looks maximally robust and is operationally worthless, because the same context channel is what carries fresh facts, retrieved evidence, tool output, and user corrections. Resistance and usefulness are being optimized as if they were the same axis when they are two different axes, and single-condition benchmarks cannot tell them apart. Worse, the usual metric is marginal accuracy under misleading context, which mixes two populations: items the model never knew (where context cannot hurt) and items it did know (where context can). The interesting failures are hidden inside an average.
+
+So the paper's move is to make the axes separately measurable — same question, four context conditions, paired — and then define the metric conditionally on the model having been right without help.
+
+```
+  PROBLEM
+  [misleading context flips correct answers to wrong]
+        |
+        v
+  DIAGNOSIS of prior work
+  [single-condition eval] == [resistance and usefulness collapsed]
+        |                         |
+        |                         +--> degenerate optimum: ignore all context
+        v
+  ASSUMPTION
+  [trust is item-conditional, not a global dial]
+  [so the unit of measurement must be a matched quadruple, not an item]
+        |
+        v
+  METHOD
+  MIST: 1 item -> 4 renderings (clean / misleading / correct / irrelevant)
+  SC2W: paired flip rate, conditioned on clean-correct
+  SCOPE: mine (clean-correct, misleading-wrong) failures
+         -> DPO over pairs balanced across all 4 conditions
+        |
+        v
+  EVIDENCE
+  [susceptibility universal across surveyed models]
+  [SCOPE lowers SC2W; accuracy under clean / correct / irrelevant held]
+        |
+        v
+  CONCLUSION
+  [judge models on selective trust: resistance AND uptake together]
+```
+
+## The Increment
+
+**One sentence**: Before, "context robustness" was one number that a context-deaf model could max out; after, it is a two-sided property with a matched-condition benchmark that catches the cheat and a training recipe that improves one side without paying on the other.
+
+### Core Mechanism
+
+There are three parts and only the first two are conceptually load-bearing. **MIST** is the data construction: take a reasoning item, then render it four ways with everything else held fixed — no context (clean), context that argues for a wrong answer (misleading), context that genuinely supports the right answer (correct), context that is topical but inert (irrelevant). Human annotation is what makes this expensive and what makes it usable: "misleading but plausible" and "irrelevant but not obviously off-topic" are both judgment calls that automatic perturbation gets wrong in ways that inflate scores.
+
+**SC2W** is the metric, and its whole trick is the conditioning. You do not average accuracy under misleading context. You first filter to the items where the model got it right in the clean condition — items where it demonstrably had the knowledge — and then count what fraction of those it gets wrong once the misleading passage is present. Because the quadruple is matched, the clean answer is a valid per-item control. A model that ignores context has SC2W near zero, but MIST catches it in the correct-context column, where its accuracy fails to rise.
+
+**SCOPE** is the fix and it is deliberately boring on the optimizer side: standard DPO, no new loss. The engineering is in what goes into the batch. You run the model over MIST-style quadruples, harvest exactly the (clean-correct, misleading-wrong) episodes as the failure signal, and build preference pairs where the chosen response is the answer the model itself produced without context and the rejected one is the context-swayed answer. Then — the part that matters — you do not train only on misleading items. You mix pairs from all four conditions in equal proportion, so the gradient that says "do not follow the bad passage" arrives alongside gradients that say "do follow the good one" and "do not flinch at the irrelevant one." Balance is the regularizer that stops DPO from converging on the same context-deaf shortcut the old benchmarks rewarded.
+
+```
+  one reasoning item Q with gold answer A
+        |
+        +--> render 4 matched conditions ------------------+
+        |                                                  |
+   [ Q          ]  [ Q + mislead ]  [ Q + correct ]  [ Q + irrelevant ]
+        |                |                |                 |
+        v                v                v                 v
+     model            model            model             model
+        |                |                |                 |
+       a_cl             a_mis            a_cor             a_irr
+        |                |                |                 |
+        +------ pair ----+                |                 |
+        |                                 |                 |
+        v                                 v                 v
+  SC2W = #(a_cl == A and a_mis != A)   uptake check    stability check
+         / #(a_cl == A)
+
+  MINING for SCOPE
+  keep quadruples where a_cl == A and a_mis != A
+        |
+        v
+  preference pairs:  chosen = A-consistent answer
+                     rejected = context-swayed answer
+        |
+        v
+  BATCH BALANCING   [ 25% clean | 25% mislead | 25% correct | 25% irrelevant ]
+        |
+        v
+  standard DPO objective  ->  policy with selective trust
+        |
+        v
+  re-evaluate on MIST:  SC2W down  *  other 3 columns flat
+```
+
+**The metaphor**: a driving school for a driver with a passenger. The driver's own sense of the route is parametric knowledge; the passenger's directions are the context channel. Prior work runs one drill — the passenger gives wrong directions, and you are graded on whether you took the wrong turn. The way to ace that drill is earplugs. And a driver with earplugs is a hazard, because sometimes the passenger is the only one who knows the bridge is out.
+
+MIST is the four-station road test on the *same intersection*: drive it alone, drive it with a passenger who is wrong, with one who knows about the closure, and with one who is chatting about the weather. SC2W is the examiner's narrow question: of the intersections you navigated correctly when driving alone, how many did you botch once someone talked? The conditioning on "correctly when driving alone" is what makes the score fair — no credit lost for intersections you never knew.
+
+SCOPE is the remedial curriculum. The instructor pulls the dashcam footage of exactly the intersections where you knew the way and let a wrong passenger talk you out of it, and shows you two clips side by side: what you did, and what you would have done alone. That side-by-side is the DPO pair. The crucial bit is the syllabus: the instructor refuses to run only the wrong-passenger drill, and gives you all four stations in equal measure, so what you learn is *listening judgment* rather than *earplugs*.
+
+### Key Concepts
+
+- **Matched-condition (paired) evaluation**: Imagine grading a drug by comparing average health in two different towns — too many other differences leak in. Now imagine measuring the same patient before and after. That is the difference between benchmarking accuracy-under-misleading-context on one dataset and rendering the **same item* under four conditions. Because everything except the context field is byte-identical, any change in the answer is attributable to the context. It also gives you a per-item control: the clean answer tells you whether the model ever knew this one, which is exactly the information a marginal accuracy number destroys.
+
+- **Conditional flip rate (SC2W)**: Suppose a model answers 60 of 100 questions correctly with no context, and 55 correctly with misleading context. The headline says "5% drop, pretty robust." But it might have lost 20 of the 60 it knew and gained 15 lucky hits on ones it didn't — a 33% flip rate wearing a 5% mask. SC2W throws away the averaging: denominator is only the clean-correct items, numerator is how many of those went wrong. It is closer to a per-item causal question ("did this passage break this answer?") than to a leaderboard number.
+
+- **The degenerate-optimum trap**: any time you evaluate a behaviour under only the condition where it should be suppressed, the winning strategy is to delete the capability. This is the same shape as a spam filter judged only on false negatives (block everything), or an abstention-tuned model judged only on hallucination rate (refuse everything). The paper's structural answer is to always co-evaluate the condition where the capability must fire — here, correct-context uptake — and to mirror that structure in the training mixture, not just the eval.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+  [ item ]                              [ item ]
+      |                                     |
+      + inject misleading ctx               +--> clean
+      |                                     +--> misleading
+      v                                     +--> correct
+  accuracy drop                             +--> irrelevant
+      |                                          |
+      v                                          v
+  one axis:                             two axes measured jointly:
+  RESISTANCE                              resist ^
+      |                                          |  cheat
+      v                                          | *
+  train: penalize                               |     * ideal
+  following bad ctx                             |
+      |                                    +----+---------> uptake
+      v                                          |
+  optimum reachable by                    train: DPO on pairs
+  [ ignore context ]                      balanced over all 4
+  == robust-looking,                      == cannot reach the
+     useless                                 cheat corner
+```
+
+From resistance to selective trust, the core shift is that context-following stops being a scalar to minimize and becomes a discrimination task, which forces the benchmark to score the condition where trusting is the *right* answer.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, and slightly overdue. Anyone who has built a RAG system has met both failure modes — the model that swallows a bad retrieval, and the model fine-tuned so hard on "trust your priors" that fresh evidence bounces off it. The literature had been reporting the first and quietly creating the second, because the eval protocol had no column for it. The framing also lands at a useful moment: as context windows fill with tool outputs and agent traces, "which of these signals deserves weight" becomes the central skill, not a robustness footnote. That said, this is a **reframing plus instrumentation* paper, not a discovery. The observation that resistance benchmarks admit a degenerate solution is something many practitioners could have told you over lunch; the contribution is doing the annotation work to make it measurable.
+
+**Method maturity**: SCOPE is honestly labelled as off-the-shelf — "a standard DPO objective" — and the real idea is one line: balance the preference mixture across all four conditions instead of mining misleading items only. That is a clever-but-small insight, and it is the kind that a reviewer should be happy about, since the alternative (a bespoke loss) would have made the result harder to trust and harder to reuse. The simpler baselines I would want ruled out: (a) plain SFT on the same balanced quadruples, (b) an inference-time recipe — answer once with no context, once with context, and reconcile the two, which directly implements the SC2W structure without touching weights, (c) a confidence-gated variant where you only consult context when the closed-book logit margin is low. If any of those closes most of the gap, SCOPE is a convenience rather than a necessity, and the abstract does not tell me.
+
+**Experimental integrity**: One structural hazard needs auditing, and it comes from SC2W's own definition. Its denominator is the clean-correct set, so **any* change that shrinks that set lowers SC2W for free. A model that gets a bit worse without context will look more selectively trusting. The authors clearly know this — "preserving accuracy when the added context is clean" is exactly the guard — but the guard has to be reported per-model, with clean accuracy visible next to every SC2W, not just asserted. Second, the abstract claims SC2W drops and the other three columns hold flat, which is a "no cost" result. Flat correct-context accuracy is a weaker claim than it sounds: the interesting number is the mirror of SC2W — the wrong-to-right rescue rate under correct context — and I want it to *rise*, or at minimum I want it reported. If it is only flat, SCOPE has bought resistance without buying trust, which is half of the paper's own thesis. Third, "comprehensive benchmark study" and "popular open-sourced models" are doing a lot of unspecified work; MIST's size, annotator agreement, and domain coverage will determine whether "susceptibility is universal" is a finding or an artifact of how aggressively the misleading passages were written. Human-authored distractors can be tuned to any difficulty you like.
+
+**Writing quality**: The abstract is unusually disciplined — it states the failure mode of prior work in one sentence and does not oversell the optimizer. The corner most likely cut is the annotation protocol: what makes a misleading context "matched" to a clean one, how the irrelevant condition avoids being trivially detectable, and how many annotators touched each quadruple. That section, written properly, is what turns MIST from a paper artifact into something others build on. The other rewrite I'd ask for: a short section defining the **uptake* metric with the same care given to SC2W, so the two-axis argument is instrumented on both axes instead of one.
+
+**Verdict**: weak accept — the reframing is correct and the benchmark is the kind of infrastructure the subfield needs, but the method is vanilla DPO with a better data mixture, and the headline metric has a denominator that can flatter a degraded model unless the paper reports the guard rails prominently.
+
+## Takeaways
+
+- **Steal the four-condition rendering as a debugging harness.** For any system where a model conditions on an external channel, run every eval item four ways: channel absent, channel wrong, channel right, channel irrelevant. It costs 4x inference and immediately separates "my model ignores retrieval" from "my model is fooled by retrieval" — two bugs with opposite fixes that a single accuracy number reports identically.
+- **Condition your metrics on capability, not on the population.** The SC2W trick generalizes far past context: whenever you measure a degradation, filter to the items the system got right in the control condition first. Marginal accuracy lets losses and lucky gains cancel, and cancellation is where regressions hide.
+- **Whenever you train against a behaviour, budget batch share for the condition where that behaviour is correct.** This is the transferable form of SCOPE. Tuning against over-refusal? Include must-refuse items. Tuning against sycophancy? Include cases where the user is right. The balanced mixture is doing the work that a cleverer loss usually gets credit for.
+- **Ask what the degenerate optimum of your eval is.** Before trusting any robustness score, write down the dumbest policy that maxes it. If that policy is shippable-looking, your benchmark is missing a column.
+- **What not to take:** the optimizer. There is no new loss here worth porting; if you already run DPO, the only change is your data recipe.
+:::
+
+:::zh
+**论文**: [2608.06377](https://arxiv.org/abs/2608.06377)
+**作者**: Xian Sun, Wei Chow, Yingshuo Wang, Junhao Liu, Wei Gao, Qing Wu, Lingdong Kong
+**分类**: cs.CL, cs.AI, cs.LG
+
+## 缺口
+
+知识冲突这条线做了好几年，问题一直是同一个：检索来的段落或用户给的说法和模型自己知道的相冲突时，谁说话算数。
+
+标准做法是塞一段反事实的上下文，量掉了多少准确率，把这个降幅叫"易受误导性"，然后用各种"抗干扰训练"或者鲁棒提示去修：教模型守住自己的答案，跟着坏段落走就罚。
+
+问题出在打分方式本身。
+
+如果评测里模型见到的上下文永远是误导性的，那分数最高的策略就是——把上下文这个字段当噪音直接扔掉。
+
+这样的模型看起来鲁棒性满分，实际上没法用，因为同一条上下文通道也承载着新事实、检索证据、工具返回和用户纠错。
+
+抗干扰和可用性被当成同一根轴在优化，其实是两根轴，而单条件评测根本分不开。
+
+更麻烦的是常用指标是"误导条件下的边际准确率"，它把两类题混在一起：模型本来就不会的（上下文伤不到它）和模型本来会的（上下文能伤到它）。
+
+真正有意思的失败被平均值吞掉了。
+
+所以这篇的动作是：把两根轴分开量——同一道题、四种上下文条件、成对渲染——再把指标定义成"以模型闭卷时答对为条件"。
+
+```
+  PROBLEM
+  [误导性上下文把对的答案掀翻成错的]
+        |
+        v
+  对已有工作的诊断
+  [单条件评测] == [抗干扰与可用性被压成一根轴]
+        |                    |
+        |                    +--> 退化最优解: 无视一切上下文
+        v
+  ASSUMPTION
+  [信任是逐题条件性的 而不是一个全局旋钮]
+  [所以测量单位必须是配对四元组 而不是单条题]
+        |
+        v
+  METHOD
+  MIST: 1 题 -> 4 种渲染 (干净 / 误导 / 正确 / 无关)
+  SC2W: 配对翻转率 以干净答对为条件
+  SCOPE: 挖 (干净对 误导错) 的失败样本
+         -> 在四条件均衡的配对上跑 DPO
+        |
+        v
+  EVIDENCE
+  [被测模型普遍存在易受误导性]
+  [SCOPE 压低 SC2W 干净 / 正确 / 无关三列不掉]
+        |
+        v
+  CONCLUSION
+  [评判标准应是选择性信任: 抗干扰和采纳一起看]
+```
+
+## 增量
+
+**一句话**: 之前"上下文鲁棒性"是一个数，一个装聋作哑的模型就能刷满；之后它是一个双面性质，有一套配对条件的基准能抓出这种作弊，还有一个训练配方能在不牺牲另一面的前提下改善其中一面。
+
+### 核心机制
+
+三块东西，概念上真正承重的只有前两块。
+
+**MIST** 是数据构造：拿一道推理题，在其他部分完全固定的前提下渲染四遍——不给上下文（干净）、给一段论证错误答案的上下文（误导）、给一段真正支持正确答案的上下文（正确）、给一段沾题但无用的上下文（无关）。
+
+人工标注是这套东西贵的原因，也是它能用的原因：什么叫"误导但合理"、什么叫"无关但不至于一眼看破"，都是判断题，自动扰动做出来的版本会在恰好抬高分数的方向上出错。
+
+**SC2W** 是指标，全部诀窍在那个条件化上。
+
+它不去平均"误导条件下的准确率"，而是先筛出模型在干净条件下答对的题——也就是它明确具备这份知识的题——然后数其中有多大比例在加入误导段落后答错了。
+
+因为四元组是配对的，干净条件的答案就是一个合法的逐题对照。
+
+装聋作哑的模型 SC2W 会接近零，但 MIST 会在"正确上下文"那一列把它抓住：它的准确率该涨的时候没涨。
+
+**SCOPE** 是解法，而且在优化器这一侧刻意做得很朴素：标准 DPO，不发明新损失。
+
+工程量全在"往 batch 里放什么"。
+
+跑一遍 MIST 式四元组，专门收割 (干净对、误导错) 这类事件当失败信号，构造偏好对：被选中的是模型自己在无上下文时给出的答案，被拒绝的是被上下文带偏的答案。
+
+然后是真正关键的一步——不只在误导样本上训。
+
+四种条件的配对按等比例混进去，于是"别跟着坏段落走"这个梯度，是和"该跟就跟好段落"、"别被无关信息晃到"这两个梯度一起到达的。
+
+均衡本身就是正则项，它拦住了 DPO 走向旧基准所奖励的那条装聋作哑的捷径。
+
+```
+  一道题 Q 与标准答案 A
+        |
+        +--> 渲染 4 种配对条件 ---------------------------+
+        |                                                |
+   [ Q         ]  [ Q + 误导 ]  [ Q + 正确 ]  [ Q + 无关 ]
+        |               |             |             |
+        v               v             v             v
+       模型            模型          模型          模型
+        |               |             |             |
+       a_cl            a_mis         a_cor         a_irr
+        |               |             |             |
+        +----- 配对 ----+             |             |
+        |                             |             |
+        v                             v             v
+  SC2W = #(a_cl == A and a_mis != A)  采纳能力     稳定性
+         / #(a_cl == A)
+
+  SCOPE 的挖掘
+  只留 a_cl == A 且 a_mis != A 的四元组
+        |
+        v
+  偏好对:  chosen  = 与 A 一致的答案
+           rejected = 被上下文带偏的答案
+        |
+        v
+  批次均衡  [ 25% 干净 | 25% 误导 | 25% 正确 | 25% 无关 ]
+        |
+        v
+  标准 DPO 目标  ->  具备选择性信任的策略
+        |
+        v
+  回到 MIST 上重测:  SC2W 下降  *  其余三列不动
+```
+
+**核喻**：给"带乘客的司机"开的驾校。
+
+司机自己对路线的判断是参数化知识，乘客的指路就是上下文通道。
+
+以前的做法只考一个科目——乘客指错路，看你会不会拐错弯。
+
+想在这个科目上拿满分，最优解是戴耳塞。
+
+而戴耳塞的司机是马路杀手，因为有时候只有乘客知道前面桥断了。
+
+MIST 是在**同一个路口**上摆四个考站：自己开一遍；带一个指错路的乘客开一遍；带一个知道封路的乘客开一遍；带一个在聊天气的乘客开一遍。
+
+SC2W 是考官那个很窄的提问：你自己开能开对的那些路口里，有多少是别人一开口你就开错了？
+
+"你自己开能开对"这个条件化才让分数公平——你本来就不认识的路口，不扣你分。
+
+SCOPE 是补考课程。
+
+教练调出行车记录仪，只挑那些你本来认识路、却被指错路的乘客说服的路口，把两段画面并排放给你看：你实际怎么开的，和你自己开会怎么开。
+
+这个并排，就是 DPO 的偏好对。
+
+关键在教学大纲：教练拒绝只练"错乘客"这一科，四个考站按等量都练，于是你学到的是**听人话的判断力**，而不是耳塞。
+
+### 关键概念
+
+- **配对条件评测**: 想象要评一款药，做法是比较两个不同城镇的平均健康水平——太多别的差异会渗进来。
+
+  再想象换成同一个病人的服药前后对比。
+
+  这就是"在某个数据集上测误导条件准确率"和"把同一道题渲染成四种条件"之间的差别。
+
+  除了上下文字段以外全部逐字节相同，那么答案的任何变化都可以归因到上下文。
+
+  它还顺手给了你逐题对照：干净条件的答案告诉你这道题模型到底会不会，而这恰好是边际准确率会销毁掉的信息。
+
+- **条件翻转率（SC2W）**: 假设一个模型闭卷答对 100 题里的 60 题，加了误导上下文后答对 55 题。
+
+  标题会写"只掉 5%，挺鲁棒"。
+
+  但真实情况可能是：它本来会的 60 题里丢了 20 题，同时在本来不会的题上蒙对了 15 题——33% 的翻转率被一张 5% 的面具盖住了。
+
+  SC2W 把平均这件事整个扔掉：分母只有干净答对的题，分子是这些题里答错了多少。
+
+  它更接近一个逐题的因果问题（"这段材料是否毁掉了这个答案"），而不是一个排行榜数字。
+
+- **退化最优解陷阱**: 只要你在"某种行为应该被压制"的那一种条件下评测这种行为，获胜策略必然是把这个能力整个删掉。
+
+  这跟只按漏报率考核的垃圾邮件过滤器（全部拦下）、只按幻觉率考核的拒答模型（一律不答）是同一个形状。
+
+  这篇给出的结构性回答是：永远同时评测"该出手时必须出手"的那个条件——这里是正确上下文下的采纳率——并且把这个结构照搬到训练配比里，而不是只放在评测里。
+
+## 框架转变
+
+```
+之前（主流方法）：                     之后（本文方法）：
+
+  [ 题目 ]                              [ 题目 ]
+      |                                     |
+      + 注入误导上下文                       +--> 干净
+      |                                     +--> 误导
+      v                                     +--> 正确
+   准确率降幅                                +--> 无关
+      |                                          |
+      v                                          v
+  单轴：                                 双轴联测：
+  抗干扰                                  抗干扰 ^
+      |                                          |  作弊解
+      v                                          | *
+  训练：惩罚跟随坏上下文                          |     * 理想
+      |                                          |
+      v                                     +----+---------> 采纳
+  最优解可由                                      |
+  [ 无视上下文 ] 达到                       训练：四条件均衡配对
+  == 看着鲁棒                                     上跑 DPO
+     实际没用                               == 到不了作弊那个角
+```
+
+一句话：从"抗干扰"到"选择性信任"，核心转变是把"跟随上下文"从一个要最小化的标量，变成一个判别任务，从而逼着基准去给"该信才对"的那种条件打分。
+
+## 专家评审
+
+**选题眼光**: 真缺口，而且有点迟到了。
+
+任何搭过 RAG 的人都同时见过两种翻车：模型囫囵吞下一条坏检索；以及模型被"相信你的先验"训得太狠，新证据怎么砸都弹回来。
+
+文献一直在报告第一种，同时悄悄制造第二种，因为评测协议里就没有那一列。
+
+这个框架出现的时机也不错：随着上下文窗口被工具输出和 agent 轨迹填满，"这些信号里哪个值得给权重"会变成核心能力，而不是鲁棒性的一条脚注。
+
+但话说回来，这是一篇**重新定框加做仪器**的论文，不是发现型论文。
+
+"抗干扰基准存在退化解"这个观察，很多做工程的人午饭时就能跟你说；真正的贡献是花标注的力气把它变成可测量的东西。
+
+**方法成熟度**: SCOPE 自己就坦白是现成货——"标准 DPO 目标"——真正的想法只有一句：把偏好数据在四种条件上按等比例混，而不是只挖误导样本。
+
+这是个小而巧的洞见，而且审稿人应该为此高兴，因为另一种选择（自造损失函数）会让结果更难信、也更难复用。
+
+我想看到被排除的更简单基线有三个：(a) 在同样的均衡四元组上做普通 SFT；(b) 一个纯推理期配方——先闭卷答一遍、再带上下文答一遍、然后调和两者，这直接把 SC2W 的结构实现了，一个权重都不用动；(c) 置信度门控版本——只在闭卷 logit margin 低的时候才去看上下文。
+
+如果这几条里有任何一条能吃掉大部分差距，SCOPE 就只是方便，而不是必要，而摘要没告诉我。
+
+**实验诚意**: 有一个结构性隐患必须审，而且它来自 SC2W 自己的定义。
+
+它的分母是"干净答对"集合，所以**任何**让这个集合变小的改动都能免费降低 SC2W。
+
+一个闭卷能力变差一点的模型，会显得更"选择性信任"。
+
+作者显然知道这件事——"上下文干净时保持准确率"就是这道防线——但这道防线必须逐模型报出来，每个 SC2W 旁边都要贴着闭卷准确率，而不是一句话带过。
+
+第二，摘要声称 SC2W 下降、另外三列持平，这是个"零代价"结论。
+
+"正确上下文准确率持平"这个说法比听起来弱：真正有意思的数字是 SC2W 的镜像——正确上下文下"由错转对"的挽救率——我希望它**上升**，至少希望它被报出来。
+
+如果它只是持平，那 SCOPE 买到的是抗干扰而没买到信任，正好只完成了这篇论文自己论点的一半。
+
+第三，"comprehensive benchmark study"和"popular open-sourced models"承担了太多没有交代的工作量；MIST 的规模、标注者一致性和领域覆盖，决定了"易受误导性是普遍的"到底是发现，还是"误导段落写得多狠"的产物。
+
+人工写的干扰项，想调到多难都行。
+
+**写作功力**: 摘要写得相当克制——一句话点出前人工作的失效模式，而且没有给优化器灌水。
+
+最可能偷懒的地方是标注协议：误导上下文凭什么算和干净条件"配对"、无关条件怎么做到不被一眼识破、每个四元组过了几个标注者。
+
+这一节写扎实了，MIST 才能从一个论文附属品变成别人愿意在上面盖楼的东西。
+
+另一处我想要的重写：加一小节，用给 SC2W 的同等笔力去定义**采纳**指标，让"双轴"这个论点在两根轴上都装上仪表，而不是只装了一根。
+
+**判决**: 弱接收 —— 重新定框是对的，基准也正是这个子领域需要的基础设施，但方法就是换了数据配比的普通 DPO，而且核心指标的分母在防线报得不显眼时会美化一个退化了的模型。
+
+## 要点总结
+
+- **把四条件渲染当调试夹具偷走。** 任何依赖外部通道输入的系统，都可以把每道评测题跑四遍：通道缺失、通道错误、通道正确、通道无关。
+
+  代价是 4 倍推理，收益是立刻分开"我的模型无视检索"和"我的模型被检索骗了"这两个修法完全相反的 bug——而单个准确率数字对它们的报告是一模一样的。
+
+- **指标要以能力为条件，而不是以整个样本群为条件。** SC2W 这个技巧远远不止用于上下文：任何时候你在量一个"退化"，先筛出系统在对照条件下做对的那些样本。
+
+  边际准确率会让损失和蒙对互相抵消，而抵消正是回归缺陷藏身的地方。
+
+- **每当你要训掉一种行为，就给"这种行为是对的"那个条件留出批次配额。** 这是 SCOPE 可迁移的形式。
+
+  在治过度拒答？把必须拒答的样本混进去。
+
+  在治谄媚？把用户确实说得对的情形混进去。
+
+  均衡配比干的活，通常被记在某个更花哨的损失函数账上。
+
+- **先问清楚你的评测的退化最优解是什么。** 在相信任何鲁棒性分数之前，写下能刷满它的最蠢策略。
+
+  如果那个策略看上去还能上线，说明你的基准少了一列。
+
+- **不值得拿走的**: 优化器。这里没有值得移植的新损失；如果你已经在跑 DPO，唯一要改的是数据配方。
+:::

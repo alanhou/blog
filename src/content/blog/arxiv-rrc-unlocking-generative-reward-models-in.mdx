@@ -1,0 +1,401 @@
+---
+title:
+  en: "RRC: Turning LLM Judges Into Usable RL Rewards by Ranking, Not Scoring"
+  zh: "RRC：让生成式奖励模型在 RL 里真正好用——靠排序，而不是打分"
+description:
+  en: "Generative reward models are great at saying which response is better, but RL wants a number. RRC stops asking them for numbers and builds rewards from ranks instead — via self-competition inside the sampled group and a small stratified anchor set."
+  zh: "生成式奖励模型擅长判断谁更好，但 RL 需要一个标量。RRC 干脆不再向它索要分数，而是从排名构造奖励：组内自相残杀 + 一小组分层锚点响应。"
+date: 2026-08-07
+tags: ["arxiv", "ai", "cs.lg", "cs.cl"]
+image: "/arxiv-visuals/arxiv-rrc-unlocking-generative-reward-models-in.png"
+---
+:::en
+**Paper**: [2608.06310](https://arxiv.org/abs/2608.06310)
+**Authors**: Chenglong Wang, Ziming Zhu, Yifu Huo, Bei Li, Qiaozhi He, Yan Ding, Xiaoyang Hao, Yuxin Gao, Tianhua Zhou, Xiaojia Chang
+**Categories**: cs.LG, cs.CL
+
+## The Gap
+
+The reward modeling world has been migrating from discriminative RMs (a Bradley-Terry head bolted onto a backbone, outputs one float) to generative RMs (an LLM that reasons in text and then judges). On RewardBench-style leaderboards, GenRMs win: they generalize better, they explain themselves, and you can scale them with test-time compute.
+
+Then people plug them into RL and the gains largely evaporate. The standard workarounds are all attempts to squeeze a scalar out of a model that was never trained to produce one:
+
+- **Prompted scoring**: "Rate this response 1-10." The output is discretized, mode-collapsed onto 7/8/9, and badly calibrated across prompts.
+- **Token-probability / logit rewards**: read `P("Yes")` or the logit gap for "is this good?" A continuous number, but it measures the judge's linguistic confidence, not response quality, and drifts with prompt phrasing.
+- **Pairwise-vs-baseline**: compare each sample against a single fixed reference and take the binary win. Cheap, but it's a 1-bit reward — and once the policy beats the reference on everything, the signal dies.
+
+The consequence bites hardest in group-relative RL (GRPO and friends), where the advantage is `(R_i - mean) / std` over the sampled group. If the judge hands back `[8, 8, 8, 8]`, the advantage is exactly zero and the batch contributes nothing. The paper's framing: this is not a GenRM capability problem, it's an **interface mismatch**. GenRMs are comparators; RL algorithms consume scalars; everyone has been building the adapter badly.
+
+```
+[Problem]
+ GenRM ranks well          but      RL consumes scalars
+ (comparative by design)            (PPO / GRPO / RLOO)
+        |                                   |
+        +-----------------+-----------------+
+                          v
+                  [Observed symptom]
+   "rate 1-10" / logit reward  ==>  coarse, tied, un-calibrated
+                                    ==>  flat advantages, dead batches
+                          |
+                          v
+                    [Assumption]
+   the *ordering* a judge produces is the reliable part;
+   the *number* it prints is a lossy guess at that ordering
+                          |
+                          v
+                   [Method: RRC]
+   +---------------------------+----------------------------+
+   | self-competitive ranking  | anchor-guided ranking      |
+   | order the G sampled       | order each sample against  |
+   | responses among themselves| K stratified references    |
+   +---------------------------+----------------------------+
+                          |
+                          v
+                    [Evidence]
+   open-ended chat + reasoning benchmarks;
+   consistent gains over scalar / logit / single-baseline
+                          |
+                          v
+                   [Conclusion]
+   the usable RL signal from a GenRM is relative order.
+   ask for comparisons, derive the scalar yourself.
+```
+
+## The Increment
+
+**One sentence**: Before, you asked the LLM judge for a score and inherited all of its calibration noise; after, you only ask it the one question it's actually good at — "which of these two is better?" — and construct the scalar yourself from the resulting ranking.
+
+### Core Mechanism
+
+RRC sits exactly where the reward function sits in a GRPO loop, and changes nothing else. For a prompt `x`, the policy samples `G` responses (you're already doing this). RRC then converts those `G` responses into `G` scalars using only pairwise judgments.
+
+**Self-competitive ranking** runs the group against itself. Every pair `(y_i, y_j)` goes to the GenRM, which returns a winner. Each response accumulates a win count `w_i` in `[0, G-1]`, and the reward is the normalized win rate `w_i / (G-1)`. This is a Copeland score / round-robin standing. Its virtues: zero extra data, guaranteed spread (win counts of a strict ordering are `0,1,...,G-1`, so the group std is never zero), and robustness to judge miscalibration because only the sign of each comparison matters. Its vice: `O(G^2)` judge calls per prompt, which at `G=8` and a 7B+ judge is a real bill. It's also purely **within-group* — a great response in a group of great responses gets the same reward as a mediocre one in a mediocre group, so there's no cross-prompt notion of "good."
+
+**Anchor-guided ranking** fixes both. You keep a small set of `K` reference responses per prompt (or per prompt family), stratified by quality: a bad one, a mediocre one, a decent one, a strong one. Each sampled response is compared against the anchors and slotted into the ladder, giving a rank position in `[0, K]`; the reward is that position normalized. Cost drops to `O(G**K)` comparisons, and if you exploit the anchors' known ordering with a binary-search insertion it's `O(G log K)`. More importantly, because the anchors are shared and stable, the resulting scalars are **comparable across prompts and across training steps** — the anchor ladder is an external ruler rather than a relative one. The two strategies are presented as complementary: self-competition gives fine-grained separation among near-identical samples, anchors give absolute grounding and scalability.
+
+```
+prompt x
+   |
+   v
+policy pi -- sample G --> [ y_1  y_2  y_3 ... y_G ]
+                                  |
+         +------------------------+------------------------+
+         |                                                 |
+         v  (A) self-competitive                            v  (B) anchor-guided
+   for all pairs (i,j):                        anchors  A = [ a_1 < a_2 < ... < a_K ]
+     GenRM(x, y_i, y_j) -> winner              (fixed, quality-stratified)
+         |                                                 |
+         v                                                 v
+   win count  w_i  in  [0, G-1]                 GenRM(x, y_i, a_k) -> win / lose
+         |                                      insert y_i into the ladder
+         |                                      rank_i  in  [0, K]
+         v                                                 |
+   r_i = w_i / (G-1)                                       v
+   cost: O(G^2) judge calls                     r_i = rank_i / K
+         |                                      cost: O(G*K), or O(G log K)
+         +-------------------+-----------------------------+
+                             v
+                    reward   R_i = f(r_i)
+                             |
+                             v
+              GRPO advantage  A_i = (R_i - mean) / std
+                             |
+                             v
+                      policy gradient step
+```
+
+**The metaphor: a chess club with a rating ladder.** Your GenRM is a referee who can adjudicate a single game flawlessly but has no idea how to assign an Elo number — ask her "how strong is this player, 1 to 10?" and you get a shrug and "uh, 8," for everyone. That's prompted scalar scoring, and it's why RL stalls: every player gets an 8, so nobody gets promoted or demoted.
+
+Self-competitive ranking is the **club round-robin**: the eight players who showed up today all play each other, and you rank them by wins. The referee only ever answers questions she's competent to answer, and you always get a clean 1st-through-8th standing. But a round-robin among eight is 28 games (`O(G^2)`), and "1st place today" tells you nothing about how today's field compares to last week's — the champion of a weak field and the champion of a strong field both go home with a trophy.
+
+Anchor-guided ranking is the **calibration ladder**: the club keeps four house bots of known strength — beginner, club-level, expert, master. A new player plays down the ladder until they lose, and their rung is their rating. Four games instead of 28 (two if you binary-search: try the expert first), and the rung means the same thing this week as last week, because the bots don't change. Which is also the failure mode you should worry about: once your policy routinely beats the master bot, everyone tops out at rung 4, ties return, and advantages flatten again. The bots need periodic upgrading — the paper's anchor set has to be refreshed or re-stratified as the policy improves, or you re-derive the exact pathology RRC was built to avoid.
+
+### Key Concepts
+
+- **Calibration vs. discrimination**: These are different skills and models are good at very different ratios of them. Discrimination is "can you tell A from B" — a judge who reliably says the better answer is better has high discrimination. Calibration is "does the number you emit mean the same thing every time" — a judge whose "7" always denotes the same quality level, across topics and prompt formats, is calibrated. LLM judges are strong discriminators and terrible calibrators: ask about a poem and a proof and the "8" means wildly different things. RRC's whole design is a refusal to depend on calibration. It builds the calibration itself, out of an ordering, the way a thermometer is built by fixing two known points rather than by trusting the mercury's self-report.
+
+- **Advantage collapse from tied rewards**: In GRPO you don't use the raw reward; you z-normalize it within the group of `G` samples for one prompt. This is elegant — no value network needed — but it has a cliff: if all `G` rewards are equal, the numerator is zero for every sample and the entire prompt contributes literally no gradient. A discretized 1-10 judge that outputs "8" four times out of four has silently deleted that training example. Concretely, with `G=8` and a judge that only ever emits 7, 8, or 9, you're squeezing eight samples into three buckets and burning most of your comparison information. A ranking, by construction, cannot tie everything: a strict order over `G` items always has nonzero variance.
+
+- **Ordinal vs. cardinal reward**: RRC deliberately throws away magnitude. Rank 3-of-8 says "two responses beat you" but not "and they beat you by a mile." That's the trade: you gain robustness (immune to the judge's scale drift) and lose the ability to express "this one is catastrophically bad." For open-ended chat, where quality is genuinely a soft ordering, this is a great trade. For verifiable reasoning, where correctness is a hard binary, forcing an ordinal ranking onto a set of eight wrong answers manufactures a gradient toward "the most plausible-looking wrong answer" — a real risk the ranking framing doesn't automatically avoid.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+    x, y                                   x, y_i  vs  y_j
+      |                                    x, y_i  vs  a_k
+      v                                          |
+ +----------------+                              v
+ | GenRM prompted |                     +------------------+
+ | "rate 1 to 10" |                     | GenRM asked ONLY |
+ +----------------+                     | "which is better"|
+      |                                 +------------------+
+      v                                          |
+    "8"    <-- one token,                        v
+      |         all the noise             ordering over the batch
+      v                                          |
+  R = 0.8                                        v
+      |                                   R = position in order
+      v                                          |
+ [8, 8, 8, 8]  ==>  std = 0                      v
+      |                                   [0, .33, .67, 1.0]
+      v                                          |
+  dead batch                                     v
+                                          dense, tie-free signal
+
+ the judge does the                       the judge does comparison,
+ quantization (badly)                     RRC does the quantization
+```
+
+**One sentence**: From **asking the judge for a number* to *asking the judge for an order and deriving the number yourself*, the core shift is relocating quantization out of the model's prompt and into the reward-construction algorithm, where you control it.
+
+## Expert Assessment
+
+**Problem choice**: A real gap, and a well-timed one. The GenRM-vs-DiscRM migration is genuinely happening, the "why doesn't my LLM-judge RL run work" complaint is widespread, and the diagnosis — comparators forced through a scalar interface — is crisp and correct. It's not a deep gap; it's the kind of thing that becomes obvious the moment someone names it, which is a compliment about the framing more than the difficulty. Trajectory-wise this sits in the practical plumbing layer of RLHF, alongside advantage normalization tricks and reward-hacking mitigations: high adoption potential, modest conceptual depth.
+
+**Method maturity**: Clever-cheap rather than clever-deep, and the two halves are not equally novel. Win-rate-as-reward is old news — it's essentially Copeland scoring, and pairwise-preference-driven optimization has a whole lineage (Nash-MD, SPPO, self-play preference methods, and plain pairwise RMs in RLHF). The genuinely useful contribution is the **stratified anchor set**: it's the piece that makes ranking rewards `O(G**K)` instead of `O(G^2)` and, more importantly, cross-prompt comparable. That's the part I'd steal.
+
+Two things I'd want interrogated harder. First, **anchor staleness**: a fixed ladder saturates as the policy improves, reintroducing ties. Any serious deployment needs a refresh schedule, and the choice of when/how to refresh is itself a hyperparameter with reward-hacking implications (a fixed anchor set is a fixed target to game). Second, **positional bias**: pairwise LLM judges famously prefer whichever response appears first, and win counts amplify a systematic bias rather than averaging it out. Order randomization or dual-order averaging is mandatory here, and doubles the cost. Simpler baselines that deserve to be in the table: just z-normalizing or rank-transforming the existing scalar rewards within the group, which fixes tie-induced collapse for free without any extra judge calls. If RRC only beats **un*-normalized scalar rewards, the result is much less interesting.
+
+**Experimental integrity**: I can't verify the numbers — the abstract reports "consistent gains" without magnitudes, and I haven't run the code. What I'd check first: (a) is compute matched? RRC spends many more judge calls per update, so the honest comparison is against a scalar-reward baseline given the same total inference budget, not the same number of policy steps; (b) is the reported win over a **rank-transformed* scalar baseline, or only over raw prompted scores; (c) how do the anchor responses get built, and could they be leaking evaluation-adjacent quality signal; (d) reasoning-benchmark gains are the ones I'd trust least, since ordinal rewards over sets of wrong answers are conceptually shaky. Claiming both open-ended chat and reasoning wins from one reward-construction change is the kind of breadth that usually hides a narrow sweet spot.
+
+**Writing quality**: Based on the abstract, the framing paragraph does its job well — the "comparative vs. scalar mismatch" sentence is the whole paper in one line, and that's good writing. The section that would most elevate the work is a rigorous treatment of the **anchor set**: where anchors come from, how many you need, what stratification quality buys you, and what happens over long training runs as the policy outgrows them. That's the load-bearing novelty and it's the easiest thing to under-specify. A cost table (judge FLOPs per policy update, for each reward-construction method) would also close the most obvious reviewer objection before it's raised.
+
+**Verdict**: **weak accept** — the diagnosis is sharp and the anchor mechanism is a genuinely useful, immediately reusable trick, but the win-rate half is largely rediscovery and the paper lives or dies on anchor-staleness and compute-matched baselines that the abstract doesn't promise to address.
+
+## Takeaways
+
+- **Never ask a model for a scalar when you can ask it for a comparison.** This generalizes far beyond reward modeling: LLM-based eval, retrieval reranking, data filtering, curriculum ordering. Judges are near-useless calibrators and solid discriminators; design your pipeline so you only ever consume the part they're good at, and do the quantization in code.
+- **The stratified anchor set is the portable trick.** Keeping a handful of fixed, quality-graded reference items and locating new items relative to them turns any comparator into a cheap, cross-batch-comparable scorer at `O(log K)` calls with binary-search insertion. Use it for eval harnesses (a stable ruler that doesn't drift as you change judge prompts), for data curation, for any "score this" problem where absolute scores are unstable but comparisons are reliable.
+- **Watch for advantage collapse as a first-class failure mode.** If you run GRPO-style group normalization, instrument the fraction of prompts per batch where reward std is ~0. That single metric will tell you whether your reward function is discretizing away your gradient — and it's a diagnostic worth logging regardless of whether you adopt RRC.
+- **When you replace a reward function, budget-match your baseline.** Ranking rewards buy signal quality with judge inference. If your scalar baseline could have used the same FLOPs for a bigger judge or more samples, that's the comparison that matters.
+- **Ordinal rewards are the right default for soft-quality tasks and a hazard for verifiable ones.** If correctness is binary, don't manufacture a ranking among wrong answers; gate ranking behind a correctness check, or you're optimizing for plausible-looking failure.
+:::
+
+:::zh
+**论文**: [2608.06310](https://arxiv.org/abs/2608.06310)
+**作者**: Chenglong Wang, Ziming Zhu, Yifu Huo, Bei Li, Qiaozhi He, Yan Ding, Xiaoyang Hao, Yuxin Gao, Tianhua Zhou, Xiaojia Chang
+**分类**: cs.LG, cs.CL
+
+## 缺口
+
+奖励建模这几年在搬家：从判别式奖励模型（骨干网络加一个 Bradley-Terry 头，吐一个浮点数）搬到生成式奖励模型（一个会用文字推理然后下判断的 LLM）。
+在 RewardBench 那类榜单上，生成式明显更强：泛化好、能自己解释、还能靠 test-time compute 继续加码。
+
+问题出在接下来那一步。
+把它接进 RL，收益基本蒸发了。
+现在通行的几种做法，本质都是硬从一个从没被训练过输出分数的模型里挤出一个标量：
+
+- **提示打分**：「请给这个回复打 1 到 10 分。」输出是离散的，塌缩到 7/8/9 三个值，而且跨 prompt 完全不可比。
+- **token 概率 / logit 奖励**：读 `P("Yes")` 或者「这个好不好」的 logit 差。
+数值连续了，但它衡量的是裁判的语言置信度，不是回复质量，还会随 prompt 措辞漂移。
+- **和单一基线做 pairwise**：每个样本和一个固定参考比一次，取胜负。
+便宜，但这是 1 bit 的奖励——而且一旦策略在所有题上都赢过参考，信号就死了。
+
+在 group-relative RL（GRPO 那一家）里这个毛病最致命，因为 advantage 是组内的 `(R_i - mean) / std`。
+裁判返回 `[8, 8, 8, 8]`，advantage 精确等于零，这一整个 prompt 对梯度毫无贡献。
+论文的定性我认为是对的：这不是生成式奖励模型能力不够，而是**接口不匹配**。
+生成式奖励模型天生是比较器，RL 算法吃标量，大家一直在用很糟的方式做这个适配层。
+
+```
+[问题]
+ GenRM 排序很强             但       RL 只吃标量
+ (设计上就是比较器)                  (PPO / GRPO / RLOO)
+        |                                   |
+        +-----------------+-----------------+
+                          v
+                    [观察到的症状]
+   "打 1-10 分" / logit 奖励  ==>  粗糙、大量并列、无标定
+                                  ==>  advantage 拍平，整批白跑
+                          |
+                          v
+                      [假设]
+   裁判产出里可靠的是 *顺序*；
+   它打出的那个 *数字* 只是对顺序的有损猜测
+                          |
+                          v
+                    [方法: RRC]
+   +---------------------------+----------------------------+
+   | 自竞争排名                | 锚点引导排名               |
+   | 让 G 个采样样本互相排序   | 每个样本对 K 个分层参考排位 |
+   +---------------------------+----------------------------+
+                          |
+                          v
+                      [证据]
+   开放式对话 + 推理 benchmark；
+   稳定优于标量 / logit / 单基线三类构造方式
+                          |
+                          v
+                      [结论]
+   GenRM 能给 RL 的有效信号是相对顺序。
+   只问比较，标量自己算。
+```
+
+## 增量
+
+**一句话**：以前你向 LLM 裁判索要一个分数，顺带把它所有的标定噪声一起继承下来；
+现在你只问它唯一真正擅长的那个问题——「这两个哪个更好」——然后自己从排序里造出标量。
+
+### 核心机制
+
+RRC 的位置就是 GRPO 循环里奖励函数的位置，别的一律不动。
+对 prompt `x`，策略采 `G` 个回复（本来就在采）。
+RRC 只用成对判断，把这 `G` 个回复变成 `G` 个标量。
+
+**自竞争排名**让这一组自己内战。
+每一对 `(y_i, y_j)` 交给 GenRM 判胜负，每个回复累积胜场数 `w_i`，取值在 `[0, G-1]`，奖励就是归一化胜率 `w_i / (G-1)`。
+这本质上是 Copeland 分 / 循环赛积分榜。
+好处有三个：不需要任何额外数据；方差有保证（严格排序的胜场数必然是 `0,1,...,G-1`，组内 std 永不为零）；对裁判标定失准免疫，因为只有每次比较的符号被用到。
+坏处也很实在：每个 prompt `O(G^2)` 次裁判调用，`G=8` 配一个 7B+ 的裁判，这是一笔真金白银。
+另一个坏处是它纯粹**组内相对**——一组好回复里的第一名和一组烂回复里的第一名拿到同样的奖励，没有任何跨 prompt 的「好」的概念。
+
+**锚点引导排名**同时解决这两点。
+你维护一小组 `K` 个参考回复（按 prompt 或按题型），按质量分层：一个差的、一个平庸的、一个不错的、一个很强的。
+每个采样回复和锚点比较，插进这个梯子，得到 `[0, K]` 里的一个位次，归一化后就是奖励。
+成本降到 `O(G*K)`；如果利用锚点已知有序做二分插入，是 `O(G log K)`。
+更关键的是，因为锚点是共享且稳定的，得到的标量**跨 prompt、跨训练步都可比**——锚点梯子是一把外部的尺子，不是相对刻度。
+两个策略被定位成互补的：自竞争在几乎无差别的样本之间给出细粒度区分，锚点提供绝对定位和可扩展性。
+
+```
+prompt x
+   |
+   v
+policy pi -- 采样 G 个 --> [ y_1  y_2  y_3 ... y_G ]
+                                  |
+         +------------------------+------------------------+
+         |                                                 |
+         v  (A) 自竞争                                      v  (B) 锚点引导
+   对所有 (i,j):                              锚点 A = [ a_1 < a_2 < ... < a_K ]
+     GenRM(x, y_i, y_j) -> 胜者                (固定, 质量分层)
+         |                                                 |
+         v                                                 v
+   胜场数  w_i  in  [0, G-1]                    GenRM(x, y_i, a_k) -> 胜 / 负
+         |                                      把 y_i 插入梯子
+         |                                      位次 rank_i  in  [0, K]
+         v                                                 |
+   r_i = w_i / (G-1)                                       v
+   成本: O(G^2) 次裁判调用                       r_i = rank_i / K
+         |                                      成本: O(G*K)，或 O(G log K)
+         +-------------------+-----------------------------+
+                             v
+                     奖励   R_i = f(r_i)
+                             |
+                             v
+              GRPO advantage  A_i = (R_i - mean) / std
+                             |
+                             v
+                        策略梯度更新
+```
+
+**核喻：一个带等级梯的棋牌俱乐部。**
+你的 GenRM 是个裁判，判单局棋判得毫无差错，但完全不会给人估 Elo——你问她「这个人多强，1 到 10 分」，她耸耸肩说「呃，8 分」，对每个人都这么说。
+这就是提示打分，也正是 RL 卡住的原因：所有人都拿 8 分，于是没人升级也没人降级。
+
+自竞争排名是**俱乐部循环赛**：今天来的八个人两两下一遍，按胜场排名次。
+裁判从头到尾只被问她答得上来的问题，而你总能拿到一份干净的第一到第八。
+但八个人的循环赛是 28 局（`O(G^2)`），而且「今天第一」完全说不出今天这批人和上周那批人谁强——弱棋池的冠军和强棋池的冠军拿的是同一个奖杯。
+
+锚点引导排名是**校准梯**：俱乐部养了四个已知棋力的机器人——入门、俱乐部级、专家、大师。
+新人从梯子上往下打，打到输为止，输在哪一级就是他的评级。
+四局代替 28 局（二分的话两局：先打专家），而且这个级别这周和上周含义相同，因为机器人不变。
+这也正是你该担心的失效模式：一旦你的策略稳定赢过大师机器人，所有人都顶在第 4 级，并列回来了，advantage 又拍平了。
+机器人得定期升级——论文的锚点集必须随策略进步而刷新或重新分层，否则你会精确复现 RRC 本来要避开的那个病。
+
+### 关键概念
+
+- **标定 vs 判别**：这是两种不同的能力，而且模型在两者上的水平差得离谱。
+判别是「你能不能分出 A 和 B」——一个总能指出更好那个的裁判，判别力强。
+标定是「你打出的数字每次含义是否一致」——一个的「7 分」在任何话题、任何 prompt 格式下都指同一个质量水平，才叫标定好。
+LLM 裁判是强判别器、烂标定器：问一首诗和问一个证明，那个「8 分」的含义天差地别。
+RRC 整个设计就是拒绝依赖标定。
+它自己从一个顺序里把标定造出来，就像温度计是靠固定两个已知点造出来的，而不是靠相信水银的自我报告。
+
+- **并列奖励导致的 advantage 塌缩**：GRPO 不直接用原始奖励，而是在同一 prompt 的 `G` 个样本内做 z 归一化。
+这很优雅——不需要 value network——但有个悬崖：如果 `G` 个奖励全相等，每个样本的分子都是零，整个 prompt 一点梯度都不产生。
+一个只会吐 7、8、9 的离散裁判，连着四次给「8 分」，就等于悄悄把这条训练样本删掉了。
+具体说，`G=8` 而裁判只用三个档，你是在把八个样本塞进三个桶，把大部分比较信息烧掉了。
+而排序在构造上就不可能全部并列：`G` 个元素的严格顺序方差必然非零。
+
+- **序数奖励 vs 基数奖励**：RRC 是主动丢掉了幅度信息。
+「八个里排第三」说的是「有两个赢过你」，但不说「而且赢了你一大截」。
+这是笔交易：换来鲁棒性（不受裁判尺度漂移影响），失去表达「这个错得离谱」的能力。
+对开放式对话，质量本来就是一个软序，这笔交易很划算。
+对可验证的推理任务，对错是硬二元的，硬给八个错答案排一个序，就是在制造一个指向「看起来最像对的错答案」的梯度——排序这个框架并不自动躲开这个风险。
+
+## 框架转变
+
+```
+之前（主流方法）：                    之后（本文方法）：
+
+    x, y                                   x, y_i  vs  y_j
+      |                                    x, y_i  vs  a_k
+      v                                          |
+ +----------------+                              v
+ | GenRM 被要求   |                     +------------------+
+ | "打 1 到 10 分"|                     | GenRM 只被问     |
+ +----------------+                     | "哪个更好"       |
+      |                                 +------------------+
+      v                                          |
+    "8"    <-- 一个 token，                       v
+      |         噪声全在里面               整批样本的一个顺序
+      v                                          |
+  R = 0.8                                        v
+      |                                    R = 顺序中的位次
+      v                                          |
+ [8, 8, 8, 8]  ==>  std = 0                      v
+      |                                   [0, .33, .67, 1.0]
+      v                                          |
+   这批白跑                                       v
+                                          稠密、无并列的信号
+
+ 量化交给裁判做                            比较交给裁判，
+ （它做得很烂）                            量化 RRC 自己做
+```
+
+**一句话**：从**向裁判索要数字*到*向裁判索要顺序、数字自己算*，核心转变是把量化这一步从模型的 prompt 里挪到奖励构造算法里，挪到你能控制的地方。
+
+## 专家评审
+
+**选题眼光**：真缺口，而且时机好。
+生成式取代判别式这场迁移是真的在发生，「为什么我用 LLM 裁判跑 RL 没效果」这个抱怨很普遍，而它给出的诊断——比较器被硬塞进标量接口——干净且正确。
+但这不是个深缺口；它属于「一旦有人把它说出口就变得显而易见」那一类，这更多是在夸框架表述，而不是夸难度。
+从领域轨迹看，它落在 RLHF 的工程管线层，和 advantage 归一化技巧、reward hacking 缓解手段是同一类东西：采用率会很高，概念深度中等。
+
+**方法成熟度**：是巧劲，但是「便宜的巧」而不是「深的巧」，而且两个组件的新意完全不对等。
+胜率当奖励不是新东西——它基本就是 Copeland 计分，而 pairwise preference 驱动优化有一整条谱系（Nash-MD、SPPO、各种 self-play preference 方法，以及 RLHF 里朴素的 pairwise RM）。
+真正有价值的贡献是**分层锚点集**：正是它把排序奖励从 `O(G^2)` 降到 `O(G**K)`，更重要的是让标量跨 prompt 可比。
+这是我会「偷」走的那部分。
+
+两点我希望被追问得更狠。
+第一，**锚点失效**：固定梯子会随策略变强而饱和，并列会回来。
+任何认真的部署都需要一个刷新策略，而何时刷新、怎么刷新本身就是一个带 reward hacking 含义的超参（固定锚点集就是一个固定的可被钻的靶子）。
+第二，**位置偏置**：pairwise LLM 裁判偏好排在前面那个是众所周知的，而胜场计数是在**放大**系统性偏置，不是在平均掉它。
+顺序随机化或双序平均在这里是必须的，而这会让成本翻倍。
+另外有个更简单的基线理应进表：直接把现有标量奖励在组内做 z 归一化或秩变换，这不花任何额外裁判调用就解决了并列导致的塌缩。
+如果 RRC 只赢过**未**归一化的标量奖励，这个结果的意思就小得多。
+
+**实验诚意**：数字我无法核实——摘要只说「consistent gains」，没给量级，我也没跑代码。
+我最想先查的几件事：(a) 算力是否对齐？RRC 每次更新多花大量裁判调用，诚实的比较是给标量基线同等总推理预算，而不是同等策略步数；(b) 报的是赢过**做过秩变换**的标量基线，还是只赢过裸的提示打分；(c) 锚点回复怎么构造的，有没有泄漏评测相关的质量信号；(d) 推理 benchmark 上的增益我最不信，因为对一堆错答案做序数奖励在概念上就站不住。
+一个奖励构造的改动同时在开放式对话和推理上都赢，这种广度通常藏着一个很窄的甜点区。
+
+**写作功力**：仅从摘要看，开篇的框架表述是称职的——「comparative vs scalar mismatch」那一句就是整篇论文，这是好写作。
+最能把整篇升一档的是对**锚点集**的严肃处理：锚点从哪来、需要多少个、分层质量买到了什么、长训练里策略超过锚点后会怎样。
+这是承重的新意所在，也是最容易被含糊过去的地方。
+再加一张成本表（每种奖励构造方式，每次策略更新的裁判 FLOPs），能在审稿人开口之前就堵掉最明显的那个质疑。
+
+**判决**：**弱接收** — 诊断锋利，锚点机制是真正有用、可以马上复用的技巧；但胜率那半基本是重新发现，而全篇成败押在锚点失效和算力对齐基线上，而摘要没承诺处理这两件事。
+
+## 要点总结
+
+- **能问比较就永远别向模型要标量。** 这一条远远超出奖励建模：LLM 评测、检索重排、数据筛选、课程排序都适用。
+裁判做标定近乎无用，做判别相当靠谱；把 pipeline 设计成只消费它擅长的那部分，量化在代码里做。
+- **分层锚点集是可移植的那个技巧。** 维护少量固定的、质量分级的参考项，把新样本相对它们定位，就能把任何比较器变成便宜、跨批次可比的打分器，二分插入下只需 `O(log K)` 次调用。
+拿去用在评测框架上（一把不随你改裁判 prompt 而漂移的稳定尺子）、数据治理上、以及任何「绝对分不稳但比较可靠」的打分问题上。
+- **把 advantage 塌缩当成一类头等失效模式来监控。** 如果你在跑 GRPO 式的组内归一化，请埋一个指标：每批里 reward std 约等于零的 prompt 占比。
+这一个数就能告诉你奖励函数是不是在把你的梯度离散掉——不管你要不要用 RRC，这个诊断都值得记。
+- **换奖励函数时，请做预算对齐的比较。** 排序奖励是用裁判推理换信号质量。
+如果你的标量基线本来可以把同样的 FLOPs 花在更大的裁判或更多采样上，那才是该比的那一组。
+- **序数奖励是软质量任务的正确默认，是可验证任务的隐患。** 如果对错是二元的，别在错答案之间硬造排序；
+把排序放在正确性门控之后，否则你是在优化「看起来更像对的失败」。
+:::
