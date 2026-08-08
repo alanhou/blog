@@ -1,0 +1,450 @@
+---
+title:
+  en: "Not the First Error, but the One That Killed It: TrajDebug and Error-Lifecycle Tracing"
+  zh: "不是第一个错，而是致命的那个错：TrajDebug 与错误生命周期追踪"
+description:
+  en: "TrajDebug reframes agent debugging: instead of hunting for the earliest mistake in a long trajectory, it tracks each error's lifecycle to see which ones were quietly recovered and which one actually reached the failure."
+  zh: "TrajDebug 重构了智能体调试的问法：不再只找最早的错误步，而是追踪每个错误的生命周期，看清哪些被悄悄修复了、哪一个真正导致了最终失败。"
+date: 2026-08-08
+tags: ["arxiv", "ai", "cs.ai"]
+image: "/arxiv-visuals/arxiv-trajdebug-tracing-error-lifecycle-to-identify.png"
+---
+:::en
+**Paper**: [2608.06346](https://arxiv.org/abs/2608.06346)
+**Authors**: Yunjia Qi, Zehua Yin, Xintong Shi, Hao Peng, Songyuanyi Lu, Yixian Liu, Richeng Xuan, Yuhong Liu, Zhichao Hu, Xiaozhi Wang
+**Categories**: cs.AI
+
+## The Gap
+
+Everyone building agents has the same experience: the agent runs 80 steps, fails, and you're left scrolling through 150k tokens of tool calls trying to figure out where it went wrong. The research response to this has been "critical error detection" — automatically find the step responsible for the failure. The dominant recipe is LLM-as-judge over the trajectory: dump the whole thing into a strong model, ask it to point at the bad step. Variants add step-by-step scoring, binary-search-style localization (as in some agent-debugging and "who's to blame" multi-agent failure attribution work), or process reward models trained on step labels.
+
+Two things break this recipe, and the paper names both cleanly.
+
+First, **evidence dispersion**. Whether step 37 was a mistake often depends on a constraint buried in the system prompt at step 0, an observation returned at step 12, and a decision the agent made at step 20. A judge reading a truncated or flattened trajectory doesn't have those three things in view simultaneously. Long-context models help less than you'd hope, because the problem isn't capacity, it's attention over scattered, low-salience spans.
+
+Second — and this is the sharper point — **earliest is not critical**. A failed trajectory typically contains several local errors. The agent calls the wrong API, gets an error back, retries correctly. That's a real error at step 12, and it's completely irrelevant to why the run failed. Prior work conflates "first thing that looks wrong" with "cause of failure," which systematically mislocates blame toward early, self-healed slips.
+
+TrajDebug's bet: criticality is not a property of a step in isolation. It's a property of an error's *trajectory through time* — did it get resolved, and did it reach the end?
+
+```
+[Problem] long failed trajectory, N steps, many local errors
+      |
+      v
+[Prior approach] LLM-as-judge over whole/flattened trace
+      .- evidence for step i scattered across s_0 .. s_i
+      .- returns EARLIEST error, not CAUSAL one
+      .- self-recovered errors get blamed
+      |
+      v
+[Assumption] every error has a LIFECYCLE:
+      onset --> (resolved | persists) --> (terminal impact | none)
+      critical := earliest error that is unresolved AND reaches failure
+      |
+      v
+[Method] TrajDebug
+      + multi-granularity history compression  (fix dispersion)
+      + evidence-based error identification    (fix hallucinated verdicts)
+      + lifecycle tracing / attribution        (fix earliest != critical)
+      |
+      v
+[Evidence] TrajErrBench: 486 human-annotated failed traces
+      from Tau2Bench (tool use) + SWE-Bench Pro (coding)
+      .- best overall vs existing baselines
+      .- diagnoses fed back --> downstream agent success up
+      |
+      v
+[Conclusion] detection alone is underdetermined;
+             attribution needs a survival check
+```
+
+## The Increment
+
+**One sentence**: Before, agent failure localization asked "which step looks wrong?"; after, it asks "which wrongness survived to kill the run?" — turning a step-classification problem into an error-lifecycle tracking problem, with a benchmark that actually distinguishes the two.
+
+### Core Mechanism
+
+The pipeline has three stages that map onto the three failures of the prior recipe.
+
+**Stage 1: multi-granularity history compression.** Instead of feeding the judge either the full trajectory (too long, attention dilutes) or a summary (evidence destroyed), TrajDebug builds a layered context per step under evaluation. A coarse layer carries the task specification and stable global constraints. A middle layer carries compressed summaries of earlier phases — what was attempted, what state the environment reached, what was learned. A fine layer keeps a verbatim window around the step being judged: the exact call, the exact observation. The judge always sees the global rules and the local detail at full fidelity, and pays compression cost only on the middle distance.
+
+**Stage 2: evidence-based error identification.** Each step gets judged, but the verdict must come with citations — which instruction it violates, which observation contradicts it, which prior commitment it breaks. This is a discipline device more than an interpretability feature: requiring a pointer suppresses the failure mode where a judge, primed by knowing the trajectory failed, declares steps wrong on vibes. The output is a candidate set of local errors, each with a location and a stated reason.
+
+**Stage 3: lifecycle tracing and critical attribution.** Now the actual novelty. For each candidate error, the framework looks **forward*: was this error resolved later — did the agent retry, correct the value, roll back the edit, recover the state? And independently: does its consequence persist into the terminal state that the evaluator marked as failure? Errors that were resolved are pruned regardless of how early or how ugly they were. Among the survivors with terminal impact, the earliest is the critical step. Detection and attribution become two separable passes, which is why the framework can be right about "there was an error at step 12" and still correctly refuse to blame it.
+
+```
+raw trajectory:  s_1 s_2 s_3 ............... s_N   (100k+ tokens)
+                                |
+                                v
++--------------------------------------------------+
+| STAGE 1: multi-granularity history compression   |
+|   global : task spec + hard constraints (verbatim)|
+|   mid    : phase digests (what tried / state)    |
+|   local  : window around s_i (verbatim)          |
++--------------------------------------------------+
+                                |
+                                v
++--------------------------------------------------+
+| STAGE 2: evidence-based error identification     |
+|   for s_i:  verdict + citation                   |
+|             .- violated instruction?             |
+|             .- contradicted observation?          |
+|             .- broken prior commitment?          |
++--------------------------------------------------+
+                                |
+                    candidates  \{ e_12, e_19, e_37, e_52 \}
+                                |
+                                v
++--------------------------------------------------+
+| STAGE 3: error-lifecycle tracing                 |
+|   e_k:  resolved downstream?   y/n               |
+|         reaches terminal state? y/n              |
+|                                                  |
+|   e_12  resolved @ s_15 ........ prune           |
+|   e_19  resolved @ s_22 ........ prune           |
+|   e_37  never resolved + terminal .. KEEP  *     |
+|   e_52  downstream of e_37 ...... not earliest    |
++--------------------------------------------------+
+                                |
+                                v
+                  CRITICAL STEP = s_37
+```
+
+**The metaphor: an autopsy with the full medical chart.**
+
+Think of a failed trajectory as a patient who died, and the debugger as a pathologist who must write one line on the death certificate: cause of death.
+
+The naive judge is a pathologist handed a 400-page chart and told "find the first abnormal reading." They flip to page 30, see an elevated white cell count, and write "infection." But the chart shows the infection was treated on page 45 and cleared by page 60. It was a real abnormality and it did not kill the patient.
+
+TrajDebug is the pathologist who works properly. **Compression is the chart structure**: the admission notes and known allergies stay verbatim at the front (global layer), the intervening months are condensed into ward summaries (mid layer), and the hours around the reading under examination are read line by line (local layer). No competent clinician reads all 400 pages uniformly; they read the intake, the summaries, and the relevant window.
+
+**Evidence citation is "point at the lab value."** A diagnosis that can't name the test result behind it doesn't go in the report. This is what stops the pathologist from reasoning backwards — "the patient died, so everything looks pathological."
+
+**Lifecycle tracing is the treatment record.** For each abnormality: was it treated, and did the treatment take? The elevated white count — treated, resolved, struck from consideration. The medication interaction on page 210 — never addressed, and its downstream effects appear in every subsequent chart entry up to the end. That's what goes on the certificate. And the organ failure on page 380 is a **consequence*, not the cause, so you trace upstream to the earliest surviving lesion.
+
+The load-bearing part of the analogy: a symptom list is not a cause of death. You need onset, treatment, and outcome for each finding. That's exactly the shift from step classification to lifecycle tracing.
+
+### Key Concepts
+
+- **Critical error, as distinct from first error**: Imagine you're following a recipe and you grab salt instead of sugar, notice immediately, and put it back. Error made, error fixed, cake fine. Later you set the oven to 250°C instead of 180°C and never notice. The cake burns. If someone asks "what went wrong?", the honest answer is the oven, not the salt — even though the salt happened first. "Critical error" means the earliest mistake whose consequence was never undone and that shows up in the final bad outcome. The definition is implicitly counterfactual: fix this step and re-run, and the task would plausibly have succeeded. Fixing the salt changes nothing.
+
+- **Resolution status (the survival check)**: Agents are self-correcting systems. They get error messages, they retry, they revert files, they re-query. So a snapshot judgment ("this step is wrong") is missing a time dimension. Resolution status asks, for each error, whether the world was put back on track afterward. Concretely: agent runs `sed` on the wrong file at step 12, sees the diff, runs `git checkout` on it at step 14. The repository state at step 15 is identical to step 11. Whatever killed this run, it wasn't that. Pruning by resolution status is what removes the systematic early-bias of prior detectors.
+
+- **Multi-granularity history compression**: The obvious ways to fit a long trajectory into a judge both fail. Truncation drops the constraint you needed. Uniform summarization destroys the token-level detail that distinguishes a correct tool call from a wrong one — "user_id=8891" vs "user_id=8819" survives no summary. The fix is to notice that different distances need different resolutions: the task spec must be exact (it's the yardstick), the middle history only needs to convey state and intent (it's context), and the step under examination must be exact (it's the object of judgment). It's the same principle as a map with an inset: continent-scale for orientation, street-scale where you're actually standing.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+  [ full / truncated trajectory ]        [ layered context per step ]
+              |                            global  : verbatim spec
+              v                            mid     : phase digests
+       [ LLM-as-judge ]                    local   : verbatim window
+              |                                      |
+              v                                      v
+     "first suspicious step"              [ judge + evidence citation ]
+              |                                      |
+              v                                      v
+        report step 12                     candidates \{12, 19, 37, 52\}
+              |                                      |
+              v                                      v
+   (step 12 was self-fixed;               [ lifecycle: resolved? terminal? ]
+    real cause was step 37)                 12 fixed  x
+                                            19 fixed  x
+    detection == attribution                 37 alive + terminal  *
+                                            52 downstream of 37
+                                                     |
+                                                     v
+                                            critical step = 37
+
+                                        detection =/= attribution
+                                        (two separate passes)
+```
+
+From "classify each step as correct or incorrect" to "track each error from onset to outcome," the core shift is treating an error as an object with a *lifespan* rather than a label on a timestep — which makes self-recovery a first-class signal instead of noise.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, and well-timed. Anyone who has run a horizon-100 agent knows that failed traces are full of errors the agent shrugged off, and that "first error" metrics reward the wrong thing. The field has been drifting toward this — multi-agent failure attribution work, process reward models, agent-as-judge — but mostly kept the step-classification framing. Naming self-recovery as the confound, and building the evaluation to expose it, is the kind of reframing that's obvious only in retrospect. It sits squarely on the path from "agents fail" to "agents that repair themselves," since you can't do targeted self-repair without correct attribution.
+
+**Method maturity**: Honestly, the insight is clever and the implementation is conventional. Each stage is a prompted LLM pass with structured output; nothing here requires training. That's a strength for adoption and a weakness for depth — this is a well-designed pipeline, not a new mechanism. Two things I'd want checked. First, the whole thing is LLM judgments stacked on LLM judgments: if stage 2 hallucinates an error, stage 3 will dutifully reason about whether that fiction was resolved. Errors compound multiplicatively across stages and the abstract gives no stage-wise ablation. Second, a much simpler baseline is lurking: for environments with resettable state (Tau2Bench very much included), you can **re-run* from step i with the error corrected and measure whether the task succeeds. That's a near-ground-truth criticality signal, expensive but decisive, and it would either validate or embarrass the whole pipeline. Also: cost. Per-step judging plus per-error forward tracing is O(N) to O(N·k) LLM calls on a 100-step trajectory. If baselines are one-shot judges, "best overall performance" may be partly a compute-budget artifact.
+
+**Experimental integrity**: The benchmark is the paper's most valuable artifact and also where the risk concentrates. 486 manually annotated failed trajectories from two sources is respectable but small, and "which error is critical" is a genuinely hard labeling task — I'd want inter-annotator agreement reported prominently, plus the protocol for resolving disagreement. If agreement on the critical step is, say, 70%, then the headline gap between methods needs to be read against that ceiling. Two domains (tool use, code) is thin for a claim about "long-horizon agents" generally; nothing here covers web navigation, GUI, or multi-agent traces where attribution is hardest. The downstream application study — feeding diagnoses back to improve success rate — is the most persuasive evidence in the abstract, because it's an end-to-end utility check that's harder to game than a localization accuracy number. I'd want to know whether the gain survives when the feedback is deliberately made less precise, which would tell us how much of the lift comes from **correct* attribution versus merely *pointing somewhere plausible*.
+
+**Writing quality**: I'm working from the abstract here, so treat this as calibration on what the abstract signals. "Multi-granularity history compression" and "evidence-based error identification" are doing a lot of unearned work as phrases — they name a shape, not a mechanism, and the abstract gives no hint of what defines a granularity boundary or what counts as valid evidence. The section that would elevate the paper most is the benchmark construction: the operational definition of "critical," the annotator instructions, the agreement statistics, and the hard cases where two errors both plausibly contributed. That definition is the paper's real contribution, and if it's relegated to an appendix the paper will be cited for its method and remembered for its dataset.
+
+**Verdict**: weak accept — a genuinely better problem formulation plus a useful annotated benchmark, held back by a pipeline of stacked LLM judgments that isn't validated against the counterfactual re-execution baseline the environments already support.
+
+## Takeaways
+
+Things worth stealing, whether or not you care about agent debugging:
+
+- **Add a survival check to any root-cause analysis.** The generalizable move is: enumerate candidate faults, then ask of each one "was this undone before the end?" This applies directly to alert triage (drop alerts that self-healed), flaky test analysis, incident postmortems, and log anomaly detection. Most detectors report symptoms; almost none check whether the symptom persisted. Adding one forward-looking pass over an existing detector is cheap and will visibly cut false root causes.
+
+- **Separate detection from attribution as distinct passes.** Bundling "is this wrong?" and "did this matter?" into one judgment is why judges over-blame early steps. Two passes with different context windows — backward-looking for detection, forward-looking for attribution — is a pattern that transfers to any temporal diagnosis task.
+
+- **Non-uniform context resolution beats truncation or summarization.** Verbatim at the yardstick (spec, constraints) and verbatim at the point of judgment, compressed only in between. If you're building any long-context judge or retrieval-augmented evaluator, this layout is a better default than "summarize everything" or "keep the last k steps."
+
+- **Mandatory evidence citation as a hallucination brake.** Requiring the judge to name the instruction or observation it's contradicting is a cheap prompt-level constraint that suppresses outcome-biased reasoning ("it failed, so this must be wrong"). Useful anywhere you're using an LLM to evaluate something whose outcome the model already knows.
+
+- **A framing to reuse: criticality is counterfactual, so validate it counterfactually.** If your environment supports state reset, the strongest label for "did this step matter" is re-running from it with the step fixed. Even a small counterfactually-verified subset makes a human-annotated benchmark far more trustworthy. This is the check I'd run first on TrajErrBench.
+:::
+
+:::zh
+**论文**: [2608.06346](https://arxiv.org/abs/2608.06346)
+**作者**: Yunjia Qi, Zehua Yin, Xintong Shi, Hao Peng, Songyuanyi Lu, Yixian Liu, Richeng Xuan, Yuhong Liu, Zhichao Hu, Xiaozhi Wang
+**分类**: cs.AI
+
+## 缺口
+
+做过智能体的人都有同一段经历：agent 跑了 80 步，失败了，你面对 15 万 token 的工具调用日志往下翻，试图找出到哪一步走歪的。学术界对此的回应叫"关键错误检测"——自动找出导致失败的那一步。主流做法是 LLM-as-judge：把整条轨迹塞给一个强模型，让它指认坏步骤。变体包括逐步打分、二分定位（多智能体失败归因那一系工作里常见）、以及用步级标注训练的过程奖励模型。
+
+这套做法有两个硬伤，论文把它们点得很干净。
+
+第一，**证据分散**。第 37 步到底错没错，往往取决于第 0 步系统提示里埋的一条约束、第 12 步返回的某个观测、以及第 20 步 agent 做的一个决定。
+一个读着截断或压平轨迹的裁判，没法把这三样东西同时放进视野。
+长上下文模型帮助有限，因为瓶颈不是容量而是注意力——那些关键片段又长又不显眼。
+
+第二点更锋利：**最早 != 关键**。一条失败轨迹通常含好几个局部错误。
+agent 调错了 API，收到报错，重试对了。这确实是第 12 步的一个真实错误，而它跟这次运行为什么失败毫无关系。
+以往工作把"第一个看起来不对的地方"等同于"失败原因"，结果系统性地把责任推给早期那些已被自我修复的小失误。
+
+TrajDebug 的赌注：关键性不是某一步孤立的属性，而是一个错误**在时间上的走向**——它被解决了吗？它抵达终局了吗？
+
+```
+[问题] 长失败轨迹，N 步，多个局部错误
+      |
+      v
+[旧方法] LLM-as-judge 读整条/压平的轨迹
+      .- 判断第 i 步的证据散落在 s_0 .. s_i
+      .- 返回"最早"错误，而非"致因"错误
+      .- 自愈的错误被误判为元凶
+      |
+      v
+[假设] 每个错误都有生命周期：
+      发生 --> (被解决 | 持续) --> (影响终局 | 无影响)
+      关键错误 := 最早的 未被解决 且 影响终局 的错误
+      |
+      v
+[方法] TrajDebug
+      + 多粒度历史压缩       (治证据分散)
+      + 基于证据的错误识别   (治凭感觉定罪)
+      + 生命周期追踪与归因   (治最早!=关键)
+      |
+      v
+[证据] TrajErrBench：486 条人工标注失败轨迹
+      来自 Tau2Bench (工具使用) + SWE-Bench Pro (代码)
+      .- 综合表现优于现有基线
+      .- 诊断回喂 --> 下游 agent 成功率提升
+      |
+      v
+[结论] 单纯检测是欠定的；
+       归因需要一次"存活检查"
+```
+
+## 增量
+
+**一句话**: 以前问的是"哪一步看起来错了"，现在问的是"哪个错误活到了最后并杀死了这次运行"——把步骤分类问题改造成错误生命周期追踪问题，并配了一个真能区分二者的基准。
+
+### 核心机制
+
+流水线三段，正好对上旧方法的三个毛病。
+
+**第一段：多粒度历史压缩。**
+不给裁判喂完整轨迹（太长，注意力被稀释），也不喂摘要（证据被摘掉），而是为每个待评估的步骤构造分层上下文。
+粗层保留任务规格与全局硬约束；中层保留早期阶段的压缩摘要——尝试过什么、环境到了什么状态、学到了什么；细层保留待判步骤周围的原文窗口：确切的调用、确切的观测。
+裁判永远能看到全保真的全局规则和局部细节，压缩成本只花在中间距离上。
+
+**第二段：基于证据的错误识别。**
+每一步都被判定，但判决必须附引用——违反了哪条指令、与哪个观测矛盾、破坏了此前的哪个承诺。
+这更像一种纪律装置而非可解释性功能：强制要求指出出处，能压制那种"我知道这条轨迹失败了，所以随手把某些步骤定为错误"的失效模式。
+输出是一个候选局部错误集合，每个带位置和理由。
+
+**第三段：生命周期追踪与关键归因。**
+真正的新东西在这里。对每个候选错误，框架**向前看**：这个错误后来被解决了吗——agent 重试了吗、改对参数了吗、回滚了文件吗、重新查询了吗？
+以及独立地问：它的后果是否延续到了评测器判为失败的终态？
+被解决的错误一律剪掉，不管它多早、多难看。
+在存活且影响终局的错误中，最早的那个就是关键步。
+检测与归因被拆成两遍，所以这个框架可以既承认"第 12 步确实有错"，又正确地拒绝把责任判给它。
+
+```
+原始轨迹:  s_1 s_2 s_3 ............... s_N   (10万+ token)
+                            |
+                            v
++--------------------------------------------------+
+| 第一段: 多粒度历史压缩                            |
+|   全局 : 任务规格 + 硬约束 (原文)                 |
+|   中层 : 阶段摘要 (尝试了什么 / 状态如何)          |
+|   局部 : s_i 周围窗口 (原文)                      |
++--------------------------------------------------+
+                            |
+                            v
++--------------------------------------------------+
+| 第二段: 基于证据的错误识别                        |
+|   对 s_i:  判决 + 引用                            |
+|            .- 违反了哪条指令?                     |
+|            .- 与哪个观测矛盾?                     |
+|            .- 破坏了哪个先前承诺?                 |
++--------------------------------------------------+
+                            |
+                候选集  \{ e_12, e_19, e_37, e_52 \}
+                            |
+                            v
++--------------------------------------------------+
+| 第三段: 错误生命周期追踪                          |
+|   e_k:  后续被解决?    y/n                        |
+|         抵达终态?      y/n                        |
+|                                                  |
+|   e_12  s_15 已修复 ........ 剪掉                 |
+|   e_19  s_22 已修复 ........ 剪掉                 |
+|   e_37  未修复 + 影响终局 ... 保留  *              |
+|   e_52  是 e_37 的下游 ...... 非最早               |
++--------------------------------------------------+
+                            |
+                            v
+                  关键步 = s_37
+```
+
+**核喻：一场配齐完整病历的尸检。**
+
+把失败轨迹想成一位去世的病人，把调试器想成必须在死亡证明上写下一行"死因"的病理医生。
+
+朴素裁判是这样的病理医生：拿到 400 页病历，被告知"找出第一处异常读数"。
+他翻到第 30 页，看到白细胞升高，写下"感染"。
+但病历显示这次感染在第 45 页开始治疗、第 60 页已经清除。
+它是一处真实异常，而它没有杀死病人。
+
+TrajDebug 是那位干活规矩的病理医生。
+**压缩就是病历的结构**：入院记录和已知过敏史原文保留在最前（全局层），中间几个月被压成病区小结（中层），而待查读数前后几小时逐行细读（局部层）。
+没有称职的临床医生会把 400 页均匀读一遍；他们读入院记录、读小结、读相关窗口。
+
+**证据引用就是"把手指按在化验单上"。**
+说不出背后是哪个检验结果的诊断，不许写进报告。
+这正是防止医生倒着推理——"病人死了，所以看什么都像病变"。
+
+**生命周期追踪就是治疗记录。**
+对每处异常问两件事：治了吗？治好了吗？
+白细胞升高——治了，好了，从候选中划掉。
+第 210 页那次药物相互作用——从未处理，而它的下游影响出现在此后每一条病历记录里，一直到最后。
+这个才写上死亡证明。
+至于第 380 页的器官衰竭，那是**结果**不是原因，所以要顺着往上游追到最早那处存活的病灶。
+
+这个类比承重的地方在于：症状清单不等于死因。
+每一处发现都需要"发生时间、治疗、结局"三件事才能定性。
+这正是从步骤分类到生命周期追踪的转变。
+
+### 关键概念
+
+- **关键错误（区别于第一个错误）**: 想象你在照菜谱做蛋糕，抓错了罐子拿了盐，立刻发现，放回去。错误发生了，也修好了，蛋糕没事。
+后来你把烤箱设成 250°C 而不是 180°C，而且一直没发现。蛋糕烤糊了。
+如果有人问"哪里出错了"，老实的答案是烤箱，不是盐——尽管盐在时间上更早。
+"关键错误"指的是最早那个后果从未被撤销、并且体现在最终坏结果里的错误。
+这个定义隐含反事实：修好这一步再跑一遍，任务本来大概率能成。修好那罐盐什么都不改变。
+
+- **解决状态（存活检查）**: agent 是自我纠正的系统。它们会收到报错、会重试、会回滚文件、会重新查询。
+所以"这一步是错的"这种快照式判断缺了时间维度。
+解决状态问的是：这个错误之后，世界有没有被拉回正轨？
+具体点：agent 在第 12 步对错误的文件跑了 `sed`，看到 diff，第 14 步对它 `git checkout`。
+第 15 步的仓库状态与第 11 步完全一致。
+不管这次运行死于什么，都不是死于这个。
+按解决状态剪枝，正是消除以往检测器"系统性偏早"的手段。
+
+- **多粒度历史压缩**: 把长轨迹塞进裁判的两种显而易见的办法都会失败。
+截断会丢掉你恰好需要的那条约束。
+均匀摘要会毁掉区分正确调用与错误调用的 token 级细节——"user_id=8891"和"user_id=8819"在任何摘要里都活不下来。
+解法是意识到不同距离需要不同分辨率：任务规格必须精确（它是尺子），中段历史只需传达状态与意图（它是背景），待查步骤必须精确（它是审判对象）。
+就像带插图放大框的地图：大陆尺度用来定位，街道尺度用在你实际站着的地方。
+
+## 框架转变
+
+```
+之前（主流方法）：                     之后（本文方法）：
+
+  [ 完整/截断的轨迹 ]                    [ 每步一份分层上下文 ]
+            |                             全局 : 规格原文
+            v                             中层 : 阶段摘要
+       [ LLM 裁判 ]                       局部 : 原文窗口
+            |                                      |
+            v                                      v
+     "第一个可疑步骤"                    [ 裁判 + 证据引用 ]
+            |                                      |
+            v                                      v
+       报告第 12 步                      候选集 \{12, 19, 37, 52\}
+            |                                      |
+            v                                      v
+  (第 12 步是自愈的；                 [ 生命周期: 解决? 影响终局? ]
+   真凶是第 37 步)                        12 已修复  x
+                                          19 已修复  x
+    检测 == 归因                          37 存活+影响终局  *
+                                          52 是 37 的下游
+                                                   |
+                                                   v
+                                            关键步 = 37
+
+                                      检测 =/= 归因
+                                      (两遍独立处理)
+```
+
+一句话：从"给每一步打上对/错标签"到"追踪每个错误从发生到结局"，核心转变是把错误当成有**寿命**的对象而不是时间步上的标签——于是自我修复从噪声变成了一等信号。
+
+## 专家评审
+
+**选题眼光**: 真缺口，而且时机对。
+任何跑过百步量级 agent 的人都知道，失败轨迹里塞满了 agent 自己抖一抖就过去的错误，而"第一个错误"这类指标奖励的是错的东西。
+这个方向本来就在漂移过来——多智能体失败归因、过程奖励模型、agent-as-judge——但大多仍守着步骤分类的框架。
+把自我修复点名为混淆因子，并把评测设计成能暴露它，是那种事后才觉得显然的重构。
+它正好落在"agent 会失败"通往"agent 能自我修复"的路径上：没有正确归因，就没有定向修复。
+
+**方法成熟度**: 说实话，洞见巧，实现平。
+每一段都是带结构化输出的 prompt 调用，全程不需要训练。
+这对落地是优点，对深度是缺点——这是一条设计良好的流水线，不是新机制。
+两点我会追问。
+其一，整个东西是 LLM 判断叠 LLM 判断：如果第二段幻觉出一个错误，第三段会一本正经地推理这个虚构的错误有没有被解决。
+误差跨阶段是乘法累积的，而摘要没提逐阶段消融。
+其二，有个远更简单的基线在旁边晃：对状态可重置的环境（Tau2Bench 完全符合），你可以把第 i 步的错误修正后**重跑**，看任务是否成功。
+这是接近 ground-truth 的关键性信号，贵但决定性，要么验证整条流水线，要么让它很尴尬。
+还有成本：逐步判定加逐错误前向追踪，在百步轨迹上是 O(N) 到 O(N·k) 次 LLM 调用。
+如果基线是一次性裁判，"综合最优"里可能有一部分是算力预算的产物。
+
+**实验诚意**: 基准是本文最有价值的产出，也是风险最集中的地方。
+两个来源、486 条人工标注失败轨迹，体量说得过去但不大，而"哪个错误是关键的"是真难标的任务——我希望标注者一致性被显著地报出来，加上分歧如何裁决的协议。
+如果关键步上的一致性只有比如 70%，那方法间的头条差距就得对着这个天花板来读。
+两个域（工具使用、代码）对于"长时程 agent"这种普适声明来说偏薄；网页导航、GUI、多智能体轨迹——归因最难的那些场景——一个都没覆盖。
+下游应用实验（把诊断回喂以提升成功率）是摘要里最有说服力的证据，因为它是端到端的效用检验，比定位准确率更难刷。
+我想知道的是：如果故意把反馈精度降低，增益还在不在？
+这能告诉我们提升有多少来自**正确归因**、多少只来自**指了个看似合理的地方**。
+
+**写作功力**: 这里我只有摘要，所以把这段当成对摘要信号的校准。
+"多粒度历史压缩"和"基于证据的错误识别"这两个短语承担了太多未兑现的工作——它们描述形状而非机制，摘要完全没暗示粒度边界如何界定、什么算有效证据。
+最能把论文抬一档的是基准构建那一节：关键错误的可操作定义、标注者指引、一致性统计、以及两个错误都貌似有贡献的困难案例。
+那个定义才是论文真正的贡献；如果它被塞进附录，这篇会因方法被引用、因数据集被记住。
+
+**判决**: 弱接收 —— 问题表述确实更好、附带一个有用的人工标注基准，但被"LLM 判断层层堆叠"且没有对照环境本就支持的反事实重跑基线所拖累。
+
+## 要点总结
+
+不管你关不关心 agent 调试，这些值得偷：
+
+- **给任何根因分析加一道存活检查。**
+可泛化的动作是：枚举候选故障，然后对每个问"它在结束前被撤销了吗？"
+这直接适用于告警分级（丢掉自愈的告警）、flaky 测试分析、事故复盘、日志异常检测。
+大多数检测器报告症状，几乎没有一个检查症状是否持续。
+在现成检测器上加一遍前向扫描很便宜，且会明显减少假根因。
+
+- **把检测和归因拆成两遍。**
+把"这错了吗"和"这重要吗"塞进同一次判断，正是裁判过度指责早期步骤的原因。
+两遍用不同的上下文窗口——检测向后看，归因向前看——这个模式可迁移到任何时序诊断任务。
+
+- **非均匀上下文分辨率优于截断或摘要。**
+尺子处（规格、约束）保原文，审判点保原文，只压中间。
+如果你在做任何长上下文裁判或检索增强评测器，这个布局比"全部摘要"或"保留最后 k 步"是更好的默认值。
+
+- **强制证据引用作为幻觉刹车。**
+要求裁判点名它认为被违反的指令或被矛盾的观测，是一个 prompt 层的廉价约束，能压制结果偏置推理（"它失败了，所以这里一定错"）。
+凡是让 LLM 评估某个它已知结局的东西，都用得上。
+
+- **一个可复用的框架：关键性是反事实的，所以要用反事实来验证。**
+如果环境支持状态重置，"这一步是否重要"最强的标签就是修好它从那里重跑。
+哪怕只有一个小规模的反事实验证子集，也能让人工标注基准可信度大幅提升。
+这是我会在 TrajErrBench 上第一个跑的检查。
+:::
