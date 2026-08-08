@@ -1,0 +1,408 @@
+---
+title:
+  en: "Making VARMA Usable Again: Fixed-Size Statistics, Guaranteed Stability, No T in the Inner Loop"
+  zh: "让 VARMA 重新可用：定长统计量、天生稳定的参数化、内层循环里没有 T"
+description:
+  en: "VARMA models were abandoned above a handful of dimensions because every likelihood evaluation costs a pass over the data and the fits often come back non-invertible. This paper compresses the data once into autocovariances, reparametrizes so stationarity and invertibility hold by construction, and makes each optimizer step independent of series length."
+  zh: "VARMA 一直被认为维度稍高就不可用：每次似然评估都要扫一遍全部数据，拟合结果还经常不可逆。这篇论文把数据一次性压缩成自协方差，用偏自相关重参数化让平稳性与可逆性天生成立，从而让每步优化的代价与序列长度无关。"
+date: 2026-08-08
+tags: ["arxiv", "ai", "stat.ml", "cs.lg", "math.st"]
+image: "/arxiv-visuals/arxiv-scalable-estimation-of-varma-models.png"
+---
+:::en
+**Paper**: [2608.06340](https://arxiv.org/abs/2608.06340)
+**Authors**: Daniel Paulin, Victor Elvira
+**Categories**: stat.ML, cs.LG, math.ST
+
+## The Gap
+
+VARMA is the textbook-correct model for multivariate time series and almost nobody uses it. The reason is not ignorance, it is three concrete failures that compound.
+
+First, **cost per iteration**. Exact Gaussian likelihood for a VARMA goes through a Kalman filter or the innovations algorithm: one full pass over all $T$ observations, at $O(T d^3)$, for every single parameter proposal. Optimizers need hundreds to thousands of those.
+
+Second, **the feasible set is horrible**. Stationarity needs the AR polynomial's roots outside the unit circle; invertibility needs the same of the MA polynomial. That region is non-convex, has no cheap projection, and its boundary is exactly where the likelihood likes to wander. Conditional MLE routinely walks out and returns a non-invertible fit. A non-invertible MA is not a slightly worse model, it is a broken one: the recursion that reconstructs innovations from observations diverges, so the forecasts diverge with it.
+
+Third, **identifiability**. VARMA parameters are identified only up to an equivalence class, and the classical fix — echelon forms, Kronecker indices, scalar component models — is bookkeeping that practitioners refuse to maintain.
+
+So the field routed around the problem. Fit a VAR with many lags (Lütkepohl's default; Hannan–Rissanen's two-stage version makes it cheap) and accept that you now estimate $p d^2$ parameters to imitate what an MA term does with $d^2$. Or put a Minnesota prior on it and call it a Bayesian VAR. Or fit $d$ univariate ARMAs and give up cross-series dynamics. Or impose sparsity on VARMA coefficients and lose the likelihood's information along the way. Every one of these is a concession that the MA term, which is where the parsimony lives, is not worth the fight.
+
+```
+PROBLEM: VARMA is the parsimonious model, unusable past d ~ 5
+   |
+   +-- prior art .................. what it gives up
+   |     VAR(p), long lags .......... p*d^2 params, no MA parsimony
+   |     conditional / exact MLE .... O(T d^3) per iter, escapes to
+   |                                  non-invertible fits
+   |     echelon-form MLE ........... identification bookkeeping
+   |     component-wise ARMA ........ no cross-series dynamics
+   |     sparse VARMA ............... convex-ish, discards likelihood
+   v
+ASSUMPTION: the estimand is the VAR(oo) predictive representation,
+            not the VARMA parameters themselves
+   |        (so non-identifiability stops mattering)
+   v
+METHOD: [PACF reparam: stable by construction]
+      + [Gaussian prior, separate diag / off-diag scales]
+      + [loss touches data only via G_hat(0..L), Parseval/FFT]
+   |
+   v
+EVIDENCE: near-parametric consistency for the VAR(oo) fit (fixed d)
+        + d = 10..40 simulations stay near oracle forecast error
+        + retail / meteo / air-quality: >= VAR, BVAR, ARMA, sparse-VARMA
+   |
+   v
+CONCLUSION: per-iteration cost free of T, fits always invertible,
+            VARMA lands in the regime where people defaulted to VAR
+```
+
+## The Increment
+
+**One sentence**: Before, fitting a VARMA meant a pass over the data per optimizer step and a real chance of a divergent fit; after, the data is compressed once into a fixed-size block of autocovariances and every step is a stable-by-construction algebra problem whose cost never sees $T$ again.
+
+### Core Mechanism
+
+The framework has two clearly separated halves, and the separation is the whole idea. **The data half runs once.** Sample autocovariance matrices $\hat\{G\}(0), \hat\{G\}(1), \ldots, \hat\{G\}(L)$ up to a truncation lag $L$ are computed via FFT at near-linear cost in $T$. That block is a fixed-size object: $(L+1)d^2$ numbers regardless of whether $T$ is a thousand or ten million. Nothing downstream ever looks at $y_t$ again.
+
+**The model half runs every iteration and never touches $T$.** Unconstrained parameter matrices are pushed through a partial-autocorrelation map — the multivariate generalization of the Ansley–Kohn / Barndorff-Nielsen–Schou transform — which is a bijection onto the stationary region for the AR side and onto the invertible region for the MA side. Every point in the unconstrained space lands on a valid model. The optimizer literally cannot produce a non-invertible fit. From those polynomials the framework computes the truncated $VAR(\infty)$ coefficients $\Pi_1, \ldots, \Pi_L$ implied by $\Pi(z) = I - B(z)^\{-1\}A(z)$, and it does so in the frequency domain: evaluate the transfer function on $L$ Fourier frequencies, invert a $d \times d$ matrix at each, inverse-FFT back. Near-linear in $L$.
+
+Then Parseval closes the loop. The least-squares criterion for a linear predictor is a quadratic form in the autocovariances and the coefficients, and Parseval's identity says that lag-domain sum equals a frequency-domain integral, so it can be assembled at the same near-linear cost. That gives the implied residual covariance $S(\theta)$, from which two estimators fall out: a **regularized least-squares** fit that scores $S(\theta)$ against a weight matrix plus the Gaussian penalty, and a **covariance-marginalized MAP** that integrates the innovation covariance out under a conjugate prior, producing a $\log\det(S(\theta) + \Psi)$ objective that self-regularizes against degenerate covariance estimates. The priors are Minnesota-flavored: one scale for diagonal entries (a series' own history), a tighter one for off-diagonal (everyone else's).
+
+```
+  ONCE, cost ~ O(T log T)             EVERY ITERATION, cost free of T
+  -------------------------           --------------------------------
+  y_1 .. y_T                          theta (unconstrained matrices)
+      |                                        |
+      v  FFT                                   v  PACF map
+  G_hat(0), G_hat(1), .. G_hat(L)      A(z), B(z), roots outside the
+      |                                 unit circle BY CONSTRUCTION
+      |  fixed size: (L+1) d^2                  |
+      |                                         v  FFT over L freqs
+      |                                 Pi(z) = I - B(z)^\{-1\} A(z)
+      |                                         |  inverse FFT
+      |                                         v
+      |                                 Pi_1 .. Pi_L  (VAR(oo) trunc.)
+      |                                         |
+      +------> [ Parseval quadratic form ] <----+
+                          |
+                          v
+                  S(theta) = implied residual covariance
+                          |
+            +-------------+--------------+
+            v                            v
+   RLS: tr(W S(theta))          MAP: log det(S(theta) + Psi)
+            \                            /
+             +------------+-------------+
+                          |  + N(0, tau_diag) / N(0, tau_off) penalty
+                          v
+                  autodiff gradient step, repeat
+```
+
+**The metaphor: a tailor who casts a mannequin.** The old way is a tailor who calls the customer back in for every pin: try the jacket, mark it, customer goes home, tailor adjusts, customer returns. Hundreds of fittings, and each fitting costs a whole visit — that is $O(T)$ per iteration.
+
+This paper's tailor takes one careful set of measurements and casts a plaster mannequin. That cast is $\hat\{G\}(0..L)$: it is not the customer, but it contains everything about the customer that a jacket can respond to. Every subsequent fitting happens against the mannequin, at a cost that has nothing to do with how far away the customer lives.
+
+The pattern-cutting rules are the PACF reparametrization: this tailor works from a block pattern whose adjustments are jointed like a ball-and-socket, so no combination of dial settings can produce a garment that a human body cannot enter. The old tailor could — and regularly did — pin a shape that was geometrically impossible to wear, which is what a non-invertible fit is. The house block itself is the prior: absent evidence, drift toward a conventional cut, and be more conservative about the unusual seams (off-diagonal, cross-series) than the obvious ones (diagonal, own history). And Parseval is the tailor's trick of putting the mannequin on a turntable and taking one sweep of measurements as it rotates, instead of measuring every seam separately — a geometric identity guarantees the two totals agree, and the sweep is far faster.
+
+### Key Concepts
+
+- **Sufficient statistics for a linear predictor**: To score how well a linear forecast does, you never need the data — only its second moments. Concretely: predict tomorrow's temperature as a weighted sum of the last three days. The expected squared error is a quadratic function of those three weights whose coefficients are just the covariances among four numbers. Ten years of data or ten thousand, once you have the covariance table the scoring is identical work. A truncated $VAR(\infty)$ loss is exactly this, at scale, which is why $\hat\{G\}(0..L)$ is all the data the optimizer needs.
+
+- **Reparametrizing a nasty constraint set into a box**: Scalar intuition first. An AR(2) is stationary only when $(\phi_1, \phi_2)$ lies inside a particular triangle — an awkward region to optimize inside or sample from. But there is a smooth invertible map from the plain square $(-1,1)^2$ of **partial autocorrelations* onto that triangle. Optimize freely in the square; every point you visit is stationary. The multivariate version replaces "absolute value below one" with "singular values below one" on matrices, and the paper applies it to the MA polynomial too, which buys invertibility. The payoff is not just convenience: it removes an entire failure mode, because the optimizer has nowhere bad to go.
+
+- **Why non-invertibility destroys forecasts**: An MA term says today's observation carries yesterday's shock. To forecast you must run that backwards — infer the unobserved shocks from the observed series. If the MA polynomial's roots sit inside the unit circle, that backwards recursion multiplies errors by something bigger than one at each step, so the inferred shocks blow up and the forecast blows up with them. This is why the paper's claim that classical conditional MLE "returns non-invertible fits whose forecasts diverge" at $d = 40$ is not a rounding-error complaint. The fit is unusable, not merely suboptimal.
+
+- **Marginalizing the nuisance covariance instead of plugging it in**: Classical practice profiles out the innovation covariance $\Sigma$ by substituting its conditional MLE, which in high dimension is badly conditioned or singular. Integrating $\Sigma$ out under a conjugate prior instead turns the objective into a $\log\det$ of a regularized residual covariance. Same computational shape, but the estimator now pays a price for pretending some direction has zero noise.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+y_1 .. y_T                             y_1 .. y_T
+    |   re-read EVERY iteration             |   read ONCE
+    v                                       v
+[Kalman filter / innovations]          [ G_hat(0..L) ]  fixed size
+    |   O(T d^3) per step                   |
+    v                                       |   ( no T below this line )
+[ likelihood(theta) ]                       v
+    |                                  [theta] --PACF--> stable A(z),B(z)
+    v                                       |
+[constrained optimizer]                     v  FFT
+    |  boundary is where                [ Pi_1 .. Pi_L ]
+    |  the optimum hides                    |
+    v                                       v  Parseval
+[fit may be non-invertible]            [ loss(theta) ]
+    |                                       |  fit always invertible
+    v                                       v
+[forecasts diverge at d=40]            [near-oracle forecasts, d=10..40]
+
+    data and model are FUSED               data and model are SEPARATED
+    (each score needs the series)          (score needs only the cast)
+```
+
+From re-reading the series to interrogating a fixed-size cast of it, the core shift is **moving the data out of the optimization loop and moving the constraints out of the optimizer and into the parametrization**.
+
+## Expert Assessment
+
+**Problem choice**: A real gap, and an old one. VARMA has been "theoretically superior, practically abandoned" since the 1980s, and the abandonment was driven by exactly the three obstacles named here. Choosing to attack computation **and* the feasible set *and* identifiability simultaneously is the right diagnosis — fixing any one alone leaves the model unusable. One honest caveat about the framing: "per-iteration cost independent of $T$" is the headline, but for retail and macro data $T$ is a few hundred and was never the binding constraint. The claim earns its keep in two narrower places the abstract mentions almost in passing: rolling-window refits, where you re-run the fit hundreds of times, and long high-frequency series. The thing practitioners will actually care about is the guaranteed-invertible fit at $d = 40$, and that comes from the reparametrization, not from the $T$-independence.
+
+**Method maturity**: Clever assembly rather than a new primitive. The PACF stationarity map is Ansley–Kohn, recently revived for Bayesian VARs by Heaps; the frequency-domain evaluation of a quadratic form via Parseval is close kin to Whittle estimation, which has been $T$-independent-per-iteration for decades once you precompute the periodogram; the $VAR(\infty)$ target and the sample-autocovariance route to it are Hannan–Rissanen. The contribution is that the pieces fit together and the composite has theory. That is legitimate, but it puts a burden on the paper: it must state precisely what it buys over (a) a Whittle-likelihood VARMA on the same reparametrization, and (b) plain two-stage Hannan–Rissanen, which is cheap, consistent, and the obvious "simpler approach being overlooked." From the abstract I cannot tell whether that comparison is made head-on, and it is the first thing I would look for in the paper. Second reservation: the theory is stated for **fixed dimension**, while the selling point is $d = 10$ to $40$. The regime the experiments live in is not the regime the theorems cover. That is a common and forgivable gap, but it should be said out loud rather than left for the reader to notice.
+
+**Experimental integrity**: The baseline set is the right one — VAR, Bayesian VAR, component-wise ARMA, sparse VARMA — and the phrasing "match or beat" on three real datasets is refreshingly unoversold; papers that claim uniform wins on real forecasting data are usually hiding something. Two things to watch. The simulation comparison against conditional MLE is close to a straw man: the fact that an unconstrained optimizer leaves the invertible region is precisely the problem this method solves by construction, so of course it wins, and a reader should ask how the method fares against a **repaired* CMLE (root-flipping, or CMLE run on the same PACF parametrization) to separate "we fixed the constraint handling" from "our loss is better." And "stays close to the oracle" in simulation is generous by construction when the data-generating process is itself a VARMA — the interesting question is misspecification, which the abstract does not mention. I would also want $T$ reported alongside $d$; the difficulty of $d = 40$ depends entirely on it.
+
+**Writing quality**: The abstract is unusually good — it names the obstacles, the ingredients, the theory, and the empirical scope without padding, which is rarer than it should be. The corner I suspect was cut is identifiability. The framework does not **solve* non-identifiability, it *sidesteps* it by declaring the estimand to be the $VAR(\infty)$ predictive representation, which is identified even when the VARMA parameters are not. That is a good move and arguably the paper's sharpest conceptual choice, but the abstract lists identifiability as an obstacle and then never explains that the answer is "we changed the target." Rewriting that discussion, and placing the method explicitly on the map next to Whittle estimation and Hannan–Rissanen, is the single edit that would raise the whole paper a level.
+
+**Verdict**: weak accept — a well-engineered, theoretically backed synthesis that genuinely makes an abandoned model class usable, held back from a stronger rating by theory that does not cover the advertised regime and an unclear delta against Whittle-type and Hannan–Rissanen estimators.
+
+## Takeaways
+
+Four things transfer well beyond VARMA:
+
+**Split the loss into a data compression pass and a model pass.** Any objective that touches the data only through second moments — linear predictors, Gaussian likelihoods, stationary-kernel GPs, linear state-space models — can be rewritten so the optimizer sees a fixed-size statistic instead of the dataset. Ask of any iterative fit you own: what is the smallest object the loss actually needs, and can I compute it once? Often it is much smaller than the data and nobody checked.
+
+**Prefer reparametrization to constrained optimization.** If your feasible set is defined by a spectral or root condition — stable linear RNNs and SSM layers, controller synthesis, covariance structure, copula parameters — look for a smooth bijection from an unconstrained box onto the feasible set before you reach for projections, penalties, or rejection sampling. You get free autodiff, no boundary pathologies, and, importantly, you eliminate a failure mode rather than mitigating it. The PACF construction specifically is a reusable tool: it handles "all roots outside the unit circle" for matrix polynomials.
+
+**When parameters are unidentified, change the estimand to something that is.** Rather than imposing canonical forms to make parameters unique, target the identified functional you actually care about — here the predictive filter. This framing works anywhere over-parametrized models meet inference: you often do not need parameter identifiability, you need identifiability of the thing you will use.
+
+**Integrate out nuisance covariances instead of plugging in their MLEs.** The resulting $\log\det$ objectives cost the same and stop the estimator from claiming a direction has zero noise. Pair it with structured shrinkage: separate prior scales for diagonal and off-diagonal blocks is a one-line change that encodes "a series' own past is more informative than its neighbors'," and that asymmetry is real in almost every multivariate system.
+
+One caution to steal along with the ideas: precomputed sufficient statistics are only sufficient for the loss you committed to. The moment you want a robust loss, a non-Gaussian likelihood, or heteroskedastic weighting, the compression may no longer be lossless. That constraint is the price of the speedup, and it is worth being explicit about before adopting the pattern.
+:::
+
+:::zh
+**论文**: [2608.06340](https://arxiv.org/abs/2608.06340)
+**作者**: Daniel Paulin, Victor Elvira
+**分类**: stat.ML, cs.LG, math.ST
+
+## 缺口
+
+VARMA 是多元时间序列教科书里"正确"的模型，却几乎没人真用。
+原因不是无知，而是三个互相叠加的具体失败。
+
+**第一，每步迭代太贵。**
+VARMA 的精确高斯似然要走 Kalman 滤波或 innovations 算法：每评估一次参数，就要把 $T$ 个观测全扫一遍，代价 $O(T d^3)$。
+优化器需要成百上千次这样的评估。
+
+**第二，可行域形状极糟。**
+平稳性要求 AR 多项式的根在单位圆外，可逆性对 MA 多项式要求同样的事。
+这个区域非凸、没有便宜的投影算子，而似然的最优点偏偏喜欢贴着它的边界游走。
+条件极大似然经常直接走出去，返回一个不可逆的拟合。
+不可逆的 MA 不是"稍差一点的模型"，而是坏掉的模型：从观测反推新息的递推会发散，预测跟着一起发散。
+
+**第三，可识别性。**
+VARMA 参数只在等价类意义下可识别，而经典解法——echelon 形式、Kronecker 指标、标量分量模型——是一堆实践者拒绝维护的记账工作。
+
+于是整个领域绕开了它。
+要么拟合一个滞后很多阶的 VAR（Lütkepohl 的默认选择，Hannan–Rissanen 两步法让它变便宜），代价是用 $p d^2$ 个参数去模仿 MA 项用 $d^2$ 个参数就能表达的东西。
+要么加 Minnesota 先验，叫它 Bayesian VAR。
+要么拟合 $d$ 个一元 ARMA，放弃跨序列动态。
+要么给 VARMA 系数加稀疏约束，代价是丢掉似然携带的信息。
+每一种都是同一个让步：MA 项——也就是简约性所在之处——不值得为它打这场仗。
+
+```
+PROBLEM: VARMA 是最简约的模型, 但 d ~ 5 以上就不可用
+   |
+   +-- 已有方法 ................ 放弃了什么
+   |     长滞后 VAR(p) .......... p*d^2 个参数, 无 MA 简约性
+   |     条件 / 精确 MLE ........ 每步 O(T d^3), 逃到不可逆区域
+   |     echelon 形式 MLE ....... 识别性记账, 脆弱
+   |     逐分量 ARMA ............ 没有跨序列动态
+   |     稀疏 VARMA ............. 接近凸, 但丢掉似然信息
+   v
+ASSUMPTION: 估计目标是 VAR(oo) 预测表示, 而非 VARMA 参数本身
+   |         (于是不可识别性不再重要)
+   v
+METHOD: [PACF 重参数化: 天生稳定]
+      + [高斯先验, 对角 / 非对角分开尺度]
+      + [损失只通过 G_hat(0..L) 接触数据, Parseval/FFT 求值]
+   |
+   v
+EVIDENCE: VAR(oo) 拟合的近参数速率 (固定维数)
+        + d = 10..40 模拟贴近 oracle 预测误差
+        + 零售 / 气象 / 空气质量: >= VAR, BVAR, ARMA, 稀疏 VARMA
+   |
+   v
+CONCLUSION: 每步代价与 T 无关, 拟合永远可逆,
+            VARMA 进入了此前只能用 VAR 的问题规模
+```
+
+## 增量
+
+**一句话**：以前拟合 VARMA 意味着每步优化扫一遍数据、还很可能拿到一个发散的拟合；现在数据被一次性压缩成定长的自协方差块，之后每一步都是一个"天生稳定"的代数问题，代价再也看不到 $T$。
+
+### 核心机制
+
+框架分成两个界限分明的半边，而这个分离本身就是全部想法。
+
+**数据那半边只跑一次。**
+用 FFT 以近线性代价算出截断到滞后 $L$ 的样本自协方差矩阵 $\hat\{G\}(0), \hat\{G\}(1), \ldots, \hat\{G\}(L)$。
+这个块是定长对象：无论 $T$ 是一千还是一千万，都是 $(L+1)d^2$ 个数。
+之后的一切都不再看一眼 $y_t$。
+
+**模型那半边每次迭代都跑，但从不接触 $T$。**
+无约束的参数矩阵被推过一个偏自相关映射——Ansley–Kohn / Barndorff-Nielsen–Schou 变换的多元推广——它在 AR 一侧是到平稳域的双射，在 MA 一侧是到可逆域的双射。
+无约束空间里的每一个点都落在一个合法模型上。
+优化器从原理上就无法产出不可逆的拟合。
+从这些多项式出发，框架计算 $\Pi(z) = I - B(z)^\{-1\}A(z)$ 蕴含的截断 $VAR(\infty)$ 系数 $\Pi_1, \ldots, \Pi_L$，而且是在频域做：在 $L$ 个 Fourier 频率上求转移函数，每个频率做一次 $d \times d$ 求逆，再逆 FFT 回来。
+对 $L$ 近线性。
+
+最后由 Parseval 收口。
+线性预测器的最小二乘准则是自协方差与系数的二次型，而 Parseval 恒等式说这个滞后域求和等于一个频域积分，于是能以同样的近线性代价装配出来。
+由此得到蕴含的残差协方差 $S(\theta)$，再分出两个估计量：一个**正则化最小二乘**，把 $S(\theta)$ 对一个权重矩阵打分再加高斯罚项；一个**协方差边缘化 MAP**，在共轭先验下把新息协方差积掉，得到 $\log\det(S(\theta) + \Psi)$ 形式的目标，自动惩罚退化的协方差估计。
+先验带着 Minnesota 味道：对角项（序列自身历史）一个尺度，非对角项（别人的历史）用更紧的尺度。
+
+```
+  只做一次, 代价 ~ O(T log T)          每次迭代, 代价与 T 无关
+  ---------------------------          ------------------------------
+  y_1 .. y_T                           theta (无约束矩阵)
+      |                                        |
+      v  FFT                                   v  PACF 映射
+  G_hat(0), G_hat(1), .. G_hat(L)       A(z), B(z), 根天生落在
+      |                                  单位圆之外
+      |  定长: (L+1) d^2                        |
+      |                                         v  在 L 个频率上 FFT
+      |                                 Pi(z) = I - B(z)^\{-1\} A(z)
+      |                                         |  逆 FFT
+      |                                         v
+      |                                 Pi_1 .. Pi_L  (VAR(oo) 截断)
+      |                                         |
+      +------> [ Parseval 二次型 ] <-------------+
+                          |
+                          v
+                  S(theta) = 蕴含残差协方差
+                          |
+            +-------------+--------------+
+            v                            v
+   RLS: tr(W S(theta))          MAP: log det(S(theta) + Psi)
+            \                            /
+             +------------+-------------+
+                          |  + N(0, tau_diag) / N(0, tau_off) 罚项
+                          v
+                  自动微分梯度步, 重复
+```
+
+**核喻：会先做人体模型的裁缝。**
+旧办法是这样的裁缝：每插一根别针都要把客人叫回来。
+试穿、标记、客人回家、裁缝改、客人再来。
+几百次试衣，每次都要一整趟路程——这就是每步 $O(T)$。
+
+这篇论文的裁缝只量一次，然后翻制一个石膏人体模型。
+这个模具就是 $\hat\{G\}(0..L)$：它不是客人，但它包含了一件外套所能响应的、关于客人的全部信息。
+之后所有试衣都在模具上完成，代价与客人住多远毫无关系。
+
+裁剪规则就是 PACF 重参数化：这位裁缝用的原型样板，它的每个可调处都是球窝关节式的，任何一组旋钮设置都不可能做出人体钻不进去的衣服。
+旧裁缝可以——而且经常——别出一个几何上根本穿不上的形状，那就是不可逆拟合。
+样板本身就是先验：没有证据时向常规版型回缩，而且对不常见的接缝（非对角、跨序列）比对显然的接缝（对角、自身历史）更保守。
+而 Parseval 是这位裁缝的另一个手法：把模具放在转台上转一圈做一次扫掠测量，而不是逐条缝去量——一个几何恒等式保证两种量法总数相同，而扫掠快得多。
+
+### 关键概念
+
+- **线性预测器的充分统计量**：给一个线性预测打分，你从来不需要数据，只需要它的二阶矩。
+  具体点：用过去三天的加权和预测明天气温。
+  期望平方误差是这三个权重的二次函数，而它的系数不过是四个数之间的协方差。
+  十年数据还是一万年数据，一旦有了协方差表，打分的工作量一模一样。
+  截断 $VAR(\infty)$ 损失正是这件事的放大版，所以 $\hat\{G\}(0..L)$ 就是优化器需要的全部数据。
+
+- **把糟糕的约束集重参数化成一个方盒**：先看标量直觉。
+  AR(2) 只在 $(\phi_1, \phi_2)$ 落在某个三角形内部时平稳——在里面做优化或采样都很别扭。
+  但存在一个从普通方形 $(-1,1)^2$（*偏自相关*的空间）到那个三角形的光滑可逆映射。
+  在方形里自由优化，走到的每一点都是平稳的。
+  多元版把"绝对值小于一"换成矩阵的"奇异值小于一"，而本文把它也用在 MA 多项式上，从而买到可逆性。
+  好处不只是方便：它整整消掉了一个失败模式，因为优化器无处可坏。
+
+- **为什么不可逆会摧毁预测**：MA 项说的是今天的观测里带着昨天的冲击。
+  要预测就必须把这件事倒着跑——从观测里反推未观测到的冲击。
+  如果 MA 多项式的根落进单位圆内，这个倒推递推每一步都把误差乘上一个大于一的数，于是推出来的冲击炸掉，预测跟着炸掉。
+  所以本文说经典条件 MLE 在 $d = 40$ 时"返回不可逆拟合、预测发散"，不是在抱怨小数点后几位。
+  那个拟合是不能用，而不是次优。
+
+- **把讨厌的协方差积掉，而不是代入估计**：经典做法是把新息协方差 $\Sigma$ 用其条件 MLE 代入消掉，而高维下这个估计条件数极差甚至奇异。
+  改成在共轭先验下把 $\Sigma$ 积出去，目标就变成一个正则化残差协方差的 $\log\det$。
+  计算形状不变，但估计量现在要为"假装某个方向噪声为零"付出代价。
+
+## 框架转变
+
+```
+之前（主流方法）：                      之后（本文方法）：
+
+y_1 .. y_T                             y_1 .. y_T
+    |   每次迭代重读                        |   只读一次
+    v                                       v
+[Kalman 滤波 / innovations]            [ G_hat(0..L) ]  定长
+    |   每步 O(T d^3)                       |
+    v                                       |   ( 这条线以下没有 T )
+[ likelihood(theta) ]                       v
+    |                                  [theta] --PACF--> 稳定 A(z),B(z)
+    v                                       |
+[带约束的优化器]                             v  FFT
+    |  最优点藏在边界上                  [ Pi_1 .. Pi_L ]
+    v                                       v  Parseval
+[拟合可能不可逆]                        [ loss(theta) ]
+    |                                       |  拟合永远可逆
+    v                                       v
+[d=40 时预测发散]                       [d=10..40 贴近 oracle]
+
+    数据与模型是"焊在一起"的               数据与模型被"切开"了
+    (每次打分都要碰序列)                   (打分只需要那个模具)
+```
+
+一句话：从"每步重读序列"到"只审问一个定长模具"，核心转变是**把数据搬出优化循环，把约束从优化器里搬进参数化本身**。
+
+## 专家评审
+
+**选题眼光**：真缺口，而且是老缺口。
+VARMA 自 1980 年代起就处在"理论更优、实践弃用"的状态，而弃用的驱动因素恰好就是这里点出的三条。
+选择同时进攻计算、可行域和可识别性是正确的诊断——只修其中任何一条，模型依然不可用。
+关于表述有一个诚实的保留：标题卖点是"每步代价与 $T$ 无关"，但零售和宏观数据的 $T$ 只有几百，$T$ 从来不是瓶颈。
+这个卖点真正兑现的是摘要里几乎一笔带过的两个更窄的场景：滚动窗口重拟合（要重跑几百次），以及长的高频序列。
+实践者真正会在意的是 $d = 40$ 下"保证可逆"的拟合，而这来自重参数化，不是来自与 $T$ 无关。
+
+**方法成熟度**：聪明的组装，而非新的原语。
+PACF 平稳性映射是 Ansley–Kohn，最近被 Heaps 用在 Bayesian VAR 上复活；用 Parseval 在频域算二次型与 Whittle 估计是近亲，而后者只要预先算好周期图，几十年来就是"每步与 $T$ 无关"的；$VAR(\infty)$ 目标和用样本自协方差逼近它是 Hannan–Rissanen。
+贡献在于这些零件拼得起来，而且复合体有理论。
+这是正当的，但它给论文压上了一个义务：必须正面说明相对于 (a) 同样用这套重参数化的 Whittle 似然 VARMA，(b) 便宜又一致、也是最显然"被忽略的更简单方法"的两步 Hannan–Rissanen，各自买到了什么。
+从摘要看不出这个对比是否被正面处理，而这是我翻开正文第一件要找的东西。
+第二个保留：理论是在**固定维数**下陈述的，而卖点是 $d = 10$ 到 $40$。
+实验所在的机制不是定理覆盖的机制。
+这在文献里很常见、也可以原谅，但应该明说，而不是留给读者自己发现。
+
+**实验诚意**：基线集合选得对——VAR、Bayesian VAR、逐分量 ARMA、稀疏 VARMA——而三个真实数据集上用"match or beat"这种措辞是难得的不夸张；在真实预测数据上声称全面碾压的论文通常有事瞒着。
+两点需要警惕。
+模拟里跟条件 MLE 的比较接近稻草人：无约束优化器会走出可逆域，这恰恰是本方法从构造上解决掉的问题，赢是必然的；读者应该问的是，跟一个**修好的** CMLE（翻根，或者把 CMLE 跑在同一套 PACF 参数化上）相比如何，才能把"我们修好了约束处理"和"我们的损失更好"分开。
+而当数据生成过程本身就是 VARMA 时，"贴近 oracle"从构造上就很宽松——有意思的问题是误设定，而摘要没提。
+我也想看到 $T$ 与 $d$ 一起报告；$d = 40$ 到底有多难，完全取决于它。
+
+**写作功力**：摘要写得相当好——把障碍、配料、理论、实证范围都点了，没有注水，这比应该的更少见。
+我怀疑被偷懒的地方是可识别性。
+这个框架并没有*解决*不可识别性，而是*绕过*它：把估计目标声明为 $VAR(\infty)$ 预测表示，后者在 VARMA 参数不可识别时依然可识别。
+这是个好棋，甚至可以说是全文最锋利的概念选择，但摘要把可识别性列为障碍之后，从未说明答案是"我们换了目标"。
+重写这一段讨论，并把方法明确摆到 Whittle 估计和 Hannan–Rissanen 旁边的地图上，是唯一一处能让整篇论文升一档的修改。
+
+**判决**：弱接收 —— 工程扎实、理论有支撑的综合，确实让一类被弃用的模型重新可用；扣分处在于理论没有覆盖它宣传的机制，以及相对 Whittle 类与 Hannan–Rissanen 估计量的增量交代不清。
+
+## 要点总结
+
+有四件事能迁移到 VARMA 之外：
+
+**把损失切成"数据压缩一次"和"模型每步一算"两段。**
+任何只通过二阶矩接触数据的目标——线性预测器、高斯似然、平稳核 GP、线性状态空间模型——都能改写成让优化器只看一个定长统计量而不是整个数据集。
+对你手上任何迭代拟合都可以问一句：这个损失真正需要的最小对象是什么，我能不能只算一次？
+它常常比数据小得多，而通常没人检查过。
+
+**优先重参数化，而不是带约束优化。**
+如果你的可行集是由谱条件或根条件定义的——稳定的线性 RNN 与 SSM 层、控制器综合、协方差结构、copula 参数——在动用投影、罚项或拒绝采样之前，先找一个从无约束方盒到可行集的光滑双射。
+你会白拿自动微分、没有边界病态，而且更重要的是，你消掉了一个失败模式而不是缓解它。
+PACF 构造本身就是一个可复用工具：它处理矩阵多项式的"所有根在单位圆外"。
+
+**参数不可识别时，就把估计目标换成可识别的东西。**
+与其加规范形式让参数唯一，不如直接瞄准你真正在意的那个可识别函数——这里是预测滤波器。
+这个框架在任何"过参数化模型遇上推断"的地方都成立：你往往不需要参数可识别，你需要的是你要用的那个东西可识别。
+
+**把讨厌的协方差积掉，而不是代入它的 MLE。**
+得到的 $\log\det$ 目标代价相同，却能阻止估计量宣称某个方向噪声为零。
+再配上结构化收缩：对角块和非对角块用分开的先验尺度，是一行改动，却编码了"序列自身的过去比邻居更有信息量"，而这种不对称在几乎每个多元系统里都真实存在。
+
+顺手也该偷走一条警告：预先算好的充分统计量，只对你当初承诺的那个损失充分。
+一旦你想换稳健损失、非高斯似然、或异方差加权，这个压缩可能就不再无损。
+这个约束是加速的代价，采用这个模式之前值得先说清楚。
+:::

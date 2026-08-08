@@ -1,0 +1,482 @@
+---
+title:
+  en: "CalibForge: Stop Filtering Tasks, Start Tuning Them Against Solvers"
+  zh: "CalibForge：别再筛任务了，把任务对着求解器\"调音"
+description:
+  en: "Terminal-agent training data pipelines usually stop at 'does it run?'. CalibForge keeps probing candidate tasks with a pool of solvers and rewrites them until they land in a solver-relative learnable zone."
+  zh: "终端智能体的数据流水线通常只验证到\"能不能跑通\"。CalibForge 用一组强弱不同的求解器反复试探候选任务，并不断改写它，直到任务落进\"相对于求解器的可学习区间\"。"
+date: 2026-08-08
+tags: ["arxiv", "ai", "cs.lg", "cs.cl"]
+image: "/arxiv-visuals/arxiv-calibforge-adversarial-solver-calibration-for-scaling.png"
+---
+
+![Concept animation](/arxiv-visuals/calibforge-adversarial-solver-calibration-for-scaling/ConceptScene.gif)
+
+
+:::en
+**Paper**: [2608.06352](https://arxiv.org/abs/2608.06352)
+**Authors**: Fanzhe Meng, Guoxin Chen, Jiale Zhao, Shuang Sun, Zhiyu Lin, Wayne Xin Zhao, Ruihua Song, Ji-Rong Wen, Kai Jia
+**Categories**: cs.LG, cs.CL
+
+## The Gap
+
+Everyone building agentic training data right now has converged on roughly the same recipe: take a repo or a container image, have an LLM author a task plus a programmatic verifier, build the environment, and check that the whole thing executes end to end. SWE-smith, SWE-Gym, R2E-Gym, and the various Terminal-Bench-style synthesis pipelines all live in this family. The quality gate is *executability plus verifiability*: the Dockerfile builds, the test suite runs, the grader returns a clean pass/fail.
+
+That gate answers exactly one question — is this task well-formed? It says nothing about whether the task is *useful to train on*. A verified task can be trivially solved by any model that can type `ls`, or it can be unsolvable by anything short of a human expert with a week. Both are near-worthless as supervision: the first yields no gradient signal, the second yields no successful rollouts at all in an RL setting. The field's usual patch is post-hoc filtering — run the model, keep tasks whose pass rate falls in some band, throw the rest away. That works, but it burns most of what you generated, and it treats difficulty as something you discover by luck rather than something you can build.
+
+CalibForge's claim is that difficulty isn't a property of a task at all. It's a *relation* between a task and a solver. So instead of measuring and discarding, measure and **rewrite**.
+
+```
+  PROBLEM
+  [agent training needs tasks that are solvable AND
+   appropriately hard -- not just well-formed]
+      |
+      v
+  [existing pipelines stop at: does it build? does it verify?]
+      |
+      +--> blind spot: "hard" is a relation, not an attribute
+      |    so a verified task tells you nothing about its
+      |    training value
+      |
+      v
+  ASSUMPTION
+  [ value(task) = f(task, solver) ]
+  [ therefore: probe solvers, then edit the task ]
+      |
+      v
+  METHOD ..... CalibForge
+      |
+      +-- multi-solver calibration : chase pool disagreement
+      +-- contrastive calibration  : force strong-pass / weak-fail
+      |
+      +-- shared anchor: some solver must have actually passed it
+      |
+      v
+  EVIDENCE
+  [ 5,431 calibrated tasks                                    ]
+  [ ablation: calibrated > author+validate only                ]
+  [ ablation: calibrated > ordinary single-solver feedback     ]
+  [ 32.58% / 47.57% on Terminal-Bench 2.0                      ]
+  [ max deltas vs base: +24.71 TB2.0, +27.68 SWE-bench Pro,    ]
+  [                     +30.04 Doc2Repo                        ]
+      |
+      v
+  CONCLUSION
+  [ solver-relative learnability is a *constructible* target,
+    and it transfers off-distribution ]
+```
+
+## The Increment
+
+**One sentence**: Before, a synthesized agent task was validated once for executability and then accepted or filtered on pass rate; after, the task is a mutable artifact that gets repeatedly probed by a heterogeneous solver pool and edited until its pass/fail signature matches a targeted difficulty relation.
+
+### Core Mechanism
+
+The front half is conventional. Start from a seed environment — a repo, a doc set, a container — and have an authoring model produce the triple that any executable task needs: a natural-language instruction, a programmatic verifier, and an environment spec. Build it, run it, confirm the verifier discriminates. Anything that fails here is dropped, same as everywhere else.
+
+The new part is the loop that follows. The candidate task is handed to a *pool* of solvers spanning a capability range — different base models, different scaffolds, different budgets — and each produces verified rollouts. What comes back is not a scalar difficulty but a **pass/fail signature** across the pool. The signature is read as a diagnosis. All-pass means the task is under-specified or trivial. All-fail means it is either genuinely too hard or, more often, broken in a way executability checks didn't catch — an ambiguous instruction, a verifier that demands an exact string no reasonable agent would produce. Anything in between is potentially in-band.
+
+Two calibration objectives sit on top of this signature. **Multi-solver calibration** simply targets disagreement: keep editing until the pool splits. It's cheap to specify and gives you tasks that sit at the frontier of **some* model in the pool. **Contrastive calibration** is sharper: you nominate a strong solver and a weak solver and demand the specific relation **strong passes, weak fails*. That pins the task to a chosen difficulty band rather than wherever the pool happens to disagree. When the signature doesn't match the target, a revising model edits the task — tightening or loosening the instruction, adding a required intermediate step, adjusting what the verifier accepts — and the whole thing goes back through the executable check and another round of rollouts. Both strategies share one hard constraint that the paper calls anchoring in *demonstrated* solvability: a task is never kept on the theory that it's solvable. Someone in the pool has to have actually solved it.
+
+```
+   [ seed: repo / doc set / container image ]
+                    |
+                    v
+        +--------------------------+
+        | authoring model          |
+        | instruction + verifier   |
+        | + environment spec       |
+        +--------------------------+
+                    |
+                    v
+        +--------------------------+   fail
+        | executable validation    |--------> drop
+        +--------------------------+
+                    | pass (it builds, it verifies)
+                    v
+  ==============  CALIBRATION LOOP  ==============
+                    |
+                    v
+     +--------------------------------------+
+     | solver pool rollouts                 |
+     |   S_strong    S_mid    S_weak  ...   |
+     +--------------------------------------+
+                    |
+                    v
+          read the pass/fail signature
+                    |
+        +-----------+-----------+--------------+
+        |           |           |              |
+     all pass    all fail   disagreement    strong pass
+        |           |        in pool        + weak fail
+        v           v           |              |
+  [ too easy ] [ too hard   ]   +------+-------+
+        |      [ or broken   ]          |
+        |           |                   v
+        +-----+-----+              ACCEPT ..> corpus
+              |                          (5,431 tasks)
+              v
+     +-------------------------+
+     | revising model          |
+     | add a crux / disambig.  |
+     | / retune the verifier   |
+     +-------------------------+
+              |
+              +----> back to executable validation
+                     (bounded rounds, then give up)
+
+  anchor rule: never keep a task unless at least one
+  solver in the pool has demonstrably passed it
+```
+
+Think of it as a **climbing gym route-setter**, and the mapping is tight enough to carry the whole method. The authoring model is the setter bolting holds onto a blank wall. Executable validation is checking that the holds are actually screwed in and the top anchor exists — necessary, and completely silent on whether the route is any good. The solver pool is the gym's regulars: a couple of V8 climbers, some V5s, a few beginners. You don't grade a route by staring at it; you put bodies on it and watch. Everyone flashes it means the route is boring and you add a crux. Nobody gets off the ground means either it's a V12 or you've set something that's not physically climbable by human anatomy — and the route-setter's instinct, exactly like this paper's, is to suspect the second before the first. The interesting route is the one where the V8 sends and the V5 falls at the third move: that's contrastive calibration, a designated strong-pass/weak-fail relation. Multi-solver calibration is the lazier version — set for **any* split in the gym. And the anchoring rule is the setter's non-negotiable: a route doesn't get a grade on the board until someone has topped it, because a route nobody has climbed might be a great problem or might just be broken, and you cannot tell from the wall.
+
+### Key Concepts
+
+- **Solver-relative learnable zone**: There is no such thing as a "hard task" in the abstract, only a task that is hard **for a given solver*. "Print the current directory" is trivial for GPT-class agents and impossible for a bash-only script that doesn't know what `pwd` means. The learnable zone is the set of tasks a particular solver fails often enough to have something to learn but succeeds at often enough to generate a positive example. Concretely, if you're doing RL with verifiable rewards, a task at 0% pass rate produces zero reward signal forever and a task at 100% produces zero advantage — the useful mass is in the middle, and *where* the middle is moves as your model improves. CalibForge's move is to make that zone a design target you build toward rather than a filter you apply afterward.
+
+- **Adversarial solver calibration**: "Adversarial" here doesn't mean gradient attacks or perturbations. It means the task generator is optimizing **against* observed solver behavior: it looks at what the solvers did, finds where the task failed to separate them, and edits the task to create that separation. The adversary is the task, not a model. The closest familiar analogue is psychometric item calibration — a test writer pilots a question on real students, sees that 95% got it right, and rewrites it to discriminate better. Same loop, LLMs on both ends.
+
+- **Demonstrated vs. assumed solvability**: Most pipelines certify that a task is solvable **in principle* — a reference solution exists, or the verifier passes when you run the ground-truth patch. CalibForge insists on something stricter: an actual solver in the pool completed the task from the instruction alone, under the same conditions the trainee will face. This distinction does real work. A task can have a perfect reference solution and still be unsolvable from its instruction because the instruction omits a crucial detail, and no amount of executable validation will surface that. Requiring a demonstrated pass makes instruction-quality failures indistinguishable from difficulty failures — which is fine, because in both cases you want to rewrite.
+
+## Framework Shift
+
+```
+Before (mainstream):                 After (CalibForge):
+
+  generate task                        generate task
+       |                                    |
+       v                                    v
+  does it build? --no--> drop          does it build? --no--> drop
+       | yes                               | yes
+       v                                    v
+  does verifier work? --no--> drop     probe with solver pool
+       | yes                               |
+       v                            +------+------+---------+
+     KEEP                           |      |      |         |
+       |                          all    all    split /   target
+       v                          pass   fail   contrast  relation
+  (optional) measure pass          |      |         |         |
+  rate, filter out-of-band         v      v         v         v
+       |                        [ diagnose: too easy /   KEEP
+       v                          too hard / broken ]
+     train                            |
+                                      v
+  task = immutable            +----------------+
+  difficulty = discovered     | rewrite task   |
+  rejects = wasted           +----------------+
+                                      |
+                                      +--> re-probe (bounded)
+                                                 |
+                                                 v
+                                               train
+
+                                     task = mutable artifact
+                                     difficulty = designed
+                                     rejects = raw material
+```
+
+One sentence: from *validating tasks against a specification* to *calibrating tasks against a population of solvers*, the core shift is that difficulty stops being a discovered property to filter on and becomes an editable target to optimize toward.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, and well-timed. Anyone who has actually run RLVR on synthesized agent tasks has hit this wall — you generate 50k verified tasks, discover 80% are trivial and 15% are impossible, and train on the remaining scraps. The field's trajectory is clear: 2023 was "can we generate verifiable tasks at all", 2024–25 was "can we generate them at scale", and this paper is squarely in the "can we generate them at the **right difficulty*" phase. That's the correct next question. The reframing of difficulty as a relation rather than an attribute is not deep — it's obvious once stated — but naming it and building a pipeline around it is a genuine contribution, and the contrastive strong-pass/weak-fail formulation is a cleaner objective than the pass-rate-band heuristic most people use.
+
+**Method maturity**: Clever in framing, mostly engineering in execution. The individual pieces all exist: LLM-as-reviser is Evol-Instruct, pass-rate targeting is standard curriculum filtering, multi-model disagreement as a difficulty proxy shows up in active learning and in data-selection work. The increment is wiring them into a closed loop with a demonstrated-solvability anchor. What worries me is the cost question the abstract sidesteps entirely. Every calibration round costs a full set of agent rollouts across the pool — that is **expensive*, and 5,431 tasks is a modest corpus, which smells like a compute ceiling rather than a design choice. The obvious simpler alternative is brute over-generation plus pass-rate filtering at matched compute: generate 10x the candidates, run one cheap probe each, keep the in-band ones, discard the rest. Revision only wins if editing a near-miss is cheaper than generating a fresh candidate that happens to land in-band. I would want that comparison as a headline experiment, and from the abstract it doesn't appear to be one. The ablation against "ordinary single-solver feedback" is the right control but a weaker one — it holds the loop fixed and varies the signal, which shows the pool helps without showing the loop was worth building.
+
+**Experimental integrity**: The ablations are the honest part — comparing against authoring-and-validation-only and against single-solver feedback is exactly what a skeptic would ask for, and reporting both calibration strategies separately is good practice. The headline deltas are where I'd apply pressure. "+24.71 points over the corresponding base model" on Terminal-Bench 2.0 implies a base around 8%, and base models evaluated in an agentic harness they were never trained for post absurdly low numbers for reasons that have little to do with capability — tool-call formatting, not knowing when to stop, failing to read the environment. A large chunk of any 25-point gain is the model learning the harness. That's a real and useful effect, but it is not evidence that **calibration* did the work; only the ablation deltas speak to that, and the abstract doesn't give their magnitude. The 47.57% on TB2.0 is a respectable number for a trained open model without being frontier. Two further flags: Doc2Repo is not a benchmark I recognize as an established third-party evaluation, and a +30-point gain on a benchmark plausibly aligned with the authors' own seed distribution is much weaker evidence than the SWE-bench Pro number. And there's an unaddressed circularity — tasks calibrated against a specific solver pool encode that pool's idiosyncratic weaknesses, so transfer claims lean entirely on the off-distribution results holding up. SWE-bench Pro's +27.68 is the load-bearing number in the whole paper.
+
+**Writing quality**: The abstract is precise about the framing and evasive about the mechanism. "Revise candidate tasks" is doing enormous unexplained work — what edit operations does the reviser have? Is it free-form rewriting, or a constrained set of moves like adding a subgoal or perturbing the verifier? How many rounds before giving up, and what fraction of candidates ever converge? That convergence rate is arguably the single most informative statistic about whether this approach is practical, and it's absent. If I could have one section rewritten, it'd be the revision operator with a yield-and-cost table: candidates in, rounds spent, tasks out, GPU-hours per accepted task. That would turn a plausible-sounding pipeline into something a reader can decide to adopt. Secondarily, the paper needs to be far more careful separating harness-learning gains from capability gains in how it presents the base-model deltas.
+
+**Verdict**: weak accept — the reframing is correct and the ablations are the right ones, but the cost accounting is missing and the headline numbers lean on base-model comparisons that overstate what calibration itself contributes.
+
+## Takeaways
+
+Things worth stealing:
+
+- **Read the pass/fail signature as a diagnosis, not a score.** The genuinely reusable trick is that all-fail is more often a **broken task* than a hard one. If you're generating verifiable tasks and throwing away everything at 0% pass, you're discarding your best bug reports about your own generator. Route those back into revision instead.
+
+- **Contrastive difficulty targeting beats pass-rate bands.** "Strong model passes, weak model fails" is a cheaper and more stable specification than "pass rate between 20% and 80%", because it needs two rollouts instead of a reliable rate estimate, and it stays meaningful as your models change — you just swap which model plays the strong role. Directly transferable to math, reasoning, or any RLVR dataset construction.
+
+- **Demanding a demonstrated pass, not a reference solution.** Cheap and underused. If no solver can complete the task from the instruction alone, the instruction is broken, regardless of how clean your ground-truth patch is. This catches a class of underspecification that no amount of executable validation will.
+
+- **A weak model is a useful instrument, not just a bad solver.** Keeping a deliberately weak solver in the pool as a triviality detector is a nice inversion — you're using its failures as a difficulty floor.
+
+What *not* to take on faith: the assumption that revising a task is cheaper than generating a new one. Measure that in your own pipeline before committing to a calibration loop; if your generation cost is low and your rollout cost is high, plain over-generate-and-filter may still dominate.
+:::
+
+:::zh
+**论文**: [2608.06352](https://arxiv.org/abs/2608.06352)
+**作者**: Fanzhe Meng, Guoxin Chen, Jiale Zhao, Shuang Sun, Zhiyu Lin, Wayne Xin Zhao, Ruihua Song, Ji-Rong Wen, Kai Jia
+**分类**: cs.LG, cs.CL
+
+## 缺口
+
+现在做智能体训练数据的团队，套路基本一致：拿一个仓库或容器镜像，让 LLM 写出任务描述加一个程序化验证器，把环境构建起来，跑一遍确认端到端能通。
+SWE-smith、SWE-Gym、R2E-Gym，以及各种 Terminal-Bench 风格的合成流水线，都属于这一家。
+质量门槛就是「可执行 + 可验证」：Dockerfile 能构建，测试能跑，评分器能给出干净的通过/失败。
+
+问题在于，这道门槛只回答了一个问题——任务本身是否规范。
+它完全没有回答：这个任务值不值得拿来训练。
+一个通过验证的任务，可能任何会敲 `ls` 的模型都能做出来，也可能连人类专家花一周都搞不定。
+这两种在监督信号上都近乎无用：前者没有梯度，后者在 RL 设定下连一条成功轨迹都产不出。
+
+领域里的常规补丁是事后过滤——先跑模型，保留通过率落在某个区间的任务，其余丢掉。
+这能用，但代价是绝大部分生成物被浪费掉，而且它把难度当成一件靠运气发现的事，而不是一件可以主动构造的事。
+
+CalibForge 的主张是：难度根本不是任务的属性，而是任务与求解器之间的一种**关系**。
+所以不要「测量然后丢弃」，要「测量然后改写」。
+
+```
+  问题
+  [ 智能体训练需要既可解、难度又合适的任务,
+    而不只是"格式正确"的任务 ]
+      |
+      v
+  [ 现有流水线止步于: 能构建吗? 能验证吗? ]
+      |
+      +--> 盲区: "难"是一种关系, 不是一种属性
+      |    所以"通过验证"这件事本身
+      |    完全不告诉你它的训练价值
+      |
+      v
+  假设
+  [ value(task) = f(task, solver) ]
+  [ 因此: 先探测求解器, 再编辑任务 ]
+      |
+      v
+  方法 ..... CalibForge
+      |
+      +-- 多求解器校准 : 追求求解器池内部的分歧
+      +-- 对比式校准   : 强制"强模型过 / 弱模型挂"
+      |
+      +-- 共同锚点: 必须有某个求解器真的做出来过
+      |
+      v
+  证据
+  [ 5,431 条经校准的任务                              ]
+  [ 消融: 校准后 > 仅"撰写 + 验证"                    ]
+  [ 消融: 校准后 > 普通的单求解器反馈                  ]
+  [ Terminal-Bench 2.0 上 32.58% / 47.57%             ]
+  [ 相对基座最大提升: TB2.0 +24.71                    ]
+  [                   SWE-bench Pro +27.68            ]
+  [                   Doc2Repo +30.04                 ]
+      |
+      v
+  结论
+  [ "相对于求解器的可学习性"是一个可构造的目标,
+    而且能跨分布迁移 ]
+```
+
+## 增量
+
+**一句话**：以前，合成任务只做一次可执行性验证，然后按通过率决定留还是扔；现在，任务变成一个可变的工件，被强弱不同的求解器池反复试探，并持续改写，直到它的通过/失败模式匹配上你指定的难度关系。
+
+### 核心机制
+
+前半段是常规操作。
+从种子环境出发——一个仓库、一批文档、一个容器——让撰写模型产出可执行任务所需的三件套：自然语言指令、程序化验证器、环境规格。
+构建、运行、确认验证器有区分力。
+这一步挂掉的直接丢，跟别人一样。
+
+新东西在后面那个循环里。
+候选任务被交给一个能力跨度很大的求解器**池**——不同基座、不同脚手架、不同预算——每个都产出经过验证的轨迹。
+返回的不是一个难度标量，而是整个池子上的一张**通过/失败签名**。
+这张签名被当作诊断书来读。
+全过，说明任务过于简单或者指令泄露了答案。
+全挂，说明要么真的太难，要么——更常见——任务以可执行性检查抓不到的方式坏掉了：指令有歧义，或者验证器要求一个没有哪个合理智能体会输出的精确字符串。
+处于两者之间的，才可能落在区间内。
+
+签名之上挂着两种校准目标。
+**多求解器校准**只追求分歧：一直改，改到池子分裂为止。
+它规格简单，产出的任务位于池中*某个*模型的能力前沿。
+**对比式校准**更锋利：你指定一个强求解器和一个弱求解器，要求「强的过、弱的挂」这个具体关系成立。
+这把任务钉在你选定的难度带上，而不是随机落在池子恰好分歧的地方。
+当签名不匹配目标时，改写模型就动手编辑任务——收紧或放松指令、加一个必经的中间步骤、调整验证器接受的范围——然后整个东西回到可执行性检查，再跑一轮轨迹。
+两种策略共享一条硬约束，论文称之为锚定在**已被证实**的可解性上：绝不因为「理论上可解」而保留一个任务，必须有池里的某个求解器真的把它做出来过。
+
+```
+   [ 种子: 仓库 / 文档集 / 容器镜像 ]
+                    |
+                    v
+        +--------------------------+
+        | 撰写模型                 |
+        | 指令 + 验证器 + 环境规格 |
+        +--------------------------+
+                    |
+                    v
+        +--------------------------+   挂
+        | 可执行性验证             |--------> 丢弃
+        +--------------------------+
+                    | 过 (能构建, 能验证)
+                    v
+  ==============  校 准 循 环  ==============
+                    |
+                    v
+     +--------------------------------------+
+     | 求解器池跑轨迹                       |
+     |   S_strong    S_mid    S_weak  ...   |
+     +--------------------------------------+
+                    |
+                    v
+            读取通过/失败签名
+                    |
+        +-----------+-----------+--------------+
+        |           |           |              |
+      全过        全挂       池内分歧      强过+弱挂
+        |           |           |              |
+        v           v           +------+-------+
+   [ 太简单 ]  [ 太难 或 ]             |
+        |      [ 任务坏了 ]            v
+        |           |            接受 ..> 语料库
+        +-----+-----+                (5,431 条)
+              |
+              v
+     +-------------------------+
+     | 改写模型                |
+     | 加难点 / 消歧义 /       |
+     | 重调验证器              |
+     +-------------------------+
+              |
+              +----> 回到可执行性验证
+                     (轮数有上限, 超了就放弃)
+
+  锚定规则: 除非池中至少一个求解器
+  实际通过过, 否则绝不保留该任务
+```
+
+不妨把它想成**攀岩馆的定线员**，这个比喻紧到足以扛起整个方法。
+撰写模型就是往空白岩壁上拧岩点的定线员。
+可执行性验证就是检查岩点确实拧紧了、顶部挂片也装好了——必要，但对「这条线好不好」一个字都没说。
+求解器池就是岩馆里的常客：几个 V8 的高手、一堆 V5 的、几个新人。
+一条线的难度不是靠盯着墙看出来的，是把人放上去、看他们怎么摔出来的。
+
+所有人一次过，说明线太无聊，得加一个难点。
+所有人连脚都离不了地，那要么这是 V12，要么你设的这条线在人类解剖学上根本爬不了——而定线员的本能，跟这篇论文一模一样，是先怀疑后者。
+真正有价值的那条线，是 V8 的能完攀、V5 的在第三个动作掉下来：这就是对比式校准，一个指定的「强过 / 弱挂」关系。
+多求解器校准是懒一点的版本——只要岩馆里有人过有人挂就行。
+
+而锚定规则就是定线员那条不可谈判的原则：没人完攀过的线，不上难度榜。
+因为一条没人爬上去的线，可能是绝妙难题，也可能就是坏的，而你光看墙分辨不出来。
+
+### 关键概念
+
+- **相对于求解器的可学习区间（solver-relative learnable zone）**：抽象意义上不存在「困难任务」，只存在「对某个求解器而言困难的任务」。
+「打印当前目录」对 GPT 级智能体是白送分，对一个不知道 `pwd` 是什么的纯 bash 脚本则是不可能。
+可学习区间就是：这个特定求解器失败得足够多、有东西可学，同时成功得足够多、能产出正样本的那部分任务。
+具体到 RLVR 上：通过率 0% 的任务永远给不出奖励信号，100% 的任务优势恒为零，有用的质量全在中间——而这个「中间」在哪，会随着模型变强而移动。
+CalibForge 的动作，是把这个区间从「事后施加的过滤器」变成「事前瞄准的设计目标」。
+
+- **对抗式求解器校准（adversarial solver calibration）**：这里的「对抗」跟梯度攻击、扰动没关系。
+它指的是任务生成器在*针对*观测到的求解器行为做优化：看求解器做了什么，找出任务在哪里没能把它们区分开，然后编辑任务去造出这个区分。
+对抗方是任务，不是模型。
+最贴近的类比是心理测量学里的题目校准——出题人在真实学生身上试一道题，发现 95% 的人做对，于是重写它以提高区分度。
+同一个循环，只是两端都换成了 LLM。
+
+- **已证实可解 vs. 假定可解**：多数流水线证明的是任务**原理上*可解——存在参考解，或者把标准答案 patch 打上去验证器就过。
+CalibForge 要求更严：池中真有一个求解器，只凭指令、在受训模型将来面对的同等条件下，把任务完成了。
+这个区分是干实事的。
+一个任务可以有完美的参考解，却因为指令漏了关键信息而根本无法从指令出发解出来——而任何可执行性检查都发现不了这一点。
+要求「已证实通过」会让「指令质量问题」和「难度问题」变得无法区分——这没关系，因为两种情况下你要做的都是改写。
+
+## 框架转变
+
+```
+之前（主流方法）：                   之后（CalibForge）：
+
+  生成任务                            生成任务
+     |                                   |
+     v                                   v
+  能构建吗? --否--> 丢               能构建吗? --否--> 丢
+     | 是                                | 是
+     v                                   v
+  验证器有效吗? --否--> 丢           用求解器池探测
+     | 是                                |
+     v                          +--------+-----+---------+
+    保留                        |        |     |         |
+     |                        全过     全挂  出现分歧  命中
+     v                          |        |     |      目标关系
+  (可选) 测通过率,               v        v     v         |
+  区间外的过滤掉             [ 诊断: 太简单 /            v
+     |                        太难 / 任务坏了 ]        保留
+     v                                |
+    训练                              v
+                          +--------------------+
+  任务 = 不可变            | 改写任务           |
+  难度 = 碰运气发现        +--------------------+
+  被拒的 = 浪费掉                    |
+                                     +--> 重新探测(有轮数上限)
+                                                |
+                                                v
+                                              训练
+
+                                    任务 = 可变工件
+                                    难度 = 设计出来的
+                                    被拒的 = 原材料
+```
+
+一句话：从「拿任务对照规范做验证」到「拿任务对照一群求解器做校准」，核心转变是难度不再是一个靠过滤筛出来的既成属性，而变成一个可编辑、可瞄准的优化目标。
+
+## 专家评审
+
+**选题眼光**：真缺口，而且时机对。
+任何真在合成智能体任务上跑过 RLVR 的人都撞过这堵墙——生成了 5 万条通过验证的任务，结果发现 80% 白送、15% 根本不可能，只剩边角料能训。
+领域轨迹很清楚：2023 年是「能不能生成可验证任务」，2024–25 年是「能不能规模化生成」，这篇正好落在「能不能生成*难度对*的任务」这一阶段。
+这是正确的下一个问题。
+把难度重新框定为关系而非属性，这个洞见不深——说出来就是显然的——但把它命名并围绕它搭一条流水线，是实打实的贡献，而且「强过/弱挂」的对比式表述，比大多数人用的通过率区间启发式要干净。
+
+**方法成熟度**：框架上有巧劲，实现上基本是工程。
+零件全是现成的：LLM 当改写器是 Evol-Instruct，通过率瞄准是标准课程过滤，多模型分歧作为难度代理在主动学习和数据选择里都出现过。
+增量在于把它们接成一个带「已证实可解」锚点的闭环。
+
+我更在意的是摘要完全绕过的成本问题。
+每一轮校准都要在整个池子上跑一遍完整的智能体轨迹——这**很贵**，而 5,431 条是个不大的语料量，闻起来像算力天花板而不是设计选择。
+显然的更简单替代方案是等算力下的「暴力过量生成 + 通过率过滤」：多生成 10 倍候选，每个只跑一次便宜的探测，留下落在区间内的，其余丢掉。
+「改写」只有在「修一个差一点的候选比重新生成一个恰好落在区间内的候选更便宜」时才赢。
+我希望这个对比是主实验之一，但从摘要看它似乎不是。
+针对「普通单求解器反馈」的消融是对的控制，但更弱——它固定循环、只改信号，说明了池子有用，但没说明这个循环值得建。
+
+**实验诚意**：消融是诚实的部分——同时对比「仅撰写+验证」和「单求解器反馈」正是怀疑者会要求的，两种校准策略分开报告也是好习惯。
+我要施压的是那几个头条数字。
+Terminal-Bench 2.0 上「相对基座 +24.71 点」意味着基座大约在 8%，而基座模型放进一个它从未训过的智能体脚手架里跑，分数低到荒谬的原因往往跟能力关系不大——工具调用格式不对、不知道何时该停、不会读环境。
+25 点提升里有相当一块是模型学会了这套 harness。
+这效应真实且有用，但它不构成「校准起了作用」的证据；只有消融的差值才说明这一点，而摘要没给它们的量级。
+47.57% 对一个训练过的开源模型是个体面数字，但不是前沿。
+
+另有两点值得警惕：Doc2Repo 不是我认得的成熟第三方评测，而在一个可能与作者种子分布对齐的基准上拿 +30 点，证据强度远弱于 SWE-bench Pro 那个数。
+还有一处未被处理的循环性——针对特定求解器池校准出的任务，会把该池特有的弱点编码进去，所以迁移性主张完全押在跨分布结果上。
+SWE-bench Pro 的 +27.68 是整篇论文真正承重的那个数字。
+
+**写作功力**：摘要在框架上很精确，在机制上很闪躲。
+「revise candidate tasks」承担了巨量未加解释的工作——改写器有哪些编辑算子？是自由重写，还是「加子目标 / 扰动验证器」这类受约束的动作集？放弃前跑几轮？有多少比例的候选最终收敛？
+那个收敛率大概是判断这套方法实不实用的最有信息量的一个统计量，而它缺席了。
+如果只能重写一节，我要那个改写算子，配一张产出与成本表：进来多少候选、花了多少轮、出来多少任务、每条被接受的任务耗多少 GPU 小时。
+那能把一条「听起来合理」的流水线，变成读者可以决定是否采用的东西。
+其次，论文在呈现基座差值时，必须远比现在更小心地把「学会 harness」的收益和「能力提升」的收益分开。
+
+**判决**：弱接收 —— 重新框定是对的、消融也问了正确的问题，但成本核算缺失，且头条数字过度依赖会夸大校准自身贡献的基座对比。
+
+## 要点总结
+
+值得偷走的：
+
+- **把通过/失败签名当诊断书读，而不是当分数读。**
+真正可复用的一招是：全挂更常意味着*任务坏了*，而不是任务难。
+如果你在生成可验证任务、并且把所有 0% 通过率的直接扔掉，那你是在丢掉关于自己生成器的最好一批 bug 报告。
+把它们回灌进改写环节。
+
+- **对比式难度瞄准优于通过率区间。**
+「强模型过、弱模型挂」比「通过率在 20%–80% 之间」是更便宜也更稳定的规格：它只需要两条轨迹，不需要一个可靠的比率估计；而且随着你的模型变强它依然有意义——只要换一下谁扮演强模型。
+可以直接迁移到数学、推理，或任何 RLVR 数据集构造。
+
+- **要求「已证实通过」，而不是「存在参考解」。**
+便宜且被低估。
+如果没有任何求解器能仅凭指令完成任务，那指令就是坏的，跟你的标准答案 patch 多干净无关。
+这能抓住一类可执行性验证永远抓不到的欠规格问题。
+
+- **弱模型是一件仪器，不只是个差劲的求解器。**
+故意在池里留一个弱求解器当「白送分探测器」，是个漂亮的反转——你在用它的失败当难度地板。
+
+不该照信的：「改写任务比重新生成更便宜」这个前提。
+在你自己的流水线上把它量出来再决定要不要建校准循环；如果你的生成成本低、轨迹成本高，朴素的「过量生成 + 过滤」可能仍然占优。
+:::
