@@ -1,0 +1,433 @@
+---
+title:
+  en: "Features With Footnotes: Auditable Heart-Failure Feature Engineering by Multi-Agent Pipeline"
+  zh: "带脚注的特征：用多智能体流水线做可审计的心衰特征工程"
+description:
+  en: "nMAS turns EHR feature engineering into a chain of custody: every heart-failure feature carries the guideline rubric it scored and the exact rows it came from. The engineering is thoughtful; the evaluation is thinner than the claims."
+  zh: "nMAS 把 EHR 特征工程改造成一条证据链：每个心衰特征都附带它所依据的指南评分标准和它来自的具体数据行。工程设计有想法，但评估强度弱于结论口气。"
+date: 2026-08-08
+tags: ["arxiv", "ai", "cs.ai", "cs.lg"]
+image: "/arxiv-visuals/arxiv-tracing-the-heart-an-evidence-linked.png"
+---
+:::en
+**Paper**: [2608.06366](https://arxiv.org/abs/2608.06366)
+**Authors**: Soorya Ram Shimgekar, Michelle Hu, Dorisa Shehi, Daniel Kang, Roy Ka-Wei Lee, Koustuv Saha, Christian Poellabauer, Christopher Lee, Sajeev Singh, Piyum Zonooz
+**Categories**: cs.AI, cs.LG
+
+## The Gap
+
+The unglamorous truth of clinical ML is that the model is the easy part. Somewhere between 39% and 45% of a clinical data scientist's time goes into feature engineering: figuring out which of nine-plus source tables holds the ejection fraction, deciding whether a loop-diuretic dose change counts as "escalation," and encoding that decision as SQL nobody will be able to interpret in eighteen months. Heart failure makes this worse than average, because the clinically meaningful features are not columns — they are *judgments* defined in guideline documents (HFrEF vs HFpEF, NYHA class, congestion trajectory, GDMT optimization) that must be assembled from fragments scattered across labs, echo reports, medication orders, and encounters.
+
+Two families of tooling exist, and both are partial. **Rule-based extraction** (hand-written SQL, phenotype libraries like eMERGE/OHDSI concept sets) is deterministic and auditable in principle, but it is written once, maintained never; when the guideline updates or the EHR schema shifts, the rules rot silently. **LLM-based feature generation** — prompt a model with a schema and ask for features — is fast and fluent, and produces exactly the failure mode you would expect: plausible feature definitions with no way to check whether the number attached to a patient actually came from that patient's data, or from the model's sense of what a heart-failure patient usually looks like. Neither line gives you the two things a clinical reviewer needs: **why does this feature exist* (evidence link to a guideline) and *where did this value come from* (row-level provenance).
+
+nMAS is the attempt to close that specific hole: keep LLM-scale coverage, but make every generated feature carry its rubric and its receipts, and add a verification layer that can mechanically reject features whose receipts do not resolve.
+
+```
+[Problem]  EHR feature engineering = 39-45% of DS workload,
+           worst in HF where features are guideline judgments
+              |
+              v
+[Prior art]  rule-based SQL ...... auditable but unmaintainable
+             single-shot LLM ..... scalable but unverifiable
+              |
+              v
+[Assumption] an HF feature can be decomposed into
+             (a) a rubric derived from guideline text  +
+             (b) a pointer set into source rows
+             ... and (b) can be checked by machine
+              |
+              v
+[Method]     nMAS: extraction agents -> rubric agents ->
+             deterministic verifier -> restricted LLM auditor
+              |
+              v
+[Evidence]   132 structured + 70 rubric-scored features
+             AUROC HFrEF 0.895 -> 0.963
+             AUROC HFpEF 0.870 -> 0.910
+             independent LLM rubric: 81.5% of max
+              |
+              v
+[Conclusion] auditable automated feature engineering is
+             *feasible* -- single institution, dummy records,
+             external validation still open
+```
+
+## The Increment
+
+**One sentence**: Before, an automated EHR feature was a number you had to trust; after, it is a number bundled with the guideline rule that defined it and the source rows that produced it, so a verifier can reject it without a human reading any code.
+
+### Core Mechanism
+
+The pipeline runs in two generative stages plus two checking stages. The first generative stage is **extraction**: agents walk the nine source tables and emit 132 structured features — typed, single-concept fields (most recent LVEF, latest NT-proBNP, current beta-blocker, eGFR trend). The point of this layer is not cleverness; it is that each emitted value keeps a pointer back to the table, row, and timestamp it came from. That pointer is what makes everything downstream checkable.
+
+The second generative stage is **rubric-grounded aggregation**: 70 features that are not extractions but scored judgments. Instead of asking a model "is this patient congested?", the pipeline first has an agent write a rubric from guideline text — an ordinal scoring scheme with named criteria — and then applies that rubric to the structured features. The output is a score **plus* the rubric version it was scored against *plus* the subset of structured features (and hence source rows) that triggered each criterion. This is the load-bearing design decision: the judgment is separated from the scoring rule, so the rule can be reviewed once and reused, rather than being re-invented inside every LLM call.
+
+Then two checks. The **deterministic verifier** enforces three things that need no intelligence at all: structural integrity (types, ranges, cardinality), rubric compliance (did this score use the criteria the rubric declares?), and provenance resolution (does every cited row actually exist and support the claimed value?). Only what survives goes to the **restricted LLM auditor**, which reads feature-plus-evidence pairs and can flag or score but not write — a deliberate capability restriction, so the model that judges cannot quietly patch what it dislikes. Surviving features feed a standard supervised phenotyper, where the ablation (structured-only vs structured-plus-aggregated) produces the reported AUROC deltas.
+
+```
+  nine EHR source tables
+  (labs, echo, meds, dx, encounters, vitals, orders, ...)
+             |
+             v
+  +-------------------------------------+
+  | EXTRACTION AGENTS                   |  --> 132 structured features
+  |  table.column -> typed field        |      each = (value, table,
+  |  attach (table, row_id, timestamp)  |               row_id, ts)
+  +-------------------------------------+
+             |
+             v
+  +-------------------------------------+     guideline text
+  | RUBRIC AGENTS                       | <---- (HF staging, GDMT,
+  |  step 1: write ordinal rubric       |        congestion, NYHA)
+  |  step 2: score patient against it   |
+  +-------------------------------------+  --> 70 aggregated features
+             |                                each = (score, rubric_id,
+             |                                        criteria_hit,
+             v                                        evidence_rows)
+  +-------------------------------------+
+  | DETERMINISTIC VERIFIER              |
+  |  . schema / type / range            |  reject ----> [ discard ]
+  |  . rubric compliance                |
+  |  . do evidence_rows resolve?        |
+  +-------------------------------------+
+             |
+             v
+  +-------------------------------------+
+  | RESTRICTED LLM AUDITOR              |
+  |  read-only: flag + score            |
+  |  cannot rewrite features            |
+  +-------------------------------------+
+             |
+             v
+  feature table --> phenotyper --> AUROC (HFrEF / HFpEF)
+  ablation: structured only  vs  structured + aggregated
+```
+
+**The metaphor**: this is a newsroom, not a writing assistant.
+
+The extraction agents are **reporters**. They do not opine; they come back with quotes and, crucially, a note of who said it and when. A quote with no attribution is not filed.
+
+The rubric agents are **editors working from a style guide**. The style guide here is the clinical guideline: it says what counts as "congestion," in what gradations, using which named criteria. The editor's job is a two-step: first codify the standard, then apply it. That separation is why the newsroom is consistent — the standard exists as an artifact you can pull off the shelf and argue about, rather than living in one editor's head.
+
+The deterministic verifier is the **fact-checking desk**. It is not smart and does not need to be. It calls every phone number in the footnotes. If a quote is attributed to a source that does not exist, the piece is killed — no judgment call required.
+
+The restricted LLM auditor is the **standards editor**: reads the finished piece against the code of ethics, can write a memo, cannot touch the copy. Giving that role read-only access is not a technical accident; it is the whole reason its verdict means anything.
+
+And the AUROC experiment? That is **circulation numbers** — evidence that the newsroom's output is useful, not evidence that any individual story is true.
+
+### Key Concepts
+
+- **Row-level provenance**: The difference between "this patient's LVEF is 32%" and "this patient's LVEF is 32%, from `echo_reports` row 88134, dated 2024-03-11, field `lvef_pct`." The second version can be falsified by a script in milliseconds; the first requires a human with database access and an afternoon. Most LLM feature pipelines produce the first kind, which is why nobody deploys them in regulated settings. Provenance is not documentation — it is the thing that converts a claim into a testable claim.
+
+- **Rubric-grounded aggregation**: Suppose you want a "diuretic escalation" feature. The naive approach asks a model per-patient and gets inconsistent answers, because the implicit definition drifts across calls. The rubric approach makes the definition an object first: `0 = no change; 1 = dose increase within class; 2 = added second agent; 3 = IV therapy`, with criteria naming the specific order/med rows to look for. Then scoring is mechanical application. The gain is not accuracy per se — it is that disagreement moves from "the model is wrong" to "criterion 2 is too loose," which is a fixable, versionable argument. Same trick as a grading rubric in a course: it does not make grading correct, it makes it consistent and contestable.
+
+- **Restricted auditor (LLM-as-judge with reduced capability)**: LLM-as-judge is usually weak evidence because the judge shares the generator's blind spots. nMAS mitigates one axis of this by removing the judge's ability to act — it can only flag. That kills a specific failure (the model quietly fixing what it should have reported) but does not fix the deeper one: an LLM scoring LLM-written rubrics at 81.5% of maximum is largely a coherence measurement, not a clinical validity measurement. Useful as a smoke test, not as a substitute for cardiologist review.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+  EHR tables                          EHR tables + guideline text
+      |                                       |
+      v                                       v
+ [ analyst or LLM             ]        [ agents emit:              ]
+ [ writes extraction logic    ]        [   value                   ]
+      |                                [ + rubric_id / criteria    ]
+      v                                [ + evidence row pointers   ]
+   feature = number                            |
+      |                                        v
+      v                              [ deterministic verifier ]
+ [ trust the pipeline ]              [   provenance resolves? ]
+ [ (or re-derive it   ]                       |
+ [  by hand)          ]                       v
+      |                              [ read-only LLM auditor ]
+      v                                       |
+   model                                      v
+                                     feature = auditable claim
+                                              |
+                                              v
+                                           model
+```
+
+From feature-as-number to **feature-as-claim-with-citations**, the core shift is that verification stops requiring a human who understands the clinical domain and starts requiring only a script that can follow a pointer.
+
+## Expert Assessment
+
+**Problem choice**: Real, and under-served relative to its economic weight. The field spends enormous effort on modeling architectures for clinical prediction and almost none on the 40% of labor that precedes them. The specific framing — that the bottleneck is not **generating* features but *trusting* them — is the right diagnosis, and it lines up with where regulated clinical AI is heading (traceability requirements, model cards, provenance mandates). This is a sensible place to be working.
+
+**Method maturity**: Solid engineering, modest novelty. Every ingredient exists elsewhere: multi-agent decomposition, rubric-based LLM scoring, provenance tracking from data-lineage tooling, capability-restricted judges from agent-safety work. The contribution is the assembly and the insistence that the deterministic verifier gate the LLM auditor rather than the reverse. That ordering is genuinely the right instinct — cheap mechanical checks first, expensive fuzzy checks on survivors. What is being overlooked is how far a much simpler system gets: a versioned rubric library written **once by clinicians* plus templated SQL would deliver most of the auditability with none of the agent complexity. The paper does not tell us what the agents buy over that, and I suspect the honest answer is "coverage speed," which is a real but smaller claim than the framing suggests.
+
+**Experimental integrity**: This is where I would push hard, and there are three separate problems.
+
+First, **the cohort**. The abstract says "500 dummy patient records" and then says evaluation was "limited to a single-institution cohort." Those are not the same thing, and the difference matters enormously. If the records are synthetic, then the AUROC gain measures how well the pipeline recovers the synthetic generator's structure — which is close to vacuous as clinical evidence. If they are real records from one site, then "dummy" is a misleading word choice. Either way, 500 patients is small for a two-phenotype study.
+
+Second, **leakage**. HFrEF is **defined* by reduced ejection fraction, typically LVEF below 40%. If any of the 70 aggregated features encodes EF, EF trajectory, or a guideline rubric that references EF thresholds — and it would be strange if none did — then the jump from 0.895 to 0.963 is partly definitional rather than predictive. The smaller HFpEF gain (0.870 to 0.910) is mildly reassuring, since HFpEF is the harder, more inference-dependent phenotype, but the paper needs an explicit accounting of which features touch the label definition. Without it, the headline number is uninterpretable.
+
+Third, **the missing baseline**. The comparison is an ablation of nMAS against itself (structured-only vs full). There is no rule-based phenotyping baseline and no single-shot-LLM baseline, despite both being named as the prior art this work improves on. So the claim "better than existing approaches" is asserted, not measured. And the 81.5% rubric score is an LLM grading LLM output with no reported human expert agreement — that is a consistency metric wearing a validity metric's clothes.
+
+**Writing quality**: The provenance and verification design is clearly the intellectual core and, judging by the abstract's proportions, gets less space than the results. The section that would elevate the paper most is a **failure analysis of the verifier**: how many candidate features were generated, how many were rejected, and for what reason (bad types, rubric violations, dangling provenance). Those rejection statistics are the actual evidence that the auditability machinery does work — right now we are told features were "verified," which tells us the check ran, not that it caught anything. A single table of rejection rates by category would do more for credibility than the AUROC numbers do. Second priority: state plainly whether the data is synthetic, and stop using "dummy" and "cohort" interchangeably.
+
+**Verdict**: **borderline** — the design instinct (mechanical verification gating fuzzy audit, features as claims with citations) is genuinely worth publishing, but with synthetic-or-unclear data, likely label leakage in the headline metric, no comparison against the baselines it critiques, and an LLM grading its own family's work, the evidence currently supports "we built this" rather than "this is better."
+
+## Takeaways
+
+Things worth stealing regardless of whether you care about cardiology:
+
+- **Make the emitted artifact a claim, not a value.** Any generated feature, label, or annotation should carry (value, rule applied, pointer to source). This one change converts review from "an expert reads the logic" to "a script follows the pointers," which is a difference of two orders of magnitude in cost. Applies directly to LLM data labeling, document extraction, and compliance pipelines.
+
+- **Order your checks by cost, and let the cheap one gate the expensive one.** Deterministic verifier first, LLM auditor only on survivors. Most agentic pipelines do the reverse or run them in parallel, wasting model calls on things a type check would have killed.
+
+- **Split the rule from the application of the rule.** Have the model write a versioned rubric as a standalone artifact, then apply it mechanically. Disagreements become edits to a shared object instead of arguments about individual outputs — the same reason grading rubrics and coding manuals exist in human workflows.
+
+- **Restrict your judge's capabilities on purpose.** A read-only auditor that can flag but not fix produces a signal you can count. An auditor that can also edit destroys its own evidence trail.
+
+- **A caution to steal too**: when you report gains from generated features on a phenotype defined by a threshold, publish the mapping between your features and the label definition. Otherwise your reviewers will assume leakage, and here they would probably be partly right.
+:::
+
+:::zh
+**论文**: [2608.06366](https://arxiv.org/abs/2608.06366)
+**作者**: Soorya Ram Shimgekar, Michelle Hu, Dorisa Shehi, Daniel Kang, Roy Ka-Wei Lee, Koustuv Saha, Christian Poellabauer, Christopher Lee, Sajeev Singh, Piyum Zonooz
+**分类**: cs.AI, cs.LG
+
+## 缺口
+
+临床机器学习有个不体面的真相：模型是最简单的部分。
+
+临床数据科学家 39%~45% 的时间花在特征工程上——在九张以上的源表里找出射血分数到底存在哪一列，判断一次利尿剂剂量调整算不算"升级治疗"，然后把这个判断写成十八个月后没人看得懂的 SQL。
+
+心衰的情况比平均更糟，因为有临床意义的特征不是"列"，而是**判断**：HFrEF 与 HFpEF 的区分、NYHA 分级、充血程度的变化趋势、指南导向药物治疗（GDMT）是否已优化——这些定义写在指南文档里，而支撑它们的数据碎片散落在化验、超声报告、医嘱、就诊记录之间。
+
+现有工具有两类，各自缺一半。**规则式抽取**（手写 SQL、OHDSI/eMERGE 那样的概念集）原则上确定且可审计，但写一次就再没人维护；指南更新或 EHR 表结构变动时，规则会无声地烂掉。
+
+**LLM 生成特征**——把表结构丢给模型让它产出特征——快且流畅，也带来了你能预料到的失效模式：特征定义看起来很合理，但你无法核实挂在某个病人身上的那个数值究竟来自这个病人的数据，还是来自模型对"心衰病人一般长什么样"的印象。
+
+两条路线都没给临床审阅者他真正需要的两样东西：**这个特征为什么存在**（与指南的证据链接），以及**这个数值从哪来**（行级溯源）。
+
+nMAS 就是补这个洞：保留 LLM 级别的覆盖速度，但让每个生成的特征都带上它的评分标准和它的凭据，再加一层能机械地把"凭据对不上"的特征直接扔掉的验证。
+
+```
+[问题]    EHR 特征工程占数据科学家 39-45% 工作量，
+          心衰场景最严重：特征本身就是指南级判断
+             |
+             v
+[已有方法] 规则式 SQL ...... 可审计但不可维护
+          单轮 LLM ........ 能规模化但不可核验
+             |
+             v
+[假设]    一个心衰特征可以拆成
+          (a) 从指南文本导出的评分标准 rubric  +
+          (b) 指向源数据行的指针集合
+          ... 而 (b) 可以由机器检查
+             |
+             v
+[方法]    nMAS：抽取智能体 -> rubric 智能体 ->
+          确定性验证器 -> 只读 LLM 审计员
+             |
+             v
+[证据]    132 个结构化 + 70 个 rubric 打分特征
+          AUROC HFrEF 0.895 -> 0.963
+          AUROC HFpEF 0.870 -> 0.910
+          独立 LLM rubric 评估：满分的 81.5%
+             |
+             v
+[结论]    可审计的自动特征工程"可行"
+          -- 单中心、dummy 记录、外部验证未做
+```
+
+## 增量
+
+**一句话**：以前自动生成的 EHR 特征是一个你只能选择相信的数字；现在它是一个数字 + 定义它的指南规则 + 产生它的源数据行，于是验证器可以在没有任何人读代码的情况下把它否掉。
+
+### 核心机制
+
+流水线是两个生成阶段加两个检查阶段。
+
+第一个生成阶段是**抽取**：智能体遍历九张源表，产出 132 个结构化特征——有类型的单一概念字段（最近一次 LVEF、最新 NT-proBNP、当前 β 阻滞剂、eGFR 趋势）。
+
+这一层的价值不在聪明，而在于每个数值都保留一个指回来源表、行、时间戳的指针。
+
+正是这个指针让后面的一切变得可检查。
+
+第二个生成阶段是**基于 rubric 的聚合**：70 个特征不是抽取出来的，而是打出来的分。
+
+它不是直接问模型"这个病人充血吗"，而是先让智能体从指南文本写出一份 rubric——带命名判据的有序打分方案——再把 rubric 应用到结构化特征上。
+
+输出是分数、外加所依据的 rubric 版本、外加触发每条判据的那些结构化特征（从而是那些源数据行）。
+
+这是承重的设计决策：把"判断"和"打分规则"分开，规则就可以被审一次、复用多次，而不是在每次 LLM 调用里被重新发明一遍。
+
+然后是两道检查。**确定性验证器**执行三件完全不需要智能的事：结构完整性（类型、取值范围、基数）、rubric 合规性（这个分数用的判据是否就是 rubric 声明的那些）、溯源可解析性（引用的每一行是否真实存在、是否支持所声称的值）。
+
+活下来的才进入**受限 LLM 审计员**：它读"特征 + 证据"对，只能标记和打分，不能改写——这是刻意的能力限制，让做裁判的模型没法悄悄把自己不喜欢的东西改掉。
+
+通过的特征喂给一个常规监督表型分类器，"仅结构化 vs 结构化+聚合"的消融实验产出了那两组 AUROC 差值。
+
+```
+  九张 EHR 源表
+  (化验, 超声, 用药, 诊断, 就诊, 生命体征, 医嘱, ...)
+             |
+             v
+  +-------------------------------------+
+  | 抽取智能体                          |  --> 132 个结构化特征
+  |  表.列 -> 带类型字段                |      每个 = (值, 表,
+  |  附加 (表, row_id, 时间戳)          |             row_id, 时间)
+  +-------------------------------------+
+             |
+             v
+  +-------------------------------------+     指南文本
+  | RUBRIC 智能体                       | <---- (心衰分期, GDMT,
+  |  step 1: 写出有序 rubric            |        充血, NYHA)
+  |  step 2: 用 rubric 给病人打分       |
+  +-------------------------------------+  --> 70 个聚合特征
+             |                                每个 = (分数, rubric_id,
+             |                                        命中判据,
+             v                                        证据行)
+  +-------------------------------------+
+  | 确定性验证器                        |
+  |  . schema / 类型 / 范围             |  不通过 ----> [ 丢弃 ]
+  |  . rubric 合规性                    |
+  |  . 证据行能否解析?                  |
+  +-------------------------------------+
+             |
+             v
+  +-------------------------------------+
+  | 受限 LLM 审计员                     |
+  |  只读: 只能标记 + 打分              |
+  |  不能改写特征                       |
+  +-------------------------------------+
+             |
+             v
+  特征表 --> 表型分类器 --> AUROC (HFrEF / HFpEF)
+  消融: 仅结构化  vs  结构化 + 聚合
+```
+
+**核喻**：这是一个报社编辑部，不是一个写作助手。
+
+抽取智能体是**记者**。他们不发表意见，只带回引语，并且必须记下是谁说的、什么时候说的。
+
+没有出处的引语不予收稿。
+
+rubric 智能体是**照着编辑规范工作的编辑**。这里的编辑规范就是临床指南：它规定什么算"充血"、分几档、依据哪几条命名判据。
+
+编辑的工作是两步：先把标准写成条文，再拿条文去套稿子。
+
+正是这个拆分让编辑部保持一致——标准变成了一件你可以从架子上取下来、拿出来争论的实体物件，而不是活在某个编辑脑子里的默会知识。
+
+确定性验证器是**核实台**。它不聪明，也不需要聪明。
+
+它把脚注里的每一个电话号码都打一遍。引语的出处根本不存在，稿子就毙掉，不需要任何判断力。
+
+受限 LLM 审计员是**标准主编**：对照职业准则读成稿，可以写备忘录，不能动一个字。
+
+给这个角色只读权限不是技术上的偶然，而是它的裁定之所以有意义的全部理由。
+
+那 AUROC 实验呢？那是**发行量数字**——证明这家编辑部的产出有用，不是证明其中任何一篇报道是真的。
+
+### 关键概念
+
+- **行级溯源（row-level provenance）**：区别在于"该病人 LVEF 为 32%"和"该病人 LVEF 为 32%，来自 `echo_reports` 表第 88134 行，日期 2024-03-11，字段 `lvef_pct`"。后者能被一段脚本在毫秒级证伪；前者需要一个有数据库权限的人花一个下午。绝大多数 LLM 特征流水线产出的是前者，这也正是它们进不了受监管场景的原因。溯源不是文档，它是把"一句断言"变成"一句可检验的断言"的那个东西。
+
+- **rubric 化聚合**：假设你要一个"利尿剂升级"特征。朴素做法是逐病人问模型，得到的答案彼此不一致，因为隐含定义在多次调用间漂移。rubric 做法先把定义变成一个对象：`0 = 无变化；1 = 同类内加量；2 = 加用第二种药；3 = 静脉给药`，每条判据点名要去看哪些医嘱/用药行。之后打分就是机械套用。收益不在精度本身，而在于分歧从"模型错了"变成"第 2 条判据定得太松"——后者是可修、可版本化的争论。跟课程里的评分量表是同一个招数：量表不让评分变正确，它让评分变得一致且可申辩。
+
+- **受限审计员（降低能力的 LLM-as-judge）**：LLM 当裁判通常是弱证据，因为裁判和生成者共享盲点。nMAS 在一个维度上做了缓解：取消裁判的行动能力，它只能标记。这确实杀掉了一种具体失效（模型悄悄修掉它本该上报的问题），但没解决更深的那个：一个 LLM 给 LLM 写的 rubric 打出满分的 81.5%，衡量的主要是自洽性，不是临床有效性。当烟雾报警器用可以，当心内科医生审阅的替代品不行。
+
+## 框架转变
+
+```
+之前（主流方法）：                   之后（本文方法）：
+
+  EHR 表                              EHR 表 + 指南文本
+      |                                       |
+      v                                       v
+ [ 分析师或 LLM        ]              [ 智能体产出:              ]
+ [ 写抽取逻辑          ]              [   值                     ]
+      |                               [ + rubric_id / 判据       ]
+      v                               [ + 证据行指针             ]
+   特征 = 数字                                |
+      |                                       v
+      v                              [ 确定性验证器 ]
+ [ 相信这条流水线 ]                   [ 溯源能否解析? ]
+ [ (或者自己手工  ]                            |
+ [  重推一遍)     ]                            v
+      |                              [ 只读 LLM 审计员 ]
+      v                                        |
+    模型                                       v
+                                     特征 = 可审计的断言
+                                               |
+                                               v
+                                             模型
+```
+
+一句话：从"特征即数字"到**"特征即带引文的断言"**，核心转变是——验证不再需要一个懂临床的人，只需要一段会顺着指针走的脚本。
+
+## 专家评审
+
+**选题眼光**：真缺口，而且相对于它的经济体量被严重忽视。
+
+领域里大量精力投在临床预测的模型架构上，几乎没人管前置的那 40% 劳动。
+
+论文的具体切法——瓶颈不在**生成**特征，而在**信任**特征——诊断是对的，也和受监管临床 AI 的走向一致（可追溯性要求、模型卡、溯源强制）。这是个值得干活的位置。
+
+**方法成熟度**：工程扎实，新意有限。
+
+每个配件都在别处存在过：多智能体分解、rubric 式 LLM 打分、来自数据血缘工具的溯源追踪、来自智能体安全研究的受限裁判。
+
+贡献在于装配方式，以及坚持让确定性验证器**在** LLM 审计员之前把关而不是反过来。这个顺序确实是对的直觉——先跑便宜的机械检查，只对活下来的花贵的模糊检查。
+
+被忽略的是：一个简单得多的系统能走多远。一套由临床医生**写一次**的版本化 rubric 库 + 模板化 SQL，能拿到大部分可审计性，且完全不需要智能体这套复杂度。
+
+论文没告诉我们智能体相比这个方案买到了什么，我猜诚实的答案是"覆盖速度"——真实但比论文口气小得多的主张。
+
+**实验诚意**：这里我会用力追问，有三个各自独立的问题。
+
+第一，**队列**。摘要说"500 条 dummy 患者记录"，又说评估"限于单中心队列"。这两句话不是一回事，而且差别极大。
+
+如果记录是合成的，那 AUROC 增益衡量的是流水线复原合成生成器结构的能力——作为临床证据接近于空。
+
+如果它们是某一家机构的真实记录，那用"dummy"这个词就是误导。
+
+无论哪种，500 例做两个表型的研究都偏小。
+
+第二，**泄漏**。HFrEF 的**定义**就是射血分数降低，通常是 LVEF 低于 40%。
+
+如果那 70 个聚合特征里有任何一个编码了 EF、EF 轨迹、或引用了 EF 阈值的指南 rubric——很难想象一个都没有——那么 0.895 到 0.963 这一跳里有一部分是定义性的而非预测性的。
+
+HFpEF 那边较小的增益（0.870 到 0.910）稍微让人安心，因为 HFpEF 是更难、更依赖推断的表型；但论文需要明确交代哪些特征触碰了标签定义。
+
+没有这个交代，头条数字是无法解释的。
+
+第三，**缺失的基线**。对比是 nMAS 和自己做消融（仅结构化 vs 全量）。
+
+没有规则式表型基线，也没有单轮 LLM 基线——尽管这两者正是论文点名要超越的先前工作。
+
+所以"优于现有方法"是被声明的，不是被测量的。
+
+而 81.5% 的 rubric 得分是 LLM 给 LLM 的产出打分，没有报告与人类专家的一致性——那是一个穿着有效性指标外衣的自洽性指标。
+
+**写作功力**：溯源与验证的设计明显是智力核心，但从摘要的篇幅配比看，它拿到的空间比结果少。
+
+最能把整篇论文提一档的是补一节**验证器的失败分析**：一共生成了多少候选特征，被拒了多少，各自因为什么原因（类型错误、rubric 违规、溯源指针悬空）。
+
+这些拒绝统计才是"可审计机制真的在工作"的实际证据——现在我们只被告知特征"已被验证"，这说明检查跑过了，没说明它抓到了什么。
+
+一张按类别列出拒绝率的表，对可信度的贡献会超过那几个 AUROC 数字。
+
+其次：直说数据到底是不是合成的，别再把 "dummy" 和 "cohort" 混着用。
+
+**判决**：**临界** — 设计直觉（用机械验证给模糊审计把关、特征即带引文的断言）确实值得发表，但在数据性质不清或为合成、头条指标很可能存在标签泄漏、没有与自己所批评的基线做对比、且由同族 LLM 给自己打分的情况下，现有证据支持的是"我们做了这个东西"，而不是"这个东西更好"。
+
+## 要点总结
+
+不管你做不做心脏病，都值得偷走的东西：
+
+- **让产出物是"断言"而不是"数值"。** 任何生成的特征、标签、标注，都应该携带（值，所用规则，源指针）。这一个改动就把审阅从"专家读逻辑"变成"脚本跟指针"，成本差两个数量级。直接适用于 LLM 数据标注、文档抽取、合规流水线。
+
+- **按成本给检查排序，让便宜的那个给贵的那个把关。** 先确定性验证器，只对存活者跑 LLM 审计。大多数智能体流水线是反着来的或者并行跑，把模型调用浪费在一个类型检查就能杀掉的东西上。
+
+- **把"规则"和"规则的应用"拆开。** 让模型先把 rubric 写成一个带版本的独立产物，再机械套用。分歧于是变成对一个共享对象的编辑，而不是对单条输出的争吵——人类流程里评分量表和编码手册存在的理由是同一个。
+
+- **刻意削减你裁判的能力。** 只读的审计员——能标记不能修——产出的是你可以统计的信号。一个还能顺手改稿的审计员会毁掉自己的证据链。
+
+- **也偷走一条警告**：当你报告"生成特征"在一个由阈值定义的表型上带来的增益时，请公布你的特征与标签定义之间的映射。否则审稿人会默认存在泄漏——而在这篇论文里，他们大概有一部分是对的。
+:::
