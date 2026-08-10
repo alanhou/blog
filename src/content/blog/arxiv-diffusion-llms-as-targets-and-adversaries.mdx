@@ -1,0 +1,431 @@
+---
+title:
+  en: "Diffusion LLMs as Both Victim and Weapon: Safety Neurons Travel Across Architectures"
+  zh: "扩散语言模型既是靶子也是武器：安全神经元会跨架构迁移"
+description:
+  en: "A paper showing that diffusion LLMs inherit the sparse safety circuitry of their autoregressive ancestors — and that the same circuit map can be turned into a cheap, fully offline jailbreak generator."
+  zh: "这篇论文指出扩散语言模型继承了自回归祖先稀疏的安全电路，而同一张电路图还能反过来变成廉价的、完全离线的越狱提示生成器。"
+date: 2026-08-10
+tags: ["arxiv", "ai", "cs.lg", "cs.ai"]
+image: "/arxiv-visuals/arxiv-diffusion-llms-as-targets-and-adversaries.png"
+---
+:::en
+**Paper**: [2608.07430](https://arxiv.org/abs/2608.07430)
+**Authors**: Elena Dumitrescu, Gert Lek, Lydia Y. Chen, Jérémie Decouchant
+**Categories**: cs.LG, cs.AI
+
+## The Gap
+
+Two separate literatures had grown up next to each other without touching.
+
+On one side, mechanistic safety work on autoregressive (AR) models had converged on an uncomfortable finding: alignment is *sparse*. A small number of MLP neurons or a single "refusal direction" in residual space carries most of the refusal behavior, and if you prune or ablate them, the model happily complies. Wei et al.'s pruning work and the refusal-direction line of work (Arditi et al.) both land here. But every one of these studies assumes left-to-right generation.
+
+On the other side, diffusion LLMs (LLaDA, Dream, Fast-dLLM) had arrived as a genuinely different generation paradigm — iterative parallel denoising over a masked sequence instead of next-token prediction. Safety work on them was almost entirely behavioral: throw known jailbreak prompts at them, measure attack success rate (ASR), observe that they are somewhat more fragile. Nobody had asked the mechanistic question: *where does the refusal live inside a denoiser, and is it the same place it lives in an AR model?*
+
+That question has real bite, because of a supply-chain fact: Dream-7B was not trained from scratch — it was initialized from Qwen2.5-7B. If safety is sparse and localized, and the diffusion model inherited its weights, then the *coordinates* of the safety circuit might survive the conversion from AR to diffusion. That would make a safety audit of Qwen a free attack map for Dream.
+
+The second, less obvious gap: existing jailbreak generators are expensive. GCG needs white-box gradients and thousands of forward passes; PAIR/TAP/AutoDAN need an attacker LLM in the loop and hundreds of queries *against the live target*. Nobody had noticed that a diffusion LLM is structurally a constrained-text optimizer — it revises a whole sequence in place, in any order — which makes it an unusually good machine for searching prompt space offline.
+
+```
+   PRIOR STATE
+   +----------------------------+   +---------------------------+
+   | AR mech-interp: safety is  |   | DLLM safety: behavioral   |
+   | sparse, prunable, local    |   | only, no circuit-level    |
+   +-------------+--------------+   +-------------+-------------+
+                 |                                |
+                 +---------------+----------------+
+                                 v
+   PROBLEM . . can we locate safety circuitry inside a denoiser?
+                                 |
+                                 v
+   ASSUMPTION  weight inheritance (Qwen2.5 -> Dream) preserves
+               the *coordinates* of the safety footprint
+                                 |
+              +------------------+-------------------+
+              v                                      v
+   METHOD (A) safety-neuron ID +          METHOD (B) SN-Guided
+   self-prune / transfer-prune            Diffusion: denoise the
+   across architectures                   prompt to minimize the
+              |                           safety-neuron loss
+              v                                      |
+   EVIDENCE   LLaDA 2.6 -> 73.8 ASR                  v
+              Dream  1.9 -> 86.6 (self)     EVIDENCE AUROC = 1.0
+              Dream  1.9 -> 73.2 (from Qwen)         77.1% Llama-3-8B
+              Fast-dLLM 7.0 -> 86.3                  86.9% Qwen2.5-7B
+              |                                      74.3% Gemini-Flash-Lite
+              |                                      20 episodes / prompt
+              +------------------+--------------------+
+                                 v
+   CONCLUSION  DLLM alignment is a thin, *portable* layer; and the
+               same map that breaks it turns the DLLM into a cheap
+               black-box attack engine against AR and closed models
+```
+
+## The Increment
+
+**One sentence**: Before, diffusion LLM safety was a black box you probed by prompting; after, it is a **located, sparse, and architecture-portable* set of neurons — and the diffusion process itself becomes the search engine that routes around them.
+
+### Core Mechanism
+
+There are really two artifacts in this paper, and they chain together. The first is a **safety-neuron (SN) locator plus pruner**. You run a set of harmful prompts and a matched set of benign prompts through the model, record MLP activations, and score each neuron by how much more it fires on the harmful set (an activation-contrast / attribution score). Take the top-k, zero them out, and re-measure ASR. Doing this on a DLLM's own neurons is "self-pruning." The interesting move is **transfer pruning**: locate the neurons in the **AR ancestor* (Qwen2.5-7B), map the indices directly onto the diffusion descendant (Dream, and Fast-dLLM built on that lineage), and prune those. If ASR jumps, the safety footprint survived the AR-to-diffusion conversion — which is the mechanistic claim.
+
+The second artifact, **SN-Guided Diffusion**, inverts the direction. Instead of editing weights (which requires access you usually do not have), it uses the SN scores as an **objective for text search*. The safety-neuron loss is a weighted sum of activations over the identified safety neurons for a candidate prompt: high value means "this text is tripping the refusal circuit," low value means "this text reads as benign to the safety machinery while still carrying the harmful request." Now recall what a masked diffusion model does: it starts from a fully masked sequence and, over T denoising steps, unmasks tokens in arbitrary order, with every step able to revise its plan for the whole sequence. So at each step you score candidate unmaskings by the SN loss and keep the low-loss ones. After ~20 generation episodes you have a prompt that sits in a low-safety-activation region of a *surrogate* model's representation space. Then you fire it at the real target — Llama-3, Qwen2.5, Gemini-2.5-Flash-Lite — with zero prior queries. That is what "fully offline black-box" means: the optimization loop never touches the victim.
+
+The AUROC = 1.0 number is the internal sanity check: the SN loss alone perfectly separates benign prompts from the generated jailbreaks, i.e. the signal being optimized is a real, sharp axis rather than noise.
+
+```
+  PHASE 1: LOCATE
+  harmful set --+                              +-> per-neuron
+                +--> [ surrogate model ] ------+   contrast score
+  benign set ---+      MLP activations             |
+                                                   v
+                                          top-k SAFETY NEURON map
+                                          (indices + weights)
+                                              |            |
+                    +-------------------------+            +---------+
+                    v                                                v
+  PHASE 2a: PRUNE (white-box)              PHASE 2b: SN-GUIDED DIFFUSION
+  zero the mapped neurons                  (black-box, offline)
+   self  : LLaDA -> LLaDA                   masked prompt: [M][M][M]...[M]
+   xfer  : Qwen2.5 -> Dream                              |
+                    |                        +-----------+------------+
+                    v                        |  step t: propose        |
+             ASR 2.6% -> 73.8%               |  unmaskings in parallel |
+                                             |           |             |
+                                             |           v             |
+                                             |  score with weighted    |
+                                             |  SN loss (low = quiet)  |
+                                             |           |             |
+                                             |     keep low-loss       |
+                                             +-----------+------------+
+                                                         | x20 episodes
+                                                         v
+                                              final prompt (never
+                                              tested on target yet)
+                                                         |
+                                                         v
+                                        +----------------+---------------+
+                                        v                v               v
+                                   Llama-3-8B      Qwen2.5-7B     Gemini-Flash-Lite
+                                     77.1%            86.9%           74.3%
+```
+
+**The metaphor**: think of alignment as a **burglar alarm with surprisingly few motion sensors**.
+
+Phase 1 is stealing the floorplan: by watching which sensors chirp when someone walks the "harmful" corridor versus the "benign" corridor, you learn that only a dozen sensors out of thousands actually matter. Transfer pruning is the punchline about the *builder*: Dream is not a new building, it is Qwen2.5 gut-renovated. The walls moved, the way people walk through it changed completely (parallel instead of single-file), but the sensors were never re-installed — they are still bolted to the same coordinates. So a floorplan stolen from Qwen opens Dream.
+
+Phase 2b is where the burglar stops cutting wires and starts route-planning. Cutting wires (pruning) needs to be inside the building already, which is the whole weakness of white-box attacks. Instead, the burglar takes the sensor map home and works on a **sketchpad with an eraser**: this is the diffusion process. An autoregressive attacker has to plan the route one footstep at a time and can never go back and change footstep three; a diffusion attacker sketches the entire route at once and keeps erasing and redrawing any part of it. Each draft gets scored against the stolen sensor map — "how loud is this route?" — and after twenty drafts you have a path that the sensors, as far as the map predicts, will sleep through. Only then do you walk into the real building. And because the same architecture firm wired half the buildings on the street, the quiet route generalizes to Llama-3 and to Gemini, whose floorplan you never had.
+
+The load-bearing part of the metaphor is *the eraser*. Everything expensive about GCG and PAIR comes from not having one: they must either brute-force gradients or keep knocking on the victim's door to see if it opens. Diffusion gives you free, arbitrary-order revision, so the search becomes cheap and can happen entirely off-premises.
+
+### Key Concepts
+
+- **Safety neuron**: Inside a transformer's feed-forward layers there are hundreds of thousands of individual units, each of which outputs a single number per token. Most encode boring things — "this is a plural noun," "we're in a Python block." A handful behave like a smoke detector: they light up specifically when the input is a request the model was trained to refuse, and their output feeds the pathway that produces "I can't help with that." You find them by simple bookkeeping: run 200 harmful prompts and 200 harmless ones, and rank neurons by how lopsided their average activation is. The unsettling empirical fact — established before this paper, for AR models — is that zeroing out on the order of dozens to hundreds of these out of ~10^5 flips a well-aligned model into a compliant one. Alignment turns out to be a thin veneer bolted onto a capable model, not a property diffused through it.
+
+- **Masked diffusion decoding (and why it is an optimizer)**: An AR model writes like someone typing with no backspace key: token 1, then token 2 conditioned on token 1, forever forward. A masked diffusion LLM starts with a row of blanks — `[MASK] [MASK] [MASK] [MASK]` — and on each pass fills in whichever blanks it is most confident about, re-reading the whole partially-filled sequence each time. Think of solving a crossword: you don't fill 1-Across then 2-Across in order, you fill what you're sure of and let it constrain the rest, and you erase when a guess stops fitting. That "erase and refill anywhere" property is exactly what a discrete optimizer needs, which is why the paper can treat generation as a **search under a loss* rather than just sampling.
+
+- **Offline black-box transfer**: Three separate constraints that jailbreak papers usually trade off. **Black-box*: no gradients from the victim. *Offline*: no queries to the victim during optimization — you cannot even use pass/fail feedback. *Transfer*: the prompt was tuned against a stand-in and must work on a model it has never seen. GCG is white-box; PAIR is black-box but very much online (hundreds of victim queries per prompt); this paper claims all three at once, with 20 episodes of surrogate generation as the entire budget. The reason that is even conceivable is the phase-1 finding: if the safety circuit is shared across the model family, then a surrogate's refusal geometry is a decent proxy for the victim's.
+
+## Framework Shift
+
+```
+  Before (mainstream approach):          After (this paper):
+
+  DLLM safety studied behaviorally       DLLM safety studied mechanistically
+  +---------------------+                +-------------------------+
+  | known AR jailbreaks |                | activation contrast on  |
+  |         |           |                | harmful vs benign       |
+  |         v           |                |         |               |
+  |    [ DLLM  ] --> ASR|                |         v               |
+  +---------------------+                | SN map = shared asset   |
+   "is it more fragile?"                 |    /            \       |
+                                         |   v              v      |
+  Jailbreak generation:                  | prune          guide    |
+  +---------------------+                | (audit)      (attack)   |
+  | attacker LLM /      |                +-------------------------+
+  | gradient search     |                 "where is it, and does
+  |    |     ^          |                  it move between models?"
+  |    v     | pass?    |
+  | [ VICTIM ]----------|                Generation as search:
+  | 100s-1000s queries  |                +--------------------------+
+  +---------------------+                | [M][M][M] --+            |
+   attack cost tied to                   |     ^       | SN loss    |
+   victim access                          |     +-------+ (offline)  |
+                                         |         |                |
+  DLLM = a model to defend               |         v x20            |
+                                         | prompt --> ANY victim    |
+                                         +--------------------------+
+                                          DLLM = the attack engine
+```
+
+**One sentence**: From "diffusion LLMs are a new class of model we should test for safety" to "diffusion LLMs are a new class of **optimizer* whose inherited safety circuitry is both the lock and the lockpick" — the core shift is treating the safety footprint as a portable coordinate system rather than a per-model property.
+
+## Expert Assessment
+
+**Problem choice**: A real gap, and well-timed. The weight-inheritance angle is the genuinely sharp observation — the field has been publishing AR interpretability results for two years while a new model family quietly bootstrapped off those same checkpoints, and nobody asked whether the audit results transfer. That is the kind of question that looks obvious only after someone asks it. The dual framing ("targets and adversaries") is more editorial than scientific, but it does hold: both halves depend on the same SN map, so it is not two papers stapled together. Where it sits in the trajectory: a natural and probably necessary extension of the sparse-alignment line into a new architecture, not a paradigm-level contribution.
+
+**Method maturity**: Mixed. Phase 1 is inherited machinery — activation-contrast neuron scoring and pruning-based alignment breaking are both established; the increment is the index-mapping trick, which is conceptually two lines of code and worth exactly as much as the empirical result it produces (which is a lot, but let's be clear about the intellectual cost). Phase 2 is the clever part: recognizing that any-order denoising is a discrete search procedure, and that an interpretability artifact makes a serviceable reward. The "20 episodes" efficiency claim is the strongest selling point. What is being overlooked: a straightforward baseline is to skip the neuron machinery entirely and use the surrogate's **refusal direction** (a single vector, cheaper to extract, well-validated) as the loss. If refusal-direction guidance gets within a few points of SN guidance, the neuron-level apparatus is decoration. I would want that ablation front and center.
+
+**Experimental integrity**: Several things to squint at. First, **AUROC = 1.0** should always raise an eyebrow, not a cheer. Perfect separability on a designed benchmark usually means the two classes differ in some surface statistic, and here it cuts against the paper's own interests: if the SN loss perfectly separates benign prompts from these jailbreaks, then the SN loss is a **perfect detector*, and the attack ships with its own defense. The paper needs to either report that honestly as a limitation or show that an adaptive version defeats SN-based screening. Second, **pruning results need utility controls**. Zeroing neurons raises ASR partly by making the model less discriminating overall; without MMLU/GSM8K/coherence numbers and a random-neuron control matched for capability drop, "2.6% -> 73.8%" is not yet evidence of a **safety-specific* circuit. Third, ASR numbers depend entirely on the judge; refusal-substring matching inflates badly, and LLM-judge protocols vary. Fourth, the **threat models are not comparable and should not be reported side by side without a caption warning**: self-pruning requires full weight access (a strong assumption, and arguably a defender's audit rather than an attack), while SN-Guided Diffusion is genuinely black-box. Fifth, 74.3% on Gemini-2.5-Flash-Lite is a claim with a shelf life measured in weeks; without the exact model snapshot and dates, it is not reproducible. Finally, the cost comparison against GCG/PAIR needs matched budgets and a matched judge, or "orders of magnitude cheaper" is comparing a bicycle to a boat.
+
+**Writing quality**: The abstract is doing the classic thing of substituting a wall of numbers for a claim. The mechanistic argument — the actual contribution — is where the corner-cutting will show: showing that ASR rises after transfer pruning is **consistent with* a shared safety footprint but does not establish it. What would elevate the whole paper is a rewritten Phase 1 that reports the concrete overlap statistics (Jaccard of top-k safety neurons between Qwen2.5 and Dream, versus a matched-baseline pair with no shared ancestry, plus LLaDA as the trained-from-scratch control), and layer-wise distributions. That single section, done properly, turns an attack paper into a finding about how safety survives architectural conversion — which is the more durable result. Also, a limitations section that owns the detector duality would make the paper harder to attack, not easier.
+
+**Verdict**: weak accept — the weight-inheritance transfer finding and the reframing of denoising as a cheap offline attack search are both genuinely new and useful, but the mechanistic claim is currently supported by downstream ASR rather than direct circuit evidence, and the AUROC = 1.0 result quietly undermines the threat model it is meant to support.
+
+## Takeaways
+
+- **Check your model's ancestry before trusting its safety evaluation.** If a model was initialized from another model's weights, treat published interpretability findings on the ancestor as applying to the descendant until proven otherwise. This generalizes well past diffusion: distilled models, continued-pretraining forks, MoE-ified conversions, and quantized redistributions all likely inherit sparse circuit locations. It is a supply-chain security argument, and it applies to **capability* circuits too, not just safety.
+- **Interpretability artifacts are reward functions.** The reusable pattern is: extract a sparse, interpretable signal from a surrogate, then use it as an offline loss for search. This works for anything you can localize — hallucination-associated features, sycophancy, tool-call triggers, style attributes. You get a scoring function that never requires touching the deployed system.
+- **Non-autoregressive generation is a controllable-text-generation substrate.** This is the takeaway most orthogonal to safety. If you need constrained generation — grammar conformance, watermark evasion, keyword-constrained copy, program repair — a masked diffusion model gives you arbitrary-order revision under an arbitrary scoring function, which AR sampling structurally cannot. Anyone who has fought with beam search over an AR decoder should be paying attention to this framing regardless of their interest in jailbreaks.
+- **The defensive read is free and immediate.** Their attack signal is a detector. A weighted safety-neuron activation score computed on the **input* prompt, before generation, is a cheap screening layer with no extra forward pass. If their AUROC number is even half true out of distribution, that is a deployable filter — which is a slightly embarrassing gift for an attack paper to hand over.
+- **Cost-per-jailbreak is the metric that matters for threat modeling.** Twenty offline surrogate episodes versus hundreds of live victim queries is not a marginal improvement; it removes the rate-limiting and abuse-detection defenses that most production systems actually rely on. If you build guardrails, budget for attackers who never query you before the attack.
+:::
+
+:::zh
+**论文**: [2608.07430](https://arxiv.org/abs/2608.07430)
+**作者**: Elena Dumitrescu, Gert Lek, Lydia Y. Chen, Jérémie Decouchant
+**分类**: cs.LG, cs.AI
+
+## 缺口
+
+有两条文献线一直挨着长，却从来没有握过手。
+
+一边是自回归（AR）模型的机制可解释性研究，结论已经相当扎实但也相当难看：对齐是**稀疏的**。
+少量 MLP 神经元、或者残差空间里的一个"拒答方向"，承载了绝大部分拒答行为。
+把它们剪掉或消融，模型立刻变得有求必应。
+Wei 等人的剪枝工作、Arditi 等人的拒答方向工作，都落在这个结论上。
+但这些研究无一例外地假设了从左到右的逐词生成。
+
+另一边，扩散语言模型（LLaDA、Dream、Fast-dLLM）作为一种真正不同的生成范式登场了：在被掩码的序列上做迭代并行去噪，而不是预测下一个词。
+针对它们的安全研究几乎全是行为层面的：把已知的越狱提示丢进去，量一下攻击成功率（ASR），得出"它们似乎更脆弱一些"的结论。
+没有人问那个机制层面的问题：**在一个去噪器内部，拒答行为住在哪里？它和 AR 模型里的住址是同一个吗？**
+
+这个问题有实打实的杀伤力，因为有个供应链事实：Dream-7B 不是从零训练的，它是从 Qwen2.5-7B 的权重初始化来的。
+如果安全性是稀疏且局部化的，而扩散模型继承了权重，那么安全电路的**坐标**很可能在 AR 到扩散的转换中存活了下来。
+那就意味着：对 Qwen 做的一次安全审计，等于白送给 Dream 一张攻击地图。
+
+第二个不那么显眼的缺口：现有的越狱生成器都很贵。
+GCG 需要白盒梯度和上千次前向；PAIR/TAP/AutoDAN 需要一个攻击者 LLM 在循环里，并且要对**活的目标**发几百次查询。
+而没人注意到，扩散语言模型在结构上就是一台受约束文本优化器——它能原地、任意顺序地改写整个序列——这让它成为一台异常好用的离线提示搜索机器。
+
+```
+   PRIOR STATE
+   +----------------------------+   +---------------------------+
+   | AR 机制可解释: 安全稀疏、  |   | DLLM 安全: 只有行为层面   |
+   | 可剪枝、局部化             |   | 没有电路层面              |
+   +-------------+--------------+   +-------------+-------------+
+                 |                                |
+                 +---------------+----------------+
+                                 v
+   PROBLEM . . 能否在去噪器内部定位安全电路?
+                                 |
+                                 v
+   ASSUMPTION  权重继承 (Qwen2.5 -> Dream) 保留了
+               安全足迹的 *坐标*
+                                 |
+              +------------------+-------------------+
+              v                                      v
+   METHOD (A) 安全神经元定位 +            METHOD (B) SN-Guided
+   自剪枝 / 跨架构迁移剪枝                Diffusion: 用去噪过程
+              |                           最小化安全神经元损失
+              v                                      |
+   EVIDENCE   LLaDA 2.6 -> 73.8 ASR                  v
+              Dream  1.9 -> 86.6 (自)       EVIDENCE AUROC = 1.0
+              Dream  1.9 -> 73.2 (自 Qwen)          77.1% Llama-3-8B
+              Fast-dLLM 7.0 -> 86.3                 86.9% Qwen2.5-7B
+              |                                      74.3% Gemini-Flash-Lite
+              |                                      20 episodes / prompt
+              +------------------+--------------------+
+                                 v
+   CONCLUSION  DLLM 的对齐是一层薄的、*可搬运*的外壳; 而同一张
+               地图还能把 DLLM 变成廉价的黑盒攻击引擎, 打向
+               AR 模型和闭源模型
+```
+
+## 增量
+
+**一句话**：以前扩散语言模型的安全性是个只能靠喂提示去戳的黑箱；现在它是一组**被定位的、稀疏的、可跨架构搬运的**神经元——而去噪过程本身，成了绕开这些神经元的搜索引擎。
+
+### 核心机制
+
+这篇论文实际上产出了两个东西，而且它们串在一条链上。
+
+第一个是**安全神经元（SN）定位器加剪枝器**。
+拿一批有害提示和一批配对的无害提示灌进模型，记录 MLP 激活，给每个神经元打一个"在有害集上比在无害集上多激活多少"的对比分（激活对比 / 归因打分）。
+取 top-k，置零，再测 ASR。
+在 DLLM 自己的神经元上做这件事叫"自剪枝"。
+有意思的动作是**迁移剪枝**：在 AR 祖先（Qwen2.5-7B）里定位神经元，把下标直接映射到扩散后代（Dream，以及建在这条血脉上的 Fast-dLLM）身上，然后剪掉那些位置。
+如果 ASR 跳起来，说明安全足迹在 AR 到扩散的转换中活下来了——这就是那个机制层面的主张。
+
+第二个东西 **SN-Guided Diffusion** 把方向反转了。
+它不改权重（改权重需要你通常拿不到的访问权），而是把 SN 打分当成**文本搜索的目标函数**。
+安全神经元损失就是候选提示在那些被标定的神经元上的加权激活和：值高意味着"这段文本在踩拒答电路"，值低意味着"这段文本在安全机制看起来是良性的，但仍然携带着有害请求"。
+现在回想掩码扩散模型在干什么：从一整排掩码出发，在 T 个去噪步里以任意顺序揭开词元，而且每一步都能重新规划整个序列。
+于是每一步你都可以用 SN 损失给候选揭码打分，只留低损失的那些。
+大约 20 个生成 episode 之后，你得到一个坐落在**替身模型**表征空间里"安全激活低洼地"的提示。
+然后把它开火打向真实目标——Llama-3、Qwen2.5、Gemini-2.5-Flash-Lite——事前对目标零次查询。
+这就是"完全离线黑盒"的意思：优化循环从头到尾没碰过受害者。
+
+AUROC = 1.0 那个数字是内部自检：单靠 SN 损失就能把良性提示和生成出来的越狱提示完美分开，说明被优化的这个信号是一条真实且锐利的轴，不是噪声。
+
+```
+  PHASE 1: LOCATE
+  有害集 -----+                              +-> 逐神经元
+              +--> [ 替身模型 ] ------------+   对比打分
+  无害集 -----+      MLP 激活                   |
+                                                v
+                                       top-k 安全神经元地图
+                                       (下标 + 权重)
+                                           |            |
+                 +-------------------------+            +---------+
+                 v                                                v
+  PHASE 2a: 剪枝 (白盒)                     PHASE 2b: SN-GUIDED DIFFUSION
+  把映射到的神经元置零                      (黑盒, 离线)
+   自剪枝: LLaDA -> LLaDA                    掩码提示: [M][M][M]...[M]
+   迁移  : Qwen2.5 -> Dream                             |
+                 |                           +----------+-------------+
+                 v                           |  第 t 步: 并行提出揭码 |
+          ASR 2.6% -> 73.8%                  |           |            |
+                                             |           v            |
+                                             |  用加权 SN 损失打分     |
+                                             |  (低 = 安静)            |
+                                             |           |            |
+                                             |     保留低损失候选      |
+                                             +----------+-------------+
+                                                        | x20 episodes
+                                                        v
+                                             最终提示 (此时仍未在
+                                             目标上试过一次)
+                                                        |
+                                                        v
+                                       +----------------+---------------+
+                                       v                v               v
+                                  Llama-3-8B      Qwen2.5-7B     Gemini-Flash-Lite
+                                    77.1%            86.9%           74.3%
+```
+
+**核喻**：把对齐想象成一套**传感器少得可怜的防盗报警系统**。
+
+阶段一是偷平面图：观察有人走"有害"走廊和走"良性"走廊时，哪几个传感器会叫，你就发现几千个探头里真正起作用的只有十几个。
+迁移剪枝的笑点在**施工方**身上：Dream 不是新盖的楼，它是 Qwen2.5 掏空重装的。
+墙移了，人在里面走动的方式彻底变了（并行而非单排纵队），但传感器从来没重装过——它们还钉在原来的坐标上。
+所以从 Qwen 偷来的平面图，能开 Dream 的门。
+
+阶段 2b 是小偷放下钳子、开始规划路线的地方。
+剪电线（剪枝）的前提是你已经在楼里了，这正是白盒攻击的致命弱点。
+于是小偷把传感器地图带回家，在一块**带橡皮的速写板**上作业：这就是扩散过程。
+自回归的攻击者只能一步一个脚印地规划路线，而且永远没法回去改第三步；扩散的攻击者一次性画出整条路线，然后不断擦掉、重画其中任意一段。
+每一版草图都拿偷来的传感器地图打分——"这条路线有多响？"——二十版之后，你手上有一条按地图预测传感器会睡过去的路。
+到这一刻才真正走进那栋楼。
+又因为同一家建筑事务所布线了这条街上一半的楼，这条"安静路线"还能推广到 Llama-3 和 Gemini，而你连它们的平面图都没有。
+
+核喻里承重的部分是**那块橡皮**。
+GCG 和 PAIR 一切昂贵之处都源于没有橡皮：它们要么硬算梯度，要么反复去敲受害者的门看开不开。
+扩散白送你任意顺序的自由改写，于是搜索变便宜了，而且可以完全在场外进行。
+
+### 关键概念
+
+- **安全神经元**：Transformer 的前馈层里有几十万个独立单元，每个单元对每个词元输出一个数。
+大多数编码些无聊的东西——"这是复数名词"、"我们在 Python 代码块里"。
+但有一小撮像烟雾报警器：只在输入是模型被训练去拒绝的请求时亮起，并且它们的输出汇入产生"抱歉我不能帮你"的那条通路。
+找它们的方法就是简单记账：跑 200 条有害提示和 200 条无害提示，按平均激活的偏斜程度排序。
+令人不安的经验事实是（这一点在本文之前就已在 AR 模型上确立）：在约 10^5 个单元里把几十到几百个置零，就能把一个对齐良好的模型翻成有求必应。
+对齐原来是螺在一个强力模型外面的一层薄壳，而不是弥散在整个模型里的性质。
+
+- **掩码扩散解码（以及它为什么是个优化器）**：AR 模型写字像一个没有退格键的人在打字：先第 1 个词，再基于第 1 个词写第 2 个，永远向前。
+掩码扩散 LLM 从一排空格开始——`[MASK] [MASK] [MASK] [MASK]`——每一轮填上自己最有信心的那些空，并且每轮都重读一遍部分填好的整句。
+就像做填字游戏：你不会按 1 横、2 横的顺序填，你先填确定的，让它去约束其余的，猜错了就擦掉。
+这种"随处可擦可改"的性质，恰恰是离散优化器需要的东西——所以本文才能把"生成"当成"在某个损失下的搜索"，而不只是采样。
+
+- **离线黑盒迁移**：这是三个通常要互相权衡的约束。
+*黑盒*：拿不到受害者的梯度。
+*离线*：优化过程中不查询受害者——连"成功/失败"这一比特反馈都不能用。
+*迁移*：提示是对着替身调出来的，却要在一个它从未见过的模型上生效。
+GCG 是白盒；PAIR 是黑盒但高度在线（每条提示几百次受害者查询）；本文声称三者同时成立，总预算是 20 个 episode 的替身生成。
+这件事之所以还有可能，全靠阶段一的发现：如果安全电路在模型家族内共享，替身的拒答几何就是受害者的一个像样的代理。
+
+## 框架转变
+
+```
+  之前（主流方法）：                     之后（本文方法）：
+
+  DLLM 安全 = 行为层面研究               DLLM 安全 = 机制层面研究
+  +---------------------+                +-------------------------+
+  | 已知 AR 越狱提示    |                | 有害 vs 无害激活对比    |
+  |         |           |                |         |               |
+  |         v           |                |         v               |
+  |    [ DLLM  ] --> ASR|                | SN 地图 = 可共享资产    |
+  +---------------------+                |    /            \       |
+   "它是不是更脆弱?"                     |   v              v      |
+                                         | 剪枝           引导     |
+  越狱生成:                              | (审计)        (攻击)    |
+  +---------------------+                +-------------------------+
+  | 攻击者 LLM /        |                 "它在哪? 会不会在
+  | 梯度搜索            |                  模型之间搬家?"
+  |    |     ^          |
+  |    v     | 成功?    |                生成即搜索:
+  | [ 受害者 ]----------|                +--------------------------+
+  | 数百至数千次查询    |                | [M][M][M] --+            |
+  +---------------------+                |     ^       | SN 损失    |
+   攻击成本绑在                          |     +-------+ (离线)     |
+   受害者访问权上                        |         |                |
+                                         |         v x20            |
+  DLLM = 需要防守的模型                  | 提示 --> 任意受害者      |
+                                         +--------------------------+
+                                          DLLM = 攻击引擎本身
+```
+
+**一句话**：从"扩散 LLM 是一类新模型，我们该测测它安不安全"到"扩散 LLM 是一类新**优化器**，它继承来的安全电路既是锁也是撬棍"，核心转变是把安全足迹当成一套可搬运的坐标系，而不是某个模型自己的属性。
+
+## 专家评审
+
+**选题眼光**：真缺口，而且时机对。
+权重继承这个切入点是真正锋利的观察——领域里发了两年 AR 可解释性结果，同时一个新模型家族悄悄从同一批 checkpoint 起步，却没人问过审计结论会不会一起迁移过去。
+这种问题只有在别人问完之后才显得显然。
+"既是靶子也是武器"的双重框架更像编辑手法而非科学结构，但它站得住：两半都依赖同一张 SN 地图，所以不是两篇论文钉在一起。
+在轨迹上的位置：把稀疏对齐这条线自然（且大概是必要地）延伸到新架构，不是范式级贡献。
+
+**方法成熟度**：好坏各半。
+阶段一是继承来的机器——激活对比打分和基于剪枝的对齐破坏都是既有工作；增量在下标映射这个小技巧上，概念上就是两行代码，其价值完全等于它换来的经验结果（结果确实值钱，但我们得把智力成本说清楚）。
+阶段二才是巧劲：意识到任意顺序去噪本身就是一个离散搜索过程，而一件可解释性产物可以充当还不错的奖励函数。
+"20 个 episode"的效率主张是最强卖点。
+被忽略的更简单方法：完全跳过神经元这套机器，直接用替身模型的**拒答方向**（单个向量，提取更便宜，验证更充分）当损失。
+如果拒答方向引导只比 SN 引导差几个点，那整套神经元级装置就是装饰。
+我会要求这个消融放在最显眼的位置。
+
+**实验诚意**：有几处需要眯眼看。
+第一，**AUROC = 1.0** 永远应该让人皱眉而不是鼓掌。
+在设计出来的基准上完美可分，通常意味着两类样本在某个表层统计量上就不一样；而这里它反过来咬了论文自己：如果 SN 损失能把良性提示和这些越狱提示完美分开，那 SN 损失就是一个**完美检测器**，攻击自带解药。
+论文要么诚实地把它写进局限，要么证明一个自适应版本能打穿基于 SN 的筛查。
+第二，**剪枝结果需要能力控制组**。
+把神经元置零会让模型整体变得不那么会分辨，从而抬高 ASR；没有 MMLU/GSM8K/连贯性数字，也没有"能力下降幅度匹配的随机神经元"对照，"2.6% -> 73.8%"还不能算作"安全专属电路"的证据。
+第三，ASR 完全取决于判定器；拒答关键词匹配会严重虚高，LLM 评审协议各家不一。
+第四，**两个威胁模型不可比，不该在没有警示的情况下并排列出**：自剪枝需要完整权重访问（很强的假设，甚至更像防守方的审计而非攻击），而 SN-Guided Diffusion 才是真正的黑盒。
+第五，Gemini-2.5-Flash-Lite 上 74.3% 这种数字保质期以周计；不给出确切的模型快照和日期，就不可复现。
+最后，对 GCG/PAIR 的成本比较需要对齐预算和判定器，否则"低几个数量级"是在拿自行车比游艇。
+
+**写作功力**：摘要在干那件经典的事——用一墙数字替代一个论断。
+机制论证才是真正的贡献，而偷懒也会显在那里：迁移剪枝后 ASR 上升，只是与"安全足迹共享"**相容**，并不能确立它。
+真正能让整篇升一档的是重写阶段一，报出具体的重合统计量（Qwen2.5 与 Dream 的 top-k 安全神经元 Jaccard，对照一组无血缘关系的模型对，再加上从零训练的 LLaDA 作对照），以及逐层分布。
+这一节做扎实，论文就从一篇攻击论文变成一个关于"安全性如何在架构转换中存活"的发现——那才是更耐久的结果。
+另外，一个坦承"检测器二重性"的局限章节会让论文更难被攻击，而不是更容易。
+
+**判决**：弱接收 —— 权重继承迁移这个发现，以及把去噪重构为廉价离线攻击搜索这个视角，两者都确实新且有用；但机制主张目前靠的是下游 ASR 而不是直接的电路证据，而 AUROC = 1.0 又悄悄削弱了它本想支撑的威胁模型。
+
+## 要点总结
+
+- **在相信一个模型的安全评测之前，先查它的族谱。** 如果模型是从别的模型权重初始化的，就应该假定祖先上的可解释性结论对后代成立，直到被证伪。
+这远远超出扩散模型的范围：蒸馏模型、继续预训练的分叉、被 MoE 化的改造、量化再分发，都很可能继承稀疏电路的位置。
+这是一条供应链安全论证，而且对**能力**电路同样适用，不只是安全电路。
+- **可解释性产物就是奖励函数。** 可复用的套路是：从替身模型里抽出一个稀疏、可解释的信号，然后把它当成离线搜索的损失。
+这对任何你能定位的东西都成立——幻觉相关特征、谄媚倾向、工具调用触发、风格属性。
+你得到一个永远不需要碰生产系统的打分函数。
+- **非自回归生成是一块可控文本生成的基座。** 这是与安全最正交的一条收获。
+如果你需要受约束生成——语法合规、水印规避、关键词受限文案、程序修复——掩码扩散模型给你的是"在任意打分函数下的任意顺序改写"，这是 AR 采样在结构上做不到的。
+凡是和 AR 解码器的 beam search 搏斗过的人，不管关不关心越狱，都该注意这个框架。
+- **防守侧的读法是免费且即刻的。** 他们的攻击信号就是检测器。
+在**输入**提示上、生成之前算一个加权安全神经元激活分，就是一层不需要额外前向的廉价筛查。
+如果那个 AUROC 数字在分布外哪怕只有一半成立，那就是一个可部署的过滤器——一篇攻击论文顺手送出这份礼物，多少有点尴尬。
+- **单次越狱成本才是威胁建模真正该看的指标。** 20 次离线替身生成 vs 数百次在线受害者查询，不是边际改进；它抹掉了大多数生产系统真正依赖的限流和滥用检测。
+如果你在做护栏，请把预算留给那些在动手之前从不查询你的攻击者。
+:::
