@@ -1,0 +1,410 @@
+---
+title:
+  en: "Fisher-R1: Teaching Agents That a Correct p-Value Can Still Be Wrong"
+  zh: "Fisher-R1：算对了的 p 值，依然可能是错的"
+description:
+  en: "LLM agents run statistical code flawlessly and still reach invalid conclusions. This paper builds a benchmark that catches that failure mode and trains a 14B agent with verified statistical reward to fix it."
+  zh: "LLM 智能体能把统计代码跑得一行不错，却照样得出无效结论。这篇论文造了一个能抓住这种失败模式的基准，并用可验证的统计奖励训了一个 14B 智能体。"
+date: 2026-08-10
+tags: ["arxiv", "ai", "cs.ai"]
+image: "/arxiv-visuals/arxiv-fisher-r1-training-llm-agents-for.png"
+---
+:::en
+**Paper**: [2608.07437](https://arxiv.org/abs/2608.07437)
+**Authors**: Jiacheng Miao, Jin Mu, Guanhua Chen, James Zou
+**Categories**: cs.AI
+
+## The Gap
+
+Data-analysis agents have gotten good at the visible part of the job. Give one a CSV and a question, and DS-1000, DABench, DiscoveryBench, BLADE and friends will tell you whether it loaded the file, wrote runnable pandas, called the right library function, and produced a number that matches a reference answer. Execution accuracy is largely solved for tabular work.
+
+What none of those benchmarks really score is whether the number *means* what the agent says it means. A `ttest_ind` call can execute perfectly on data with repeated measures per subject, clustered sampling, wild heteroskedasticity, or twenty hypotheses tested in sequence — and return a p-value that is simply not a valid p-value for the claim being made. The code is green. The inference is broken. Because reference-answer benchmarks reward matching a number, an agent that reaches 0.03 by the wrong route scores identically to one that reaches 0.03 legitimately, and an agent that correctly reports 0.21 after clustering the standard errors can be marked wrong.
+
+This paper's claim is that this is the dominant remaining failure mode for scientific-analysis agents, that it is invisible to current evals, and that it is trainable. Hence two artifacts: **P-Bench** (425 open-ended hypothesis-testing tasks in economics, biology, medicine, where the agent gets only a hypothesis and a dataset and must choose a method, compute a p-value, and state a conclusion) and **Fisher-R1** (an open-weight agent RL-trained on synthetic tasks whose statistical ground truth is known by construction).
+
+```
+   [ PROBLEM ]  agents produce correctly executed but invalid tests
+        |
+        v
+   [ ASSUMPTION ]  validity is checkable when you know the
+                   data generating process
+        |
+        +----------------------------+
+        |                            |
+        v                            v
+   [ METHOD A ]                 [ METHOD B ]
+   P-Bench: 425 open-ended      synthetic DGPs with known
+   tasks scored on              correct test  ==>  verified
+   inferential validity         statistical reward  ==>  RL
+        |                            |
+        +-------------+--------------+
+                      v
+   [ EVIDENCE ]  frontier agents stumble on P-Bench.
+                 Fisher-R1-14B  >  backbone
+                 Fisher-R1-14B  >  GPT-5.4 / DeepSeek-V4-Pro
+                 +21% relative single-trial success
+                 +26% on hardest split
+                      |
+                      v
+   [ CONCLUSION ]  statistical rigor is a learnable skill
+                   not an emergent property of scale
+```
+
+## The Increment
+
+**One sentence**: Before, we measured whether an analysis agent's code ran and its number matched; after, we measure whether its p-value is **licensed* by the data — and we have a 14B open model that does this better than frontier proprietary agents.
+
+### Core Mechanism
+
+Two halves, and the interesting one is the training side. P-Bench is the diagnostic: open-ended tasks with no reference number handed to the agent, graded on the joint object (method choice, p-value, conclusion). "Open-ended" is doing real work here — the moment you supply a reference p-value, you've smuggled in the method, and the failure mode you wanted to measure disappears from the test.
+
+Fisher-R1 attacks the training-signal problem. You cannot get a trustworthy reward from real datasets, because on real data nobody knows the truth — that is the entire reason hypothesis testing exists. So the authors invert it: **generate the task from a known data generating process**. You decide there are within-subject repeated measures. You decide the variance scales with the covariate. You decide the true effect is zero. Now the set of valid analyses is determined by construction, and so is the correct conclusion. A reward function can check the agent's chosen method against the assumptions you injected, check the p-value it computed, and check whether the verbal conclusion follows. That reward is verifiable in the RLVR sense — no LLM judge guessing at rigor.
+
+Then it's a rollout loop: sample a synthetic task, let the agent inspect the data and write and run code in a sandbox, extract the method-p-value-conclusion triple, score it against the generator's ground truth, and do policy optimization on the reward. Repeat across a spread of assumption violations so the model stops reaching for `ttest_ind` as a default reflex and starts checking the shape of the data first. Evaluation then happens on P-Bench, which is a different distribution of tasks.
+
+```
+  TRAINING SIDE                          EVAL SIDE
+  =============                          =========
+
+  [ DGP sampler ]                        [ P-Bench ]
+  pick: clustering                       425 tasks
+        heteroskedasticity               econ / bio / med
+        repeated measures                only: hypothesis
+        multiplicity                           + dataset
+        true effect = 0 or d
+        |
+        | emits both
+        +-------------------+
+        |                   |
+        v                   v
+  ( dataset )        ( ground truth:
+  ( + prompt )         valid methods
+        |              + true answer )
+        v                   |
+  [ AGENT rollout ]         |
+   inspect data             |
+   write code               |
+   run in sandbox           |
+   report triple:           |
+    method / p / claim      |
+        |                   |
+        v                   v
+     +---------------------------+
+     |  VERIFIED STAT REWARD     |
+     |  method fits assumptions  |
+     |  p-value correct          |
+     |  conclusion follows p     |
+     +---------------------------+
+                |
+                v
+        [ policy update ]  --loop-->  Fisher-R1-14B  ==>  scored on P-Bench
+```
+
+**The metaphor**: this is a flight simulator for statisticians.
+
+You cannot grade a pilot by watching them fly real weather, because you don't know what the wind was actually doing. So you build a simulator where *you* set the crosswind, the icing, the failed hydraulic line. The DGP sampler is the scenario generator: clustering is the crosswind, heteroskedasticity is the icing, multiple comparisons is a slow fuel leak that only kills you if you ignore it. Because you authored the weather, you know exactly what the correct control input was — that's the verified reward, an automatic instructor rather than a human squinting at the tape. The agent's sandboxed code execution is the pilot's hands on the yoke. Thousands of simulator hours is the RL loop, which is how a reflex ("this looks paired, don't use an independent-samples test") gets built rather than recited. P-Bench is the check ride: real-feeling routes the trainee never practiced, flown for a grade.
+
+And the old benchmarks? They graded whether the plane landed at the right airport. Which it can, after you flew straight through a thunderstorm you should have gone around.
+
+### Key Concepts
+
+- **Validity vs. correctness of a p-value**: A p-value is a promise, not a number. The promise is: **if there were truly no effect, I would see a value this small at most 5% of the time.* That promise only holds if the recipe's assumptions match the data. Concretely: measure blood pressure twice on each of 50 patients, then run an independent two-sample t-test on the 100 rows as if they were 100 people. Your code is correct — the function computed exactly what it advertises. But you told it you had 98 degrees of freedom when you had roughly 49, so the promise is broken: under the null you'll get p &lt; 0.05 far more than 5% of the time. The number is correct; the inference is invalid. Every existing eval sees a valid-looking float and moves on.
+- **Verified reward from a generative process**: The usual bind in RL for reasoning is that you need a grader. For math you have the answer key; for open-ended analysis you don't. The escape hatch: don't find tasks, **manufacture* them, so the answer key is a byproduct of construction. If you wrote the simulation that put clustered noise in the data, you know clustered standard errors are required and you know the true effect is zero. The reward is a program, not a judgment call. The cost is distribution shift — your simulator is not the world — which is exactly why P-Bench has to exist separately.
+- **Open-ended task design as a measurement instrument**: Whether a benchmark can detect a failure mode is a property of its **format*, not its difficulty. Supply a reference p-value and the agent can back out the intended method; grade only the final number and you cannot distinguish luck from rigor. P-Bench's design decision — hypothesis plus raw data, nothing else, graded on the whole triple — is what makes the failure mode observable at all. That is the transferable move.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+  task + reference answer                task = hypothesis + raw data
+        |                                      |
+        v                                      v
+  [ agent writes code ]                  [ agent inspects data ]
+        |                                      |
+        v                                      v
+  [ does it run    ]                     [ what are the
+  [ does the number]                     [ assumptions here ]
+  [ match          ]                           |
+        |                                      v
+        v                                [ pick method that
+     PASS / FAIL                         [ survives them
+     ~~~~~~~~~~~                               |
+     execution                                 v
+     accuracy                             [ p-value + claim ]
+                                                |
+                                                v
+                                        graded on VALIDITY
+                                        ~~~~~~~~~~~~~~~~~~
+                                        was the number licensed
+
+  reward source: answer key              reward source: known DGP
+  trained by: SFT on traces              trained by: RL on verified
+                                                     stat reward
+  failure mode measured:                 failure mode measured:
+    wrong code                             right code / wrong inference
+```
+
+From grading the artifact to grading the argument, the core shift is that **correctness of computation and validity of inference are different variables, and only the second one is science**.
+
+## Expert Assessment
+
+Caveat up front: I'm working from the abstract and the framing, not a full read of the appendix, so treat the experimental critiques as things to check rather than things I've confirmed.
+
+**Problem choice**: Real gap, and well-placed. The AI-for-science agenda has moved from "can the agent write code" to "can I put this in a paper," and the bottleneck is exactly the class of error that leaves no trace in the logs. It's also the **right* narrow slice — hypothesis testing has crisp, checkable validity conditions, unlike, say, "was this causal claim reasonable." Slightly manufactured in one respect: the claim that existing benchmarks "fail to capture" this is a bit strong, since BLADE and some DiscoveryBench splits do probe analysis-decision quality. The honest version is "existing benchmarks don't isolate or systematically stress it."
+
+**Method maturity**: The recipe (synthetic tasks + verifiable reward + RL) is 2025-standard; there is nothing new in the optimization. The insight worth the paper is recognizing that statistics is an unusually good fit for RLVR, because the ground truth is not scraped or annotated but **authored* — you get an infinite, difficulty-controllable task supply for free. That's genuinely clever framing rather than brute force. What I'd want ruled out: the obvious cheaper baseline is scaffolding, not training. Give GPT-5.4 an assumption-diagnostics toolchain plus a mandatory pre-registration step ("state your assumptions and how you'll check them before writing the test") and a self-critique pass. If a 14B RL model beats a naked frontier model but loses to a well-scaffolded one, the contribution is much smaller. I'd bet the paper compares against agents with only light scaffolding.
+
+**Experimental integrity**: 425 tasks across three fields is thin once you split by difficulty — the "+26% on the hardest tasks" number is probably resting on a couple hundred items at most, and I'd want confidence intervals and multi-seed variance before believing the ordering against frontier models. Reporting **relative* single-trial improvement (21%) without foregrounding absolute rates is a mild rhetorical choice; 21% relative on a 40% base is a very different story from 21% on an 80% base. The biggest risk is a shared-ancestry leak: if P-Bench tasks and the RL training tasks come from overlapping generator logic or the same assumption taxonomy, Fisher-R1 is being tested on its training distribution while baselines are not. The paper needs an explicit generator-disjointness argument and, ideally, a held-out set of tasks from real published analyses. Minor smell: the abstract writes both "DeepSeekV4-Pro" and "DeepSeek-V4-Pro," which suggests the numbers section hasn't been proofread as carefully as one would like.
+
+**Writing quality**: The abstract is efficient and the framing is sharp. The corner-cutting is almost certainly in how validity is **scored* — "correct method given the assumptions" is not a single well-defined target, because several methods are often defensible (cluster-robust SEs vs. mixed model vs. aggregating to subject means). If the grader accepts one canonical answer, the benchmark penalizes competent analysts, and that would be the section I'd rewrite: a precise, worked-out account of the equivalence classes of acceptable analyses and the inter-rater agreement on them. Done well, that turns a nice paper into the reference artifact everyone cites.
+
+**Verdict**: weak accept — the failure mode is real and the benchmark is the durable contribution, but the training recipe is off-the-shelf and the headline "beats GPT-5.4" claim rests on a small benchmark whose independence from the training generator is the whole ballgame.
+
+## Takeaways
+
+Concrete things to steal:
+
+- **Split your eval axes: execution correctness vs. output validity.** This generalizes far past statistics. A SQL agent can produce a running query that answers a subtly different question; a finance agent can compute a correct IRR on the wrong cash-flow convention. If your eval only checks "did it run and match," you are blind to your production failure mode. Add a validity axis with its own score.
+- **When you lack an answer key, author the world instead of labeling it.** Any domain with a simulatable generative process — A/B testing, causal inference, survey weighting, queueing, backtesting, forecasting — can produce unlimited RL tasks with free, program-checkable ground truth and a difficulty dial. The pattern is: sample the latent structure first, emit the observable data second, keep the structure as the reward key.
+- **Strip the reference answer to expose reasoning.** Handing the model a target number leaks the intended method. If you want to measure judgment rather than recall, give the minimum viable input and grade the whole decision chain, not the terminal value.
+- **The assumption-violation taxonomy is a free lint checklist.** Even without touching the model, you can hard-code a pre-analysis gate in your own agent: check for repeated measures / nesting, unequal variances, non-normality with small n, and how many tests have already been run this session. Most real-world agent inference errors are in that short list.
+- **Small-model-plus-narrow-RL beats frontier-general is now a repeatable play.** If you have a domain where reward is programmatically verifiable, a 14B trained model is a plausible cheaper substitute for a frontier API call. Worth pricing out for any high-volume, narrow analysis pipeline.
+:::
+
+:::zh
+**论文**: [2608.07437](https://arxiv.org/abs/2608.07437)
+**作者**: Jiacheng Miao, Jin Mu, Guanhua Chen, James Zou
+**分类**: cs.AI
+
+## 缺口
+
+数据分析智能体已经把"看得见的那部分工作"做得挺好了。
+扔一个 CSV 和一个问题过去，DS-1000、DABench、DiscoveryBench、BLADE 这类基准会告诉你：文件读进去了吗，pandas 代码能跑吗，库函数调对了吗，最后那个数字和参考答案一致吗。
+在表格类任务上，执行正确性基本上已经不是瓶颈。
+
+这些基准几乎都没有评的，是那个数字到底"是不是它声称的那个意思"。
+一个 `ttest_ind` 可以在每个受试者有重复测量、有聚类抽样、方差严重异质、或者已经连着测了二十个假设的数据上跑得完美无缺，然后返回一个——对于它要支持的那个结论来说——根本不成立的 p 值。
+代码是绿的，推断是坏的。
+
+更麻烦的是，参考答案式的评分会主动奖励这种错误。
+用错误路径凑到 0.03 的智能体，和正当地得到 0.03 的智能体拿一样的分；而老老实实做了聚类稳健标准误、报出 0.21 的那个，反而会被判错。
+
+这篇论文的主张是：这是科学分析智能体身上剩下的主要失败模式，现有评测看不见它，而它是可以被训练掉的。
+于是有了两个产出：**P-Bench**（425 个开放式假设检验任务，覆盖经济学、生物、医学，智能体只拿到一个科学假设和一份数据集，必须自己选方法、算 p 值、下结论）和 **Fisher-R1**（一个开放权重智能体，在"统计真值由构造方式已知"的合成任务上做强化学习）。
+
+```
+   [ 问题 ]  智能体代码跑对了但检验无效
+        |
+        v
+   [ 假设 ]  只要你知道数据生成过程
+             有效性就是可程序化验证的
+        |
+        +----------------------------+
+        |                            |
+        v                            v
+   [ 方法 A ]                   [ 方法 B ]
+   P-Bench: 425 个开放式        已知 DGP 造任务  ==>
+   任务  按推断有效性评分       可验证统计奖励  ==>  RL
+        |                            |
+        +-------------+--------------+
+                      v
+   [ 证据 ]  前沿智能体在 P-Bench 上翻车
+             Fisher-R1-14B  >  自身 backbone
+             Fisher-R1-14B  >  GPT-5.4 / DeepSeek-V4-Pro
+             单次成功率相对提升 21%
+             最难档提升 26%
+                      |
+                      v
+   [ 结论 ]  统计严谨性是可学的技能
+             不是规模带来的涌现属性
+```
+
+## 增量
+
+**一句话**: 以前我们量的是"代码跑没跑通、数字对没对上"；现在量的是"这个 p 值有没有被数据授权"——并且有了一个 14B 开放模型，在这件事上比前沿闭源智能体做得好。
+
+### 核心机制
+
+两半，有意思的是训练那一半。
+
+P-Bench 是诊断器：开放式任务，不给智能体任何参考数值，评的是一个整体三元组（方法选择 + p 值 + 结论）。
+"开放式"在这里是实打实承重的设计：你一旦给出参考 p 值，就等于把方法偷偷告诉了模型，你想测的那个失败模式当场从测试里蒸发。
+
+Fisher-R1 解决的是训练信号问题。
+真实数据给不了可信奖励，因为真实数据上没人知道真相——假设检验之所以存在就是因为这个。
+作者的做法是把因果倒过来：**任务由已知的数据生成过程造出来**。
+是你决定要有受试者内重复测量的，是你决定方差随协变量放大的，是你决定真效应为零的。
+于是"哪些分析是有效的"和"正确结论是什么"都由构造方式确定。
+奖励函数可以逐项检查：智能体选的方法是否与你注入的假设条件相容、p 值算得对不对、口头结论是否真的从这个 p 值推得出来。
+这是 RLVR 意义上的可验证奖励——不需要一个 LLM 裁判去揣测"严谨不严谨"。
+
+剩下就是 rollout 循环：采一个合成任务，让智能体查看数据、在沙箱里写代码并执行，抽出"方法-p 值-结论"三元组，对着生成器的真值打分，做策略优化。
+在各种假设违背上铺开重复，让模型不再把 `ttest_ind` 当默认反射，而是先去看数据的形状。
+最后到 P-Bench 上评，那是另一个分布的任务。
+
+```
+  训练侧                                  评测侧
+  ======                                  ======
+
+  [ DGP 采样器 ]                          [ P-Bench ]
+  挑选: 聚类结构                          425 个任务
+        方差异质                          经济 / 生物 / 医学
+        重复测量                          只给: 假设
+        多重比较                                + 数据集
+        真效应 = 0 或 d
+        |
+        | 同时吐出两样东西
+        +-------------------+
+        |                   |
+        v                   v
+  ( 数据集 )         ( 真值:
+  ( + 题目 )           有效方法集合
+        |               + 正确结论 )
+        v                   |
+  [ 智能体 rollout ]        |
+   查看数据                 |
+   写代码                   |
+   沙箱执行                 |
+   报告三元组:              |
+    方法 / p / 结论         |
+        |                   |
+        v                   v
+     +---------------------------+
+     |     可验证统计奖励        |
+     |  方法是否匹配假设条件     |
+     |  p 值是否算对             |
+     |  结论是否从 p 值推出      |
+     +---------------------------+
+                |
+                v
+        [ 策略更新 ] --循环--> Fisher-R1-14B ==> 在 P-Bench 上打分
+```
+
+**核喻**：这是一台给统计学家用的飞行模拟器。
+
+你没法靠看飞行员飞真实天气来给他打分，因为你不知道当时风到底在干什么。
+所以你造一台模拟器，由**你**来设定侧风、结冰、液压失效。
+DGP 采样器就是那个场景生成器：聚类结构是侧风，方差异质是机翼结冰，多重比较是慢性漏油——只有你无视它时才会致命。
+因为天气是你写的，你精确地知道正确操作是什么，这就是可验证奖励：一个自动教官，而不是一个人盯着录像瞎猜。
+智能体在沙箱里执行代码，就是飞行员的手放在驾驶杆上。
+上千小时的模拟器时间就是 RL 循环——反射（"这看起来是配对数据，别用独立样本检验"）是这样练出来的，不是背出来的。
+P-Bench 是最后的实机考核：像真的一样、但学员没练过的航线，飞一趟给个成绩。
+
+那些旧基准呢？
+它们只查飞机有没有落在正确的机场。
+而飞机是可以落对的——在你本该绕开、却直接穿过一片雷暴之后。
+
+### 关键概念
+
+- **p 值的"有效性"与"算得对"是两件事**: p 值是一个承诺，不是一个数。
+  承诺的内容是：*如果真的没有效应，我出现这么小的数值的概率最多 5%*。
+  这个承诺只在"配方的假设与数据吻合"时才成立。
+  具体点：给 50 个病人各测两次血压，然后把这 100 行当成 100 个人做独立样本 t 检验。
+  你的代码没错——函数算的正是它宣称要算的东西。
+  但你告诉它自由度是 98，而实际大约只有 49，于是承诺破了：在零假设下你拿到 p &lt; 0.05 的频率会远高于 5%。
+  数字是对的，推断是无效的。
+  而现有评测看到一个长得很正常的浮点数就过去了。
+
+- **从生成过程里取可验证奖励**: 推理类 RL 的老难题是"谁来打分"。
+  数学有答案册，开放式分析没有。
+  逃生口是：不去*找*任务，而是*造*任务，让答案册成为构造过程的副产品。
+  既然是你亲手往数据里放的聚类噪声，你就知道必须用聚类稳健标准误，也知道真效应是零。
+  奖励于是变成一段程序，而不是一次判断。
+  代价是分布偏移——你的模拟器不是世界——这恰好解释了为什么 P-Bench 必须独立存在。
+
+- **开放式任务设计本身就是测量仪器**: 一个基准能不能**看见*某种失败模式，取决于它的**格式**，而不是它的难度。
+  给了参考 p 值，模型就能反推出预期方法；只评最终数字，你就无法区分运气和严谨。
+  P-Bench 的设计决定——只给假设加原始数据，别的什么都不给，然后对整个三元组评分——才是让这个失败模式变得可观测的原因。
+  这一手是最值得迁移的。
+
+## 框架转变
+
+```
+之前（主流方法）：                    之后（本文方法）：
+
+  任务 + 参考答案                      任务 = 假设 + 原始数据
+        |                                    |
+        v                                    v
+  [ 智能体写代码 ]                     [ 智能体先看数据 ]
+        |                                    |
+        v                                    v
+  [ 能跑吗        ]                    [ 这里有哪些
+  [ 数字对得上吗  ]                    [ 假设条件
+        |                                    |
+        v                                    v
+     通过 / 失败                       [ 选一个能在这些
+     ~~~~~~~~~~~                       [ 条件下站住的方法
+     执行准确率                              |
+                                             v
+                                       [ p 值 + 结论 ]
+                                             |
+                                             v
+                                       按 "有效性" 评分
+                                       ~~~~~~~~~~~~~~~~
+                                       这个数字被授权了吗
+
+  奖励来源: 答案册                     奖励来源: 已知 DGP
+  训练方式: 轨迹 SFT                   训练方式: 可验证统计
+                                                 奖励上做 RL
+  能测出的失败:                        能测出的失败:
+    代码写错                             代码对了 / 推断错了
+```
+
+一句话：从"评产物"到"评论证"，核心转变是——**计算的正确性和推断的有效性是两个不同的变量，而只有第二个才叫科学**。
+
+## 专家评审
+
+先声明：我看的是摘要和框架，不是完整正文和附录，所以下面对实验的质疑请当成"待核查项"，不是"已确认问题"。
+
+**选题眼光**: 真缺口，位置也选得准。
+AI for science 这条线已经从"智能体会不会写代码"走到"我敢不敢把这个结果写进论文"，而卡点恰好是这类在日志里不留痕迹的错误。
+切口也选对了：假设检验的有效性条件是清晰可判的，不像"这个因果主张合理吗"那样含混。
+略有一点人造成分：说现有基准"完全没有捕捉"这一模式说得偏满，BLADE 和 DiscoveryBench 的部分子集其实是在探分析决策质量的。
+诚实的表述应该是"现有基准没有隔离并系统性地压测它"。
+
+**方法成熟度**: 配方（合成任务 + 可验证奖励 + RL）是 2025 年的标准件，优化层面没有新东西。
+值得一篇论文的洞见在于识别出：统计学是 RLVR 异常契合的领域，因为真值不是爬来的也不是标来的，而是**被作者写出来的**——你于是免费获得了无限、难度可控的任务供给。
+这确实是巧劲而不是蛮力。
+
+我更想看到被排除掉的是：显而易见的更便宜的对照不是训练，而是脚手架。
+给 GPT-5.4 配一套假设诊断工具链，加一个强制的"预注册"步骤（写检验之前先声明你的假设条件和你打算怎么查），再加一轮自我批判。
+如果一个 14B 的 RL 模型赢得了裸跑的前沿模型，却输给了配好脚手架的前沿模型，那贡献就小得多。
+我猜论文里的对照组只带了很轻的脚手架。
+
+**实验诚意**: 三个领域 425 题，一按难度切分就显薄——"最难档 +26%" 大概最多压在两三百道题上，我要看置信区间和多种子方差，才愿意相信它对前沿模型的排序是稳的。
+只报**相对**单次成功率提升（21%）而不把绝对值放到显眼处，是个轻微的修辞选择：40% 基线上的相对 21% 和 80% 基线上的相对 21% 是完全不同的两个故事。
+
+最大的风险是"同源泄漏"：如果 P-Bench 的任务和 RL 训练任务出自重叠的生成逻辑、或同一套假设违背分类体系，那 Fisher-R1 是在自己的训练分布上被测，而基线不是。
+论文需要一段明确的"生成器不相交"论证，最好再加一个来自真实已发表分析的留出集。
+小味道：摘要里同时出现了 "DeepSeekV4-Pro" 和 "DeepSeek-V4-Pro"，说明数字那一节的校对可能没有想象中细。
+
+**写作功力**: 摘要很紧，框架很利。
+偷懒的地方几乎肯定在"有效性到底怎么打分"上——"给定假设条件下的正确方法"并不是一个单值目标，因为常常有好几种方法都站得住（聚类稳健标准误 vs 混合效应模型 vs 先按受试者聚合）。
+如果评分器只认一个标准答案，这个基准就会惩罚有能力的分析者。
+要我重写，就重写这一节：把"可接受分析的等价类"和人类评分者之间的一致性摊开讲清楚。
+写好了，这篇从一篇不错的论文变成大家都会引的参照物。
+
+**判决**: 弱接收 —— 失败模式是真的，基准是能留下来的那部分贡献；但训练配方是货架产品，而"打败 GPT-5.4"这个头条结论，全部押在"基准与训练生成器相互独立"这一件事上。
+
+## 要点总结
+
+能直接搬走的东西：
+
+- **把评测拆成两个轴：执行正确性 vs 输出有效性。** 这远远不止适用于统计。
+  一个 SQL 智能体可以写出能跑的查询，但回答的是一个微妙不同的问题；一个金融智能体可以在错误的现金流约定上算出正确的 IRR。
+  如果你的评测只查"跑通且匹配"，你对自己线上真正的失败模式是全盲的。
+  加一条有效性轴，单独打分。
+
+- **没有答案册的时候，去"造世界"而不是"打标签"。** 任何有可模拟生成过程的领域——A/B 实验、因果推断、抽样加权、排队论、回测、预测——都能产出无限任务，附带免费的、可程序校验的真值，还带一个难度旋钮。
+  套路是：先采隐结构，再吐出可观测数据，把结构留作奖励钥匙。
+
+- **拿掉参考答案，推理才会露出来。** 把目标数字交给模型，等于泄漏了预期方法。
+  想测判断力而不是回忆力，就给最小可行输入，然后评整条决策链，而不是末端那个值。
+
+- **那份"假设违背清单"本身就是免费的 lint 规则。** 就算不碰模型，你也能在自己的智能体里硬编一道分析前闸门：查重复测量/嵌套结构、查方差是否齐、小样本查正态性、查本次会话已经跑了多少个检验。
+  现实中绝大多数智能体推断错误都落在这张短清单里。
+
+- **"小模型 + 窄域 RL 打赢前沿通用模型"已经是可复制的打法。** 只要你的领域里奖励能程序化验证，一个 14B 训练模型就是前沿 API 调用的可信替代品。
+  任何高频、窄域的分析流水线都值得算一遍这笔账。
+:::

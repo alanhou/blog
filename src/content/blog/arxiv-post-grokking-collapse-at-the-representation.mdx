@@ -1,0 +1,526 @@
+---
+title:
+  en: "When Grokking Runs Backwards: Muon, Modular Addition, and a Gain Knob Nobody Was Watching"
+  zh: "顿悟之后的塌陷：Muon、模加法，以及没人盯着的那个音量旋钮"
+description:
+  en: "A paper showing that Muon-trained transformers grok modular addition faster and then repeatedly lose it — and that the failure is not a lost circuit but a correct circuit being drowned out at the representation-readout interface."
+  zh: "论文发现 Muon 训练的 Transformer 更快顿悟模加法，随后又反复丢失泛化；而失败并非电路消失，而是正确电路在表征-读出接口处被盖住了。"
+date: 2026-08-10
+tags: ["arxiv", "ai", "cs.ai", "cs.lg"]
+image: "/arxiv-visuals/arxiv-post-grokking-collapse-at-the-representation.png"
+---
+
+![Concept animation](/arxiv-visuals/post-grokking-collapse-at-the-representation/ConceptScene.gif)
+
+
+:::en
+**Paper**: [2608.07436](https://arxiv.org/abs/2608.07436)
+**Authors**: Ali Janati, Kaoutar El Maghraoui, Andrei Kanavalau, Anass Belfatmi
+**Categories**: cs.AI, cs.LG
+
+## The Gap
+
+Grokking research has largely treated the phenomenon as a one-way door. Train a small transformer on modular addition, watch train accuracy hit 100% while validation flatlines, wait, and then validation snaps to 100% as the model discovers the Fourier-multiplication circuit. The standard toolkit that grew around this — Fourier support of the embeddings, power concentrated on a few frequencies, progress measures built from those quantities — implicitly assumes that once the circuit is present, the story is over. What remains is a question of timing: which optimizer, which weight decay, which data fraction gets you through the door sooner.
+
+Muon enters as a timing improvement. Under the now-standard split, Muon takes the hidden matrices while AdamW keeps embeddings and the output head, and it does grok faster. This paper's move is to keep training past the moment everyone else stops recording. Under that longer horizon, all nine configurations on `(a+b) mod 113` grok and then lose generalization. The instability is not a Muon quirk either: the selected AdamW reference falls below threshold on four of five seeds, bottoming out at 27.59%.
+
+The second gap is diagnostic rather than empirical. When accuracy falls, the natural question is "which part broke?" — and the paper argues the question is malformed. The readout composed with the representation is what the loss constrains; the factorization into "a representation" and "a readout" is free up to an invertible map. So the failure can only be located at the interface, jointly. And the standard Fourier progress measures, it turns out, do not move at all across the collapse.
+
+```
+[Problem] grokking is recorded as a one-way door:
+          memorize == then generalize == then stop logging
+                |
+                v
+[Assumption under test] after validation saturates the
+   solution is stable and optimizer choice only sets
+   how fast you arrive
+                |
+                v
+[Method] 1. keep training. 9 configs Muon-hidden + AdamW-embed
+         2. measure step-size response to a vanishing gradient
+         3. causal test: from bit-identical states freeze one
+            group at a time and re-run paired seeds
+         4. read the circuit directly via Fourier family filters
+                |
+                v
+[Evidence] 9 of 9 grok then fall below threshold
+           post-fit gradient ~ 1e-6
+             elasticity: Muon -0.03  vs  AdamW +1.5
+             Muon group moves 8.0x faster per parameter
+           freeze embed/readout: 0 sub-threshold evals over
+             451400 post-grokking steps vs 137-321 unfrozen
+           task-aligned family alone = 100 while full model = 45.85
+           rescale that family ==> 99.9
+                |
+                v
+[Conclusion] the collapse is a gain failure at the
+   representation-readout interface not a lost circuit.
+   Standard Fourier support is unchanged. Power cosine 0.9899
+   ==> existing progress measures are blind to it
+```
+
+## The Increment
+
+**One sentence**: Before this paper, grokking was a transition you waited for and Muon was a way to wait less; after it, grokking is one resolution of a recurring contest at the representation-readout interface, and the same contest can resolve downward — invisibly to every Fourier progress measure in current use.
+
+### Core Mechanism
+
+Start with the state right after the training set is solved. The gradient collapses to order `10^-6`, because there is nothing left to fit. Now the two optimizer groups respond to that silence very differently, and the paper quantifies this with what it calls step-size elasticity: how much the update magnitude shrinks when the gradient magnitude shrinks. AdamW's elasticity is `+1.5` — superlinear, so a hundredfold drop in gradient produces roughly a thousandfold drop in step. Muon's is `-0.03`, which is to say approximately zero: orthogonalization and normalization make the update size essentially independent of how loud the gradient is. Per parameter, the Muon group keeps moving 8.0x faster than the AdamW group. Nobody asked either group to move; one of them mostly stopped, the other did not.
+
+That drift lands on a product. Logits are readout times representation, and the loss constrains only the product — swap in `W M^-1` and `M H` for any invertible `M` and nothing observable changes. So there is no fact of the matter about whether "the representation degraded" or "the readout degraded." What can degrade is their alignment. The causal test is clean: fork from bit-identical states and freeze one group. Freezing embeddings and readout eliminated the failure across five runs and 451,400 post-grokking steps with five paired seeds — unfrozen arms logged 137 to 321 sub-threshold evaluations, frozen arms logged none. Note the asymmetry: the group whose freezing was tested at length is the slower-moving one. Speed is not the same as being the causal handle.
+
+The third component is the readout probe. Filter the logits down to the Fourier family the task uses — `(k,k)` for addition, and the family swaps to `(k,-k)` under subtraction, which is a nice confirmation that the task, not the optimizer, selects it. Across 43 checkpoints over five seeds and three regimes, that filtered family alone reaches exactly 100%. This splits failures into two kinds that look identical on an accuracy curve. In circuit failure, the filtered family also stops solving the task: the mechanism is genuinely gone. In masking, the family remains perfect while the full model sits at 45.85% — it assigns a positive margin to the correct answer on every example, including the ones the model gets wrong, and is simply outvoted by a near-equal adversarial remainder. Rescale the family and 99.9% comes back. Grokking, on this account, is the same contest resolving upward.
+
+```
+        a          b
+        |          |
+   [ embeddings and readout ]  <== AdamW   elasticity +1.5
+        |          |                        goes quiet when grad ~ 1e-6
+        v          v
+   [    hidden matrices     ]  <== Muon    elasticity -0.03
+        |                                   8.0x faster per parameter
+        v                                   keeps stepping regardless
+   H = representation ---.
+                          \
+                           >  INTERFACE:   logits = W . H
+                          /    loss pins only the product
+   W = readout -----------'    W M^-1 . M H is unconstrained
+        |
+        v
+   logits decompose into Fourier families
+        |
+        +-- task-aligned family    (k k) add   /   (k -k) sub
+        |      alone = 100  positive margin on EVERY example
+        |      including the ones the full model gets wrong
+        |
+        +-- remainder
+        |      near-equal magnitude and opposed ==> outvotes it
+        |
+        v
+   observed accuracy = 45.85     rescale family ==> 99.9
+   meanwhile Fourier support unchanged  power cosine 0.9899
+
+   ablation: remove Muon normalization and orthogonalization
+     effective conjugate pairs 326 ==> 4
+     no recurrent collapse and terminal failure instead
+     ==> the thing causing the drift is also what builds the circuit
+```
+
+Think of a recording studio mixing desk. The hidden matrices are the musicians; the task-aligned Fourier family is the one soloist who actually knows the melody, and the remainder is a large ensemble playing something close to noise. The readout and embeddings are the gain knobs — they decide how loud each contribution arrives at the master output, which is the logits. Grokking is the moment the soloist's fader comes up far enough to carry the mix.
+
+Now the two optimizers are two engineers with different habits. AdamW turns knobs in proportion to how badly the mix sounds; when the mix is already fine, it nearly stops touching anything. Muon turns each knob by a fixed amount every second, whether or not anyone complained, because normalization strips out the "how bad is it" signal from the step size. So after the mix is solved, one engineer sits back and the other keeps twisting. Eventually the ensemble is as loud as the soloist and the master output turns to mush — even though the soloist never played a wrong note. That is masking: solo the correct channel and it is still perfect, push its fader back up and the mix is restored. Circuit failure is the different disaster where the soloist actually forgot the melody, and no amount of fader work helps.
+
+Two extra pieces of the studio map cleanly. Taping the gain knobs in place, i.e. freezing embeddings and readout, prevents the mush for 451,400 steps — the mix stays where it was. And firing Muon's normalization is not a fix, because that same normalized stepping is what recruited the full ensemble in the first place: without it you go from 326 effective conjugate pairs down to 4, which is a band too small to ever play the piece. You stop having recurrent mush and get permanent silence instead. Finally, the gauge ambiguity: you can rename every musician and re-scale every fader in a compensating way and the master output is bit-identical. So asking "was it the band or the desk?" has no answer. Only the alignment between them is real.
+
+### Key Concepts
+
+- **Step-size elasticity**: Take the log of how big your gradient is and the log of how big a step your optimizer takes, and ask for the slope between them. Plain SGD has a slope of 1: half the gradient, half the step. AdamW here measures `+1.5`, meaning it decelerates faster than the gradient shrinks, so a near-solved loss basically parks it. Muon measures `-0.03`, effectively zero, because orthogonalizing the update throws away magnitude information and keeps only direction — a unit-ish step no matter how faint the signal. On its own this is close to a restatement of what normalized optimizers do by design. What makes it consequential is the regime: at gradient `1e-6` the loss has stopped issuing instructions, and a scale-invariant optimizer does not notice, so it keeps performing a random-ish walk through a space of solutions the loss cannot distinguish. Fast arrival and continued wandering are the same property.
+
+- **Identified only up to an invertible map**: Suppose I hand you the number 12 and tell you it is a product. Was it 3 times 4 or 2 times 6? The question has no answer from the product alone. The interface here is the same situation in matrix form: logits come from readout times representation, and for any invertible `M` you can put `M` into the representation and `M^-1` into the readout with zero change to any loss, any accuracy, any prediction. So "the representation got worse" is not a well-formed claim; you can always shift blame across the interface at will. What is well-formed is whether the two sides still agree with each other. This is why the paper localizes the failure to the interface rather than to a layer, and why the freezing experiment has to fork from bit-identical states — you need the same 12 to start with before you can say anything about the factors.
+
+- **Masking versus circuit failure**: Imagine a committee of 100 voting on each question. One member is right every single time. If the other 99 vote randomly and roughly cancel, the committee is right too. Now let the other 99 slowly get louder until they nearly cancel each other but not quite — the residual noise is now as big as the one correct vote, and the committee starts getting things wrong. The expert never became wrong. Measured at 45.85% accuracy, this model still gives the correct answer a positive margin on every example, errors included; it is outvoted, not confused. Rescale the expert's vote and you are back to 99.9%. The practical sting is that this looks exactly like forgetting from the outside, and the standard Fourier diagnostics agree it is nothing at all — support unchanged, power distribution cosine `0.9899` across an abrupt collapse.
+
+## Framework Shift
+
+```
+Before (mainstream)                  After (this paper)
+-------------------                  ------------------
+
+val acc                              val acc
+100 |      _______________           100 |     /\   /\      /\
+    |     /                              |    /  \ /  \    /  \
+    |    /                               |   /    v    \  /    \
+  0 |___/                               0|__/           \/      \
+    +----------------------->             +----------------------->
+        time                                    time
+
+one axis of merit:                   two axes of merit:
+  is the circuit present  y / n        is the circuit present  y / n
+                                       is the circuit loudest  y / n
+
+diagnose with:                       diagnose with:
+  Fourier support of embeddings        filter to the task-aligned
+  power on top frequencies             family and score it ALONE
+  ( both unchanged across a            then compare to full model
+    collapse : cosine 0.9899 )         ( 100 vs 45.85 ==> masking )
+
+optimizer question:                  optimizer question:
+  how fast do we grok                  what does the optimizer do
+                                       AFTER the gradient dies
+  [ Muon: faster ]                     [ Muon: keeps stepping.
+                                         elasticity -0.03 ]
+
+blame assignment:                    blame assignment:
+  layer L degraded                     interface W . H drifted
+                                       ( W M^-1 . M H is free
+                                         so no layer can be blamed )
+```
+
+From "did the model find the circuit" to "does the circuit still win the vote," the core shift is that generalization is treated as a contested equilibrium at an interface rather than a discovered object in a layer.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, and a well-chosen one. Grokking papers have a strong incentive to stop logging at the happy ending, and simply extending the horizon is the kind of cheap, obvious experiment that goes unrun for years. The Muon framing is timely given how quickly the hidden-matrices-plus-AdamW-embeddings split became default. My reservation is that the title oversells Muon as the culprit while the abstract itself reports the AdamW reference failing on four of five seeds down to 27.59%. The honest headline is "post-grokking states are not stable equilibria and normalized optimizers make it worse," which is a weaker but more defensible claim. I also cannot tell from the abstract how carefully this is distinguished from the existing slingshot-effect and ungrokking literature, where cyclic post-convergence instabilities under adaptive optimizers are already documented; that positioning is load-bearing for the novelty claim and its absence from the abstract is a small warning sign.
+
+**Method maturity**: The diagnostic half is genuinely clever. Refusing to blame a layer because the factorization is gauge-free, then filtering logits to the task-aligned family and scoring it in isolation, is exactly the right instrument, and the `(k,k)` to `(k,-k)` swap under subtraction is a satisfying sanity check that the probe tracks the task rather than the optimizer. The "positive margin on every example including the errors" result is the sharpest single sentence in the abstract, because it converts a fuzzy claim about representations into a per-example fact. The mechanism half is thinner. Elasticity `-0.03` for an orthogonalized optimizer is close to a definitional consequence of Muon's update rule, not a discovery; the contribution is noticing that scale invariance is a liability once the gradient dies, which is a good observation dressed as a measurement. And freezing is a fix, not an explanation — it demonstrates that motion in either group is necessary, but says little about why the remainder grows in an adversarial rather than random direction. That "why" is the missing theorem.
+
+**Experimental integrity**: Better than average on the causal design. Forking from bit-identical states with paired seeds is the right control and I wish more papers did it; 451,400 post-grokking steps with zero sub-threshold evaluations against 137-321 in the unfrozen arms is not a marginal effect. The breadth sweep — two moduli, two widths, two training fractions, subtraction, depth — is appropriate for the claim being made. Three things I would press on. First, "the selected AdamW reference" is doing quiet work; selected how, and against what grid? If the AdamW baseline was chosen for any reason other than a matched-budget sweep, the Muon-versus-AdamW comparison is not load-bearing. Second, five seeds is thin for a claim about intermittent failures, and "137-321 sub-threshold evaluations" depends entirely on evaluation cadence and threshold choice, neither of which the abstract pins down. Third, "326 effective conjugate pairs" exceeds the number of distinct frequency pairs available at modulus 113, so it must be aggregating over neurons or layers — as stated it invites misreading, and the `326 ==> 4` collapse is one of the paper's headline numbers. I am judging the abstract's numbers here, not the full tables; several of these concerns could dissolve on a careful read of the methods section.
+
+**Writing quality**: The abstract is unusually dense and reads like a results table with connective tissue, which I mostly respect — but it front-loads counts and percentages before establishing why the reader should care about the interface at all. The corner cut is theoretical: there is no account of why the remainder ends up near-equal and opposed. A section deriving even a toy version of that — why scale-invariant drift in a loss-flat gauge direction should grow the off-family components at a rate comparable to the on-family ones — would move this from a well-documented phenomenon to an explanation, and would be the single highest-leverage rewrite. Second priority would be an explicit comparison to slingshot and ungrokking phenomenology.
+
+**Verdict**: weak accept — the causal freezing experiment and the masking-versus-circuit-failure distinction are solid, transferable contributions, and the demonstration that standard Fourier progress measures are blind to a real collapse is worth publishing on its own; the mechanism story is descriptive rather than explanatory and the Muon framing is stronger than the evidence supports.
+
+## Takeaways
+
+Specific things worth stealing:
+
+**Score the sub-circuit alone, not just the whole model.** The most portable technique here is filtering the logits to a hypothesized mechanism and measuring its standalone accuracy alongside the full model's. When those two numbers diverge — 100% versus 45.85% — you have learned something an ablation cannot tell you: the mechanism is intact and being outvoted. This generalizes anywhere you can decompose a readout into candidate families: attention heads, SAE features, expert routes. The stronger version is the per-example margin check on the failures specifically, since "correct margin on every error case" is a very hard fact to explain away.
+
+**Treat scale-invariant optimizers as a liability in the flat regime, not a virtue.** Normalized and orthogonalized updates are usually sold as robustness to gradient scale. Reframe it: they do not know when to stop. Once your loss is effectively solved and the gradient is at `1e-6`, a scale-invariant optimizer keeps taking full-size steps through directions the loss cannot see. If you use Muon or any normalized update rule with long training tails, measure the log-log slope of update norm against gradient norm for each parameter group — it is cheap — and expect trouble where it is near zero. And note the asymmetry the paper found: the group moving 8x faster per parameter was not the one they had to freeze. Do not assume the fastest-moving group is the causal one.
+
+**Look for gauge freedom before you assign blame to a layer.** Any time your quantity of interest is a product of two learned factors, you can shift degradation from one factor to the other with an invertible map and change nothing observable. If your interpretability claim would flip under such a reparameterization, it is not a claim about the model. The practical consequence is to define metrics on the composition or on the alignment between factors, and to fork from bit-identical states when you want a causal comparison across the interface.
+
+**Your progress measure may be blind by construction.** Fourier support unchanged and a power-distribution cosine of `0.9899` across an abrupt accuracy collapse is a clean cautionary result. Support-based and concentration-based metrics discard relative magnitude, which is precisely the variable that failed. Before trusting a progress measure, ask what it is invariant to, then ask whether that invariance covers a failure mode you care about.
+
+**And practically: keep training past the good news.** If you evaluate at the step where your metric peaks, you cannot distinguish a stable solution from a transient one.
+:::
+
+:::zh
+**论文**: [2608.07436](https://arxiv.org/abs/2608.07436)
+**作者**: Ali Janati, Kaoutar El Maghraoui, Andrei Kanavalau, Anass Belfatmi
+**分类**: cs.AI, cs.LG
+
+## 缺口
+
+关于 grokking（顿悟）的研究，长期以来把它当成一扇单向门。
+
+小 Transformer 训练模加法，训练精度先冲到 100%，验证精度趴着不动，等着，然后验证精度突然跳到 100%——模型找到了傅里叶乘法电路。
+
+围绕这个现象长出来的一整套工具（embedding 的傅里叶支撑集、少数频率上的能量集中度、由此构造的 progress measure），都隐含一个前提：电路一旦出现，故事就结束了。
+
+剩下的只是时间问题——换哪个优化器、多少 weight decay、多少训练数据比例，能更快进门。
+
+Muon 本来就是以"更快"的身份进场的。
+
+在如今已成默认的切分方式下，Muon 负责 hidden matrices，AdamW 保留 embedding 和 output head，它确实 grok 得更快。
+
+这篇论文做的事情，是在所有人停止记录的那一刻之后继续训练。
+
+把时间轴拉长，`(a+b) mod 113` 上九个配置全部先 grok、然后全部丢失泛化。
+
+而且这不是 Muon 独有的毛病：被选作参照的 AdamW 配置在五个种子里有四个跌破阈值，最低到 27.59%。
+
+第二个缺口是诊断层面的，比经验发现更有意思。
+
+精度掉下来时，人的第一反应是问"哪一部分坏了"——论文说这个问题本身就是病句。
+
+损失函数约束的是 readout 与 representation 的乘积；把它拆成"一个表征"和"一个读出头"这件事，在任意可逆映射下都是自由的。
+
+所以失败只能被定位在接口上，而且只能被联合地定位。
+
+更扎心的是：标准的傅里叶 progress measure 在整个塌陷过程中根本没动。
+
+```
+[问题] grokking 被当成单向门记录:
+       先记忆 == 再泛化 == 然后停止记日志
+              |
+              v
+[被检验的假设] 验证精度饱和之后解就是稳定的
+   优化器的选择只决定你多快到达
+              |
+              v
+[方法] 1. 继续训。9 个配置 Muon-hidden + AdamW-embed
+       2. 测量梯度消失后步长的响应
+       3. 因果检验: 从逐比特相同的状态出发
+          每次冻结一组 配对种子重跑
+       4. 用傅里叶族滤波直接读电路
+              |
+              v
+[证据] 9 个配置全部先 grok 后跌破阈值
+       拟合完训练集后梯度 ~ 1e-6
+         弹性: Muon -0.03   vs   AdamW +1.5
+         Muon 组每参数移动快 8.0 倍
+       冻结 embed/readout: 451400 步后训练中
+         0 次低于阈值 而未冻结组为 137-321 次
+       任务对齐族单独打分 = 100 而整模型 = 45.85
+       把该族重新放大 ==> 99.9
+              |
+              v
+[结论] 塌陷是表征-读出接口上的增益失配
+   不是电路丢失。标准傅里叶支撑集完全没变
+   能量分布余弦 0.9899 ==> 现有 progress measure 对此全盲
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，grokking 是一个你等着它发生的相变，而 Muon 是一种让你少等的手段；在它之后，grokking 只是表征-读出接口上一场反复上演的角力的一种收场方式，而同一场角力也能往下收场——并且对当前所有傅里叶 progress measure 完全隐形。
+
+### 核心机制
+
+从训练集刚被解完的那一刻开始看。
+
+梯度掉到 `10^-6` 量级，因为已经没什么可拟合了。
+
+此时两个优化器组对这份"寂静"的反应截然不同，论文用一个叫 step-size elasticity（步长弹性）的量把它钉住：梯度变小时，更新幅度跟着缩多少。
+
+AdamW 的弹性是 `+1.5`，超线性——梯度降一百倍，步长大约降一千倍，所以损失一旦接近解完，它基本就停车了。
+
+Muon 的弹性是 `-0.03`，实际上等于零：正交化和归一化让更新幅度几乎与梯度大小无关。
+
+按每参数算，Muon 组的移动速度还是 AdamW 组的 8.0 倍。
+
+没人要求任何一组继续动；一组基本停了，另一组没停。
+
+这份漂移落在一个乘积上。
+
+logits 是 readout 乘 representation，而损失只约束乘积——对任意可逆矩阵 `M`，把 `W M^-1` 和 `M H` 换进去，任何可观测量都不变。
+
+所以"表征退化了"这件事根本不存在客观事实；能退化的是两侧之间的对齐关系。
+
+因果检验做得很干净：从逐比特相同的状态分叉，冻结其中一组。
+
+冻结 embedding 和 readout 后，五次运行、451400 个 post-grokking 步、五对配对种子，失败被彻底消除——未冻结的那一支记录了 137 到 321 次低于阈值的评估，冻结支一次都没有。
+
+注意这里的不对称：被长时间测试的那一组，恰恰是移动更慢的那一组。
+
+"跑得快"和"是因果把手"是两件事。
+
+第三个部件是读出探针。
+
+把 logits 滤到任务真正使用的傅里叶族——加法用 `(k,k)`，做减法时该族换成 `(k,-k)`，这个切换本身就证明选族的是任务而不是优化器。
+
+在五个种子、三种 regime、43 个 checkpoint 上，这个被滤出的族单独打分刚好 100%。
+
+于是失败被劈成两类，而这两类在精度曲线上长得一模一样。
+
+circuit failure 里，被滤出的族也解不了任务了：机制真的没了。
+
+masking 里，该族依然完美，而整模型停在 45.85%——它在**每一个**样例上都给正确答案正的 margin，包括模型答错的那些，只是被一个量级几乎相当、方向对抗的余项投票压过去了。
+
+把这个族重新放大，99.9% 就回来了。
+
+按这套说法，grokking 就是同一场角力往上收场的那一次。
+
+```
+        a          b
+        |          |
+   [ embedding 与 readout ]  <== AdamW   弹性 +1.5
+        |          |                     梯度 ~ 1e-6 时安静下来
+        v          v
+   [   hidden matrices    ]  <== Muon    弹性 -0.03
+        |                                每参数快 8.0 倍
+        v                                不管信号多弱都继续迈步
+   H = 表征 ---.
+                \
+                 >  接口:   logits = W . H
+                /   损失只钉住乘积
+   W = 读出 ----'   W M^-1 . M H 完全不受约束
+        |
+        v
+   logits 分解成若干傅里叶族
+        |
+        +-- 任务对齐族   加法 (k k)  /  减法 (k -k)
+        |     单独打分 = 100  在每个样例上 margin 都为正
+        |     包括整模型答错的那些样例
+        |
+        +-- 余项
+        |     量级几乎相当且方向对抗 ==> 把它投票压过去
+        |
+        v
+   观测精度 = 45.85     把该族重新放大 ==> 99.9
+   同时傅里叶支撑集不变  能量余弦 0.9899
+
+   消融: 去掉 Muon 的归一化与正交化
+     有效共轭对 326 ==> 4
+     不再出现反复塌陷 而是直接终局性失败
+     ==> 造成漂移的那个东西 也正是搭出电路的那个东西
+```
+
+换个说法：这是一台录音棚调音台。
+
+hidden matrices 是乐手；任务对齐的傅里叶族是那位真的会唱主旋律的独唱者，余项是一大群在拉近似噪声的乐团。
+
+readout 和 embedding 是推子——它们决定每一路信号以多大音量送到总输出，也就是 logits。
+
+grokking 就是独唱者的推子终于被推到能撑起整个混音的那一刻。
+
+两个优化器是两位习惯不同的录音师。
+
+AdamW 按"混音有多难听"成比例地推推子；混音已经不错时，它几乎不再动手。
+
+Muon 则不管有没有人抱怨，每秒都把每个推子挪固定的一格——因为归一化恰好把"有多难听"这个信息从步长里剥掉了。
+
+于是混音解完之后，一位录音师坐下歇了，另一位还在拧。
+
+最终乐团和独唱者一样响，总输出糊成一团——尽管独唱者从头到尾一个音都没唱错。
+
+这就是 masking：把那一路 solo 出来，依然完美；把它的推子推回去，混音就恢复了。
+
+circuit failure 是另一种灾难：独唱者真的忘了旋律，这时怎么推推子都没用。
+
+调音台的另外两个部件也对得很整齐。
+
+用胶带把推子固定住，也就是冻结 embedding 和 readout，451400 步内都没糊——混音就停在原处。
+
+而"开掉 Muon 的归一化"不是解决方案，因为正是那种归一化的迈步方式当初招来了整支乐团：去掉它，有效共轭对从 326 掉到 4，这个编制根本演不了这首曲子。
+
+你不再有反复的糊，换来的是永久的沉默。
+
+最后是 gauge 自由度：你可以给每个乐手改名、同时对每个推子做补偿性缩放，总输出逐比特不变。
+
+所以"是乐团的问题还是调音台的问题"这个问题没有答案。
+
+只有两者之间的对齐是真实的。
+
+### 关键概念
+
+- **步长弹性 (step-size elasticity)**: 把梯度大小取对数、把优化器实际迈的步长取对数，问这两者之间的斜率是多少。朴素 SGD 的斜率是 1：梯度减半，步长减半。这里 AdamW 测得 `+1.5`，意思是它减速比梯度衰减还快，所以一个近乎解完的损失基本让它熄火。Muon 测得 `-0.03`，实际就是零，因为对更新做正交化等于把幅度信息全丢掉、只留方向——信号再微弱，步子还是差不多那么大。单看这一条，它离"归一化优化器的设计定义"其实很近，不算发现。让它变得要紧的是所处的 regime：梯度 `1e-6` 时，损失已经不再下达指令，而一个尺度不变的优化器察觉不到这件事，于是它继续在一个损失根本分辨不出差别的解空间里做近似随机游走。"到得快"和"停不下来"是同一个性质的两面。
+
+- **只能在可逆映射意义下被辨识**: 我给你一个数 12，告诉你它是个乘积。原来是 3 乘 4 还是 2 乘 6？光靠乘积，这个问题没有答案。这里的接口就是同一件事的矩阵版本：logits 来自 readout 乘 representation，对任意可逆 `M`，你可以把 `M` 塞进表征、把 `M^-1` 塞进读出头，任何损失、任何精度、任何预测都不变。所以"表征变差了"不是一个合法命题；你随时可以把责任在接口两侧任意搬运。合法的问题是：两侧还彼此对得上吗。这就是论文为什么把失败定位到接口而不是某一层，也是为什么冻结实验必须从逐比特相同的状态分叉——你得先保证手里是同一个 12，才有资格谈因子。
+
+- **遮蔽 (masking) 与电路失效 (circuit failure)**: 想象一个 100 人委员会对每道题投票。其中一位每次都答对。如果另外 99 位随机投票且大致互相抵消，委员会也是对的。现在让这 99 位慢慢变响，响到几乎互相抵消但没完全抵消——残差噪声已经和那一张正确票一样大，委员会开始答错。那位专家从来没变错过。在 45.85% 精度这个测量点上，模型对**每一个**样例（含答错的样例）都给正确答案正的 margin；它是被投票压过去了，不是糊涂了。把专家那一票重新放大，99.9% 就回来。真正扎人的地方在于：从外面看，这和"遗忘"长得一模一样，而标准傅里叶诊断还会一致地告诉你什么都没发生——支撑集不变，能量分布余弦在一次陡然塌陷前后是 `0.9899`。
+
+## 框架转变
+
+```
+之前（主流）                         之后（本文）
+------------                         ------------
+
+val acc                              val acc
+100 |      _______________           100 |     /\   /\      /\
+    |     /                              |    /  \ /  \    /  \
+    |    /                               |   /    v    \  /    \
+  0 |___/                               0|__/           \/      \
+    +----------------------->             +----------------------->
+        time                                    time
+
+一个评价轴:                          两个评价轴:
+  电路是否出现  y / n                  电路是否出现   y / n
+                                       电路是否最响   y / n
+
+诊断工具:                            诊断工具:
+  embedding 的傅里叶支撑集             滤到任务对齐族
+  头部频率的能量占比                   单独给它打分
+  ( 塌陷前后两者都不变                 再和整模型对比
+    余弦 0.9899 )                      ( 100 vs 45.85 ==> 遮蔽 )
+
+优化器问题:                          优化器问题:
+  我们多快 grok                        梯度死掉之后
+                                       优化器还在做什么
+  [ Muon: 更快 ]                       [ Muon: 继续迈步
+                                         弹性 -0.03 ]
+
+归责方式:                            归责方式:
+  第 L 层退化了                        接口 W . H 漂移了
+                                       ( W M^-1 . M H 是自由的
+                                         所以任何一层都不能被归责 )
+```
+
+一句话：从"模型是否找到了电路"到"电路是否还能赢下投票"，核心转变是把泛化当成接口上的一个**被争夺的平衡态**，而不是某一层里被发现的一个**物件**。
+
+## 专家评审
+
+**选题眼光**: 真缺口，而且选得好。
+
+grokking 类论文有很强的动机在"皆大欢喜"那一刻停止记录，而"把时间轴拉长"这种廉价到显然的实验，恰恰能空置多年没人做。
+
+考虑到 hidden-matrices 加 AdamW-embedding 这套切分成为默认的速度，Muon 这个切口也很及时。
+
+我的保留意见是：标题把 Muon 塑造成罪魁祸首，力度超过了证据——摘要自己就报告了 AdamW 参照在五个种子里四个失败、最低 27.59%。
+
+老实的标题应该是"post-grokking 状态不是稳定平衡态，而归一化优化器让情况更糟"，弱一些，但站得住。
+
+另外我从摘要看不出它和已有的 slingshot effect、ungrokking 文献切分得多干净——那批工作已经记录过自适应优化器下收敛后的周期性不稳定。
+
+这个定位是新颖性主张的承重墙，摘要里完全不提，是个小小的警示灯。
+
+**方法成熟度**: 诊断这一半是真有巧劲。
+
+因为分解是 gauge-free 就拒绝归责到某一层，转而把 logits 滤到任务对齐族、孤立打分，这是完全正确的仪器选择；减法下 `(k,k)` 换成 `(k,-k)` 更是一个漂亮的自检，说明探针跟的是任务而不是优化器。
+
+"在每个样例上 margin 都为正、包括那些答错的样例"是全篇摘要里最锋利的一句，因为它把一个模糊的表征论断转成了逐样例的硬事实。
+
+机制这一半就薄了。
+
+正交化优化器弹性 `-0.03`，几乎是 Muon 更新规则的定义性后果，不是发现；真正的贡献是意识到"梯度死掉之后，尺度不变性变成了负债"——这是个好观察，只是被包装成了一次测量。
+
+而冻结是**修复**，不是**解释**：它证明了两组之中任一组的运动都是必要条件，却几乎没说清余项为什么朝着对抗方向、而不是随机方向长大。
+
+那个"为什么"就是缺失的定理。
+
+**实验诚意**: 因果设计上高于平均水平。
+
+从逐比特相同的状态分叉、配对种子，这是对的控制，我希望更多论文这么做；451400 个 post-grokking 步零次低于阈值，对比未冻结支的 137-321 次，不是边缘效应。
+
+覆盖面的扫描——两个模数、两个宽度、两个训练比例、减法、深度——对它想下的结论来说是够的。
+
+三处我会追问。
+
+第一，"被选作参照的 AdamW"这句话在悄悄干活；怎么选的？在什么网格上选的？如果这个 baseline 不是等预算搜出来的，那 Muon-vs-AdamW 的比较就不承重。
+
+第二，对一个"间歇性失败"的主张来说，五个种子偏薄，而"137-321 次低于阈值"完全取决于评估频率和阈值的设定，摘要里两者都没钉死。
+
+第三，"326 个有效共轭对"超过了模数 113 下可用的不同频率对数量，所以它必然是在神经元或层上做了聚合——按现在的写法很容易被误读，而 `326 ==> 4` 是全文的招牌数字之一。
+
+需要说明：我这里评的是摘要里的数字而非完整表格，上述几条中有几条在细读方法部分后可能会自行消解。
+
+**写作功力**: 摘要密度异常高，读起来像一张结果表加了连接词——这一点我基本尊重。
+
+但它把计数和百分比全堆在前面，却没先立起"读者为什么该关心这个接口"。
+
+真正偷懒的地方在理论：全篇没有交代余项为什么最终会变成量级相当且方向对抗。
+
+哪怕只推一个玩具版本——为什么在损失平坦的 gauge 方向上、尺度不变的漂移会让族外分量以与族内分量可比的速率增长——就能把这篇从"一个被详细记录的现象"抬成"一个解释"，这是杠杆率最高的一处重写。
+
+第二优先级是显式对比 slingshot 与 ungrokking 的现象学。
+
+**判决**: 弱接收 — 冻结的因果实验、以及"遮蔽 vs 电路失效"这条区分，是扎实且可迁移的贡献，"标准傅里叶 progress measure 对一次真实塌陷全盲"这一条本身就值得发表；但机制叙事是描述性的而非解释性的，Muon 这个框架也讲得比证据更硬。
+
+## 要点总结
+
+值得"偷"走的具体东西：
+
+**给子电路单独打分，而不是只看整模型。**
+
+这里最可移植的技术，是把 logits 滤到一个假设中的机制上，测它的**孤立**精度，再和整模型的精度并排放。
+
+当这两个数分叉——100% 对 45.85%——你就学到了消融实验给不了你的东西：机制完好，只是被投票压过去了。
+
+任何能把读出头分解成候选族的场景都能用：attention heads、SAE features、expert routes。
+
+更强的版本是专门在失败样例上做逐样例 margin 检查，因为"在每一个错例上 margin 仍为正"是一个极难被解释掉的硬事实。
+
+**把尺度不变的优化器在平坦区当成负债，而不是优点。**
+
+归一化和正交化更新通常被当作"对梯度尺度鲁棒"来卖。
+
+换个说法：它们不知道什么时候该停。
+
+一旦你的损失实质上解完、梯度到了 `1e-6`，尺度不变的优化器会继续在损失看不见的方向上迈全尺寸的步子。
+
+如果你在用 Muon 或任何归一化更新规则、并且训练尾巴很长，就给每个参数组量一下更新范数对梯度范数的 log-log 斜率——很便宜——斜率接近零的地方就该预期出事。
+
+顺带记住论文发现的那个不对称：每参数快 8 倍的那一组，并不是他们必须冻住的那一组。
+
+不要假定跑得最快的组就是因果的组。
+
+**在把责任推给某一层之前，先找 gauge 自由度。**
+
+只要你关心的量是两个可学习因子的乘积，你就能用一个可逆映射把退化从一个因子搬到另一个因子，而任何可观测量都不变。
+
+如果你的可解释性论断在这种重参数化下会翻转，那它就不是关于模型的论断。
+
+实践后果是：把度量定义在**乘积**上或**两个因子的对齐**上；想做跨接口的因果对比时，从逐比特相同的状态分叉。
+
+**你的 progress measure 可能是构造性地全盲。**
+
+精度陡然塌陷前后，傅里叶支撑集不变、能量分布余弦 `0.9899`，这是一个干净的警世结果。
+
+基于支撑集和基于集中度的指标都丢掉了相对幅度——而恰恰是这个变量出了问题。
+
+在信任一个 progress measure 之前，先问它对什么保持不变，再问这种不变性是否正好盖住了一个你在意的失败模式。
+
+**以及很实际的一条：好消息出现之后继续训。**
+
+如果你在指标峰值那一步做评估，你就没有能力区分"一个稳定的解"和"一个瞬态的解"。
+:::
