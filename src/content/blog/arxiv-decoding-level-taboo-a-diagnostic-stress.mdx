@@ -1,0 +1,499 @@
+---
+title:
+  en: "Decoding-Level Taboo: Kicking Models Off Their Comfortable Path"
+  zh: "解码层禁忌：把模型踢出它的舒适通道"
+description:
+  en: "A zero-prompt stress test that masks the model's favorite token at every word boundary, forcing circumlocution — and revealing how much of benchmark 'capability' depends on walking the optimized path."
+  zh: "一种零提示压力测试：在每个词边界屏蔽模型最想说的那个 token，逼它绕着说——由此暴露出基准分数里有多少能力其实依赖于走那条最优化过的窄路。"
+date: 2026-08-11
+tags: ["arxiv", "ai", "cs.cl"]
+image: "/arxiv-visuals/arxiv-decoding-level-taboo-a-diagnostic-stress.png"
+---
+:::en
+**Paper**: [2608.09900](https://arxiv.org/abs/2608.09900)
+**Authors**: Tadanobu Chuyo Kamijo, Ori Rottenstreich, Javier Conde, Gonzalo Martínez, Pedro Reviriego
+**Categories**: cs.CL
+
+## The Gap
+
+The honest version of the gap is this: nearly every LLM benchmark measures the model doing the thing it most wants to do. You give it a prompt, it greedily (or near-greedily) follows the highest-probability path, and we score the output. That path is the most heavily optimized region of the model's behavior — it's what pretraining compressed toward and what RLHF polished. Call it the nominal corridor.
+
+Deployment doesn't look like that. A production system has a 2000-token system prompt, a JSON schema it must satisfy, a safety filter that vetoes certain phrasings, a style guide that bans certain words, a retrieval context that contradicts the model's priors. All of these are, functionally, constraints that push generation off the highest-probability path. And the field's existing tools for measuring what happens then are surprisingly weak:
+
+- **Adversarial prompting / jailbreak suites** (AdvBench-style, GCG, PAIR): they measure whether a constraint can be **broken*, not whether the model degrades gracefully when constraints *hold*. They also confound prompt sensitivity with the thing being measured — a bad result might just mean the prompt was awkward.
+- **Constrained decoding work** (grammar-constrained decoding, Outlines/JSONFormer, NeuroLogic, lexically constrained MT): treats off-path generation as an **engineering problem to solve*, and reports whether the constraint was satisfied. It doesn't use the constraint as a *measuring instrument*.
+- **Robustness benchmarks via input perturbation** (typos, paraphrase, distractors): perturb the input, but the model still gets to walk its favorite output path afterward. The corridor stays intact.
+- **Scaling-law and instruction-tuning evaluations**: report nominal-condition curves. They tell you nothing about whether alignment buys graceful degradation or just polished nominal behavior.
+
+So the specific boundary: nobody has a *cheap, prompt-free, dial-adjustable* way to force a model off its nominal path and watch what breaks. That's the hole Taboo fills — by intervening in logit space at runtime rather than in the prompt.
+
+```
+  [PROBLEM]
+  benchmark scores measured only inside the
+  nominal generation corridor
+        |
+        v
+  [OBSERVATION]
+  real deployments (system prompts, guardrails,
+  schemas) constantly push generation off-corridor
+        |
+        v
+  [ASSUMPTION]
+  off-path behavior is a distinct, measurable
+  capability -- not predictable from on-path scores
+        |
+        v
+  [METHOD] Decoding-Level Taboo
+  at each word boundary: mask top candidate token(s)
+  in logit space  =>  force circumlocution
+  (no prompt text involved: "zero-prompt")
+        |
+        +------------------------+
+        v                        v
+  [EVIDENCE 1]             [EVIDENCE 2]
+  robustness scales        robustness improves
+  with parameter count     with instruction
+                           alignment / post-training
+        |                        |
+        +------------+-----------+
+                     v
+  [CONCLUSION]
+  off-path robustness is a real, separable axis;
+  Taboo is a reusable primitive for auditing it
+  (+ synthetic data, + guardrail stress tests)
+```
+
+## The Increment
+
+**One sentence**: Before this paper, "can the model still function when it can't say the obvious thing?" was a vibe you formed from anecdotes; after it, it's a knob you can turn at inference time on any open-weight model without touching the prompt.
+
+### Core Mechanism
+
+The mechanism is almost embarrassingly simple, which is a compliment. At each decoding step the model produces a logit vector over the vocabulary. Normally you sample or argmax from it. Taboo inserts a step in between: **at positions that begin a new word**, it identifies the top-ranked candidate token (or top-k) and sets its logit to negative infinity. The model then must pick its second-best (or (k+1)-th) option and continue. Crucially the mask is applied **dynamically* — it's not a fixed banned-word list computed in advance, it's whatever the model happened to want most at that exact position, given everything it has already generated.
+
+The word-boundary condition is the load-bearing design detail, and it's worth dwelling on. If you masked the top token at *every* step, you'd break words in half: the model commits to "circum", you ban "vent", it emits "cumference" and you get lexical garbage. That measures tokenizer brittleness, not reasoning. By gating the intervention to word-initial positions (in most modern BPE tokenizers, tokens carrying a leading-space marker), the model is forced to choose a *different word*, then allowed to spell that word out unimpeded. The unit of forced divergence becomes semantic rather than orthographic. That's what turns the intervention into a probe of *circumlocution ability* — can you say the thing another way? — rather than a probe of spelling.
+
+Data flow, then: prompt goes in unmodified (this is the "zero-prompt" property — no instruction like "don't use the word X", so no confound from instruction-following ability, no prompt-length effects, no way for the model to refuse or negotiate). The logits processor sits between the forward pass and the sampler. It maintains just enough state to know whether the next token starts a word. Severity is a dial: k = 1 is a nudge, k = 5 is a shove, k = 20 is closer to a wall. You then measure the resulting text along whatever axes you care about — task success, coherence, factuality, instruction compliance — and compare against the unmasked run of the same model on the same prompt. The delta is the robustness score.
+
+```
+  PROMPT (unmodified)
+        |
+        v
+  +-------------------------------+
+  |        LLM forward pass       |
+  +-------------------------------+
+        |
+        v  logits over vocabulary V
+        |
+  +-------------------------------+
+  |   TABOO LOGITS PROCESSOR      |
+  |                               |
+  |  is next token word-initial?  |
+  |        |            |         |
+  |       yes           no        |
+  |        |            |         |
+  |        v            v         |
+  |  rank top-k    pass through   |
+  |  set those      unchanged     |
+  |  logits = -inf                |
+  +-------------------------------+
+        |
+        v  masked logits
+  +-------------------------------+
+  |     sampler / argmax          |
+  +-------------------------------+
+        |
+        v
+  token ..... appended to context
+        |
+        +--------> loop back (mask is recomputed
+                   from the NEW context, not fixed)
+
+  OUTPUT: circumlocuted text
+        |
+        v
+  compare vs unmasked run  =>  degradation profile
+                               as function of k
+```
+
+**The structural metaphor: rolling roadblocks in a city.**
+
+Think of generation as driving to an address. The logit distribution at each step is the set of roads leaving the current intersection, ranked by how much the driver wants to take each one. Normal decoding is a local who takes their habitual route every time — the route they've driven ten thousand times.
+
+Taboo is a traffic crew that follows the car. **At every intersection** (that's the word boundary — note they do **not* set up cones mid-block, which would just cause a crash, not a detour) **they close the road the driver was about to take** (the top logit). Not a pre-published list of closed streets — that would be a fixed banned-word list, and the driver could plan around it. This is a cone appearing the instant the turn signal goes on. **The number of lanes they close is k**: close one road and a good driver shrugs and takes the parallel street; close the five best roads and now you need to actually know the city.
+
+What you learn is exactly what you'd learn watching different drivers under this harassment. The tourist with no mental map circles, panics, ends up in the wrong district, or starts babbling about a completely different destination — that's a small model losing coherence and hallucinating. The cab driver with twenty years of the city in their head takes a longer, uglier, slightly slower route and *still arrives* — that's the large aligned model paraphrasing its way to the same answer. And the paper's second finding maps cleanly too: instruction alignment is like a driver who has internalized "the passenger's destination is the goal," so when the road closes they re-route toward the destination instead of toward the road they liked. An unaligned base model is more like a driver following a groove in the asphalt — remove the groove, and there's no destination-level commitment left to fall back on.
+
+The metaphor also predicts the method's main weakness, which is a good sign for a metaphor: closing roads tells you about the *driver's redundancy of knowledge*, but it doesn't tell you whether real-world traffic looks anything like rolling roadblocks. More on that below.
+
+### Key Concepts
+
+- **Logits, and why masking one is a surgical act**: Before an LLM emits a word, it produces one number per vocabulary entry — maybe 128,000 numbers. Higher number, more preferred. Softmax turns them into probabilities. The important intuition is that this vector is a **complete ranked preference list*, not a single choice, and it's freshly recomputed at every position from the entire context. So if you set the top entry to negative infinity, you haven't damaged the model, confused it, or told it anything. It doesn't "know" it was blocked. It simply acts on its second preference, and then — this is the subtle part — the *next* step's preferences are computed from a context that now contains that second-best word. The model rationalizes forward from wherever it lands. Concretely: ask it about the ocean, it wants "The ocean is vast"; ban "vast" and you get "The ocean is enormous"; ban both and maybe "The ocean covers"; ban the top five and you might get "The ocean, in terms of its sheer scale...". Each step is locally sensible; the question is whether the trajectory still lands on truth.
+
+- **Circumlocution as a capability, not a failure mode**: In humans, talking around a word is a sign of **strong* language ability — it's what a fluent speaker does when a word is on the tip of the tongue, and it's what aphasia patients lose. The paper's clever reframe is to treat forced circumlocution as a measurement. A model that can only express a fact one way has memorized a surface form; a model that can express it five ways has something closer to a representation of the fact. Concrete test: the answer to "who wrote Hamlet" can be "Shakespeare," "the Bard of Avon," "an English playwright born in Stratford in 1564." A system that collapses to nonsense once "Shakespeare" is banned never really knew the answer in a robust sense — it knew a string.
+
+- **Zero-prompt intervention (and why "zero-prompt" is the actual contribution)**: If you wanted to test the same thing with a prompt — "answer this without using the words X, Y, Z" — you'd immediately contaminate the experiment with three other abilities: understanding the negative instruction, tracking a constraint over long outputs, and the general instruction-following gap between models. Small models fail such prompts because they can't follow instructions, not because they lack lexical flexibility. Working in logit space sidesteps all of it. The constraint is **enforced by construction* — 100% compliance, identically, for a 1B base model and a 70B chat model. That's what makes cross-model comparison meaningful, and it's the piece of this paper I'd actually reuse.
+
+## Framework Shift
+
+```
+  Before (mainstream approach):          After (this paper):
+
+  PROMPT LAYER is the test surface       DECODING LAYER is the test surface
+
+  +---------------------------+          +---------------------------+
+  | "answer without using X"  |          |  prompt: unchanged        |
+  | adversarial suffix        |          +---------------------------+
+  | typos / paraphrase        |                    |
+  +---------------------------+                    v
+            |                             +---------------------+
+            v                             | logits              |
+  +---------------------------+            |  [ban top-k at      |
+  | model may: comply,        |            |   word boundary]    |
+  |   ignore, refuse,         |            +---------------------+
+  |   partially comply        |                    |
+  +---------------------------+                    v
+            |                             constraint holds
+            v                             100% for every model
+  model still free to walk its            model FORCED off corridor
+  favorite output path                    at every single word
+
+  result: measures                        result: measures
+    instruction-following                   off-path robustness
+    + robustness, tangled                   in isolation
+
+  knob: none (binary prompts)              knob: k = severity dial
+                                                  (continuous stress curve)
+```
+
+**One sentence**: From **asking* a model to leave its comfort zone and hoping it complies, to *removing the comfort zone from underneath it* — the core shift is moving the experimental control from the prompt into the decoder, which converts a confounded request into an enforced, dial-adjustable constraint.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, and well-chosen. The benchmark-vs-deployment divergence is one of the field's genuinely unsolved measurement problems, and "we only ever evaluate on the optimized path" is a sharp, non-obvious articulation of why. I also like that the intervention is **orthogonal* to existing eval axes — it's not another dataset, it's a lens you can put in front of any dataset. That's the kind of contribution that ages well. The weak spot in the framing is the leap from "system prompts and guardrails push models off-path" to "therefore banning top tokens at word boundaries is a good proxy for that." Those are different geometries of constraint. A JSON schema restricts *structure* globally; a safety filter restricts a *semantic region*; Taboo restricts *whatever the model wanted most, everywhere, uniformly*. It's plausible these correlate, but plausible is doing a lot of work in the motivation. The paper would be dramatically stronger with even one experiment showing Taboo scores predict degradation under a *real* deployment constraint. Without that, this is a nice stress test in search of external validity.
+
+**Method maturity**: Clever framing, not clever machinery. The mechanism is a logits processor — HuggingFace has shipped `NoBadWordsLogitsProcessor` for years, banned-token decoding is standard in constrained-generation work, and "set logit to -inf" is the first thing anyone tries. The genuine insight, and it's worth something, is the **word-boundary gate**: that's the difference between measuring semantics and measuring tokenizer damage, and I'd bet a lot of naive replications get this wrong. The zero-prompt argument is also a real methodological point, cleanly made. But several simpler or more informative variants seem unexplored: masking a **random* non-top token (essential control — how much of the degradation is "off-path" versus just "lower-probability text"?), masking the top token *only at content words* versus function words (banning "the" is a very different test than banning "photosynthesis"), and comparing against a straight temperature/top-p sweep, which is the cheapest possible off-path intervention and a baseline this method must beat to justify itself. Also unaddressed as far as I can tell: entropy confound. At high-entropy positions the top token is barely preferred and masking costs nothing; at low-entropy positions it's devastating. Since better-calibrated larger models have systematically different entropy profiles, "robustness improves with scale" may be partly a restatement of "larger models are less peaked in different places." That needs controlling for, ideally by matching interventions on probability mass removed rather than rank.
+
+**Experimental integrity**: This is where I'd push hardest, and the abstract makes it hard to be generous. The reported findings — robustness improves with model size, and with instruction alignment — are directionally exactly what everyone would predict before reading the paper. That's not disqualifying (confirming an expectation with a new instrument is legitimate), but it means the paper's value rests almost entirely on the **instrument's* validity, and no numbers, no error bars, and no metric definition appear in the abstract. Two specific red flags to check in the body. First, **how is degradation scored?** If it's an LLM judge, we have circularity risk: judges systematically penalize unusual phrasing, and Taboo's whole purpose is to produce unusual phrasing, so "coherence drops" may partly measure judge distaste. If it's perplexity under a reference model, the result is near-tautological — you removed the highest-probability tokens, of course perplexity went up. The only fully safe measurements are task-success on verifiable tasks (arithmetic, closed-book QA with exact match, code that compiles). Second, **is scale confounded with family?** Comparing across "several open-weight families" while varying both size and alignment invites the classic trap where a family-level training-data difference gets read as a scale effect. The clean design is within-family size ladders plus base-versus-instruct pairs at matched size (Llama, Qwen, and Pythia all support this) — I hope that's what was done, but the abstract doesn't say.
+
+**Writing quality**: The abstract is written with real rhetorical skill — "a narrow, highly optimized generation corridor" is a phrase I'll steal — but it also shows where the corners were cut. The last sentence is a wish list ("synthetic datasets, guardrail stress-testing, pre-deployment auditing") presented as contribution, and that's the tell of a paper whose results section is thinner than its ambitions. Any one of those three, demonstrated even minimally, would be worth more than all three asserted. The section that would most elevate the paper is the metric and validity section: define degradation precisely, include the random-token-masking and temperature-sweep controls, and add one experiment linking Taboo scores to behavior under an actual production-style constraint. Do that and this goes from an interesting probe to a tool people cite. Also worth trimming: the framing occasionally implies Taboo simulates guardrails, which overclaims — it's a **generic* off-path stressor, and saying so plainly would cost the paper nothing and buy it credibility.
+
+**Verdict**: **borderline**, leaning weak accept as a short/workshop paper — a genuinely useful and reusable primitive with an under-argued validity story and findings that confirm rather than surprise. I'd accept it at a workshop tomorrow and send it back from a main track with a request for the controls above.
+
+## Takeaways
+
+Concrete things worth stealing:
+
+1. **Move your experimental control out of the prompt whenever you can.** This is the transferable methodological lesson and it generalizes far beyond taboo words. Any time you test a model by **asking* it to do something unusual, your measurement is contaminated by instruction-following ability — which is precisely the variable that differs most across model sizes and alignment stages. Enforcing the constraint in the decoder gives you 100% compliance by construction, making cross-model comparison honest. The same trick applies to testing format adherence, length control, and refusal behavior: enforce, don't request.
+
+2. **The word-boundary gate is a reusable primitive.** If you ever intervene on token distributions and care about semantics rather than orthography, gate your intervention to word-initial positions. Otherwise you're measuring your tokenizer. This tiny detail is the difference between a signal and noise, and it applies to token-level attribution, token dropout, and noise-injection robustness studies too.
+
+3. **Forced paraphrase as a knowledge test.** Practical use today, independent of this paper's results: to check whether a model **knows* a fact versus *memorized a string*, ban the canonical surface form and see if the answer survives. This is a cheap, judge-free probe for contamination and shallow memorization — the answer either still comes out correct or it doesn't.
+
+4. **Taboo as a synthetic-data generator, which is arguably the most immediately valuable use.** Running the same prompt at k = 1, 3, 5, 10 gives you a family of semantically-similar, lexically-divergent outputs from a single model, for free, with no prompt engineering and no sampling-temperature degeneracy. That's a paraphrase corpus, a hard-negatives set for retrievers and rerankers, and a diversity-injection mechanism for distillation data. I'd expect this application to outlive the diagnostic framing.
+
+5. **A cheap red-team addition, with a caveat.** Guardrails tuned on nominal phrasings may miss circumlocuted versions of the same content, and Taboo generates those mechanically. Worth adding to a safety eval pipeline. The caveat: this is a defensive audit of your own system, and unlike prompt-based attacks it requires logit access, so it's a tool for model owners, not an externally exploitable vector.
+
+What *not* to take: don't treat "robustness under Taboo" as a validated predictor of deployment performance yet. The paper asserts the connection more than it demonstrates it. Use Taboo as a diagnostic that generates hypotheses, then confirm on the constraint you actually care about.
+:::
+
+:::zh
+**论文**: [2608.09900](https://arxiv.org/abs/2608.09900)
+**作者**: Tadanobu Chuyo Kamijo, Ori Rottenstreich, Javier Conde, Gonzalo Martínez, Pedro Reviriego
+**分类**: cs.CL
+
+## 缺口
+
+先说清楚缺口在哪：几乎所有 LLM 评测，都是在测量模型"做它最想做的事"。
+
+给一个提示，模型沿着最高概率的路径贪心地走下去，我们给输出打分。而这条路径恰好是模型行为中被优化得最充分的区域——预训练把概率质量压缩到那里，RLHF 又把它打磨了一遍。
+
+论文管这叫**标称生成通道**（nominal corridor）。
+
+真实部署根本不长这样。生产系统里有两千 token 的系统提示、必须满足的 JSON schema、会否决某些表述的安全过滤器、禁用某些词的文案规范、和模型先验相矛盾的检索上下文。
+
+这些东西在功能上都是同一件事：**把生成推离最高概率路径的约束**。
+
+而这个领域现有的测量工具，在"推离之后会发生什么"这件事上出奇地薄弱：
+
+- **对抗提示 / 越狱测试集**（AdvBench 系、GCG、PAIR）：测的是约束能不能被**打破*，而不是约束*成立时*模型是否优雅退化。而且它把提示敏感性和被测对象混在一起——结果差可能只是因为提示写得别扭。
+- **约束解码相关工作**（语法约束解码、Outlines/JSONFormer、NeuroLogic、机器翻译的词汇约束）：把偏离路径当成一个**要解决的工程问题*，汇报的是约束满足率。它从没把约束当成一把*尺子*来用。
+- **输入扰动式鲁棒性基准**（错别字、改写、加干扰项）：扰动的是输入，扰动完之后模型照样走它最爱的输出路径。通道本身完好无损。
+- **Scaling law 与指令微调评测**：报的全是标称条件下的曲线。它们无法告诉你，对齐买到的是"优雅退化的能力"，还是仅仅"更漂亮的标称行为"。
+
+所以具体的边界是：没有人有一个**便宜、不依赖提示、强度可调**的手段，把模型强行推出标称路径，然后观察哪里先坏。
+
+Taboo 填的就是这个洞——办法是在运行时介入 logit 空间，而不是介入提示词。
+
+```
+  [PROBLEM]
+  基准分数只在标称生成通道内部测量
+        |
+        v
+  [OBSERVATION]
+  真实部署(系统提示/护栏/schema)
+  持续把生成推出通道
+        |
+        v
+  [ASSUMPTION]
+  离路鲁棒性是一种独立可测的能力,
+  无法从在路分数推断
+        |
+        v
+  [METHOD] Decoding-Level Taboo
+  在每个词边界: 在 logit 空间屏蔽 top-k 候选
+  =>  强制机器绕着说 (circumlocution)
+  (完全不动提示文本: "zero-prompt")
+        |
+        +------------------------+
+        v                        v
+  [EVIDENCE 1]             [EVIDENCE 2]
+  鲁棒性随参数规模          鲁棒性随指令对齐
+  提升                      / 后训练提升
+        |                        |
+        +------------+-----------+
+                     v
+  [CONCLUSION]
+  离路鲁棒性是一个真实且可分离的维度;
+  Taboo 是可复用的审计原语
+  (+ 合成数据, + 护栏压力测试)
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，"模型说不出那个最顺口的词时还能不能干活"是一种靠零散轶事形成的印象；之后，它变成了一个可以在任意开源权重模型上、在推理时、不碰提示词就能拧动的旋钮。
+
+### 核心机制
+
+机制简单到近乎令人不好意思——这是褒义。
+
+每一步解码，模型都会输出一个覆盖整个词表的 logit 向量。正常情况下你从中采样或取 argmax。Taboo 在中间插一步：**在"要开始一个新词"的位置上**，找出排名第一的候选 token（或 top-k），把它的 logit 设成负无穷。
+
+模型于是只能退而取第二名（或第 k+1 名），然后继续往下生成。
+
+关键在于这个屏蔽是**动态**的——它不是事先算好的固定禁词表，而是"模型在这个具体位置、在它已经生成的全部内容条件下，最想说的那个"。
+
+**词边界条件是整个设计里承重的那根梁**，值得多说两句。
+
+如果你在*每一步*都屏蔽 top token，你会把词切成两半：模型已经吐出 "circum"，你禁掉 "vent"，它憋出个 "cumference"，得到一堆词法垃圾。
+
+那测的是分词器的脆弱性，不是推理能力。
+
+把介入限定在词首位置（在多数现代 BPE 分词器里，就是带前导空格标记的那些 token），模型被迫选择的是*另一个词*，然后这个词可以被完整、不受干扰地拼写出来。
+
+于是被强制偏离的单位从"字形"变成了"语义"。
+
+这才是让这个介入成为**绕着说的能力**探针——"你能不能换个说法把这件事说出来"——而不是拼写探针的原因。
+
+数据流因此是这样的：提示原封不动送进去（这就是"zero-prompt"性质——没有"不要用 X 这个词"之类的指令，所以没有指令跟随能力的混淆，没有提示长度效应，模型也没有机会拒绝或讨价还价）。
+
+logits processor 坐在前向传播和采样器之间，只需维护"下一个 token 是否为词首"这一点点状态。
+
+严重程度是一个旋钮：k=1 是轻推，k=5 是猛推，k=20 就接近一堵墙了。
+
+然后你在你关心的任何维度上度量输出文本——任务成功率、连贯性、事实性、指令合规——并与同一模型同一提示的无屏蔽运行对比。
+
+那个 delta 就是鲁棒性分数。
+
+```
+  PROMPT (原封不动)
+        |
+        v
+  +-------------------------------+
+  |         LLM 前向传播          |
+  +-------------------------------+
+        |
+        v  词表上的 logits
+        |
+  +-------------------------------+
+  |   TABOO LOGITS PROCESSOR      |
+  |                               |
+  |   下一个 token 是词首吗?      |
+  |        |            |         |
+  |        是           否        |
+  |        |            |         |
+  |        v            v         |
+  |   取 top-k       原样通过     |
+  |   logit = -inf                |
+  +-------------------------------+
+        |
+        v  屏蔽后的 logits
+  +-------------------------------+
+  |      采样器 / argmax          |
+  +-------------------------------+
+        |
+        v
+  token ..... 追加到上下文
+        |
+        +--------> 回到循环 (屏蔽根据 *新* 上下文
+                   重新计算, 而非固定不变)
+
+  OUTPUT: 被迫绕着说的文本
+        |
+        v
+  与无屏蔽运行对比  =>  退化曲线随 k 变化
+```
+
+**核喻：城市里的流动路障。**
+
+把生成想成开车去一个地址。
+
+每一步的 logit 分布，就是当前路口所有可走的路，按司机"多想走这条"排好序。
+
+正常解码就是一个走了一万遍老路线的本地人。
+
+Taboo 是一支跟着这辆车走的施工队。
+
+**在每一个路口**（这就是词边界——注意他们**不*在路段中间放锥桶，那只会造成车祸，不会造成绕行），**他们封掉司机正准备拐进去的那条路**（top logit）。
+
+不是一份提前公布的封路清单——那就成了固定禁词表，司机可以提前规划绕开。
+
+这是转向灯一亮，锥桶就凭空出现。
+
+**他们一次封几条路，就是 k**：封一条，好司机耸耸肩走平行街道；把最好的五条全封了，你就得真的对这座城市有认知地图才行。
+
+你从中学到的东西，恰好就是你在这种骚扰下观察不同司机会学到的东西。
+
+没有心理地图的游客开始绕圈、慌乱、开到别的区去，或者干脆开始念叨一个完全不同的目的地——这就是小模型丧失连贯性并开始幻觉。
+
+脑子里装了二十年这座城市的出租车司机，绕一条更长、更难看、稍慢的路，**但还是到了**——这就是大的对齐模型靠改写抵达同一个答案。
+
+论文的第二个发现也能干净地映射过来：指令对齐相当于司机内化了"乘客的目的地才是目标"，所以路一封，他重新规划的是通往*目的地*的路线，而不是通往他喜欢的那条*路*。
+
+未对齐的基座模型更像是在跟着沥青上的车辙走——车辙一去掉，就没有目的地层面的承诺可以退守了。
+
+这个比喻还顺带预言了方法的主要弱点，这对一个比喻来说是好兆头：封路能告诉你**司机知识的冗余度**，但它没告诉你真实世界的交通状况是否长得像流动路障。下面细说。
+
+### 关键概念
+
+- **Logits，以及为什么屏蔽一个是"外科手术"**：模型吐出一个词之前，会为词表里每一项产生一个数——也许十二万八千个数。数越大越偏好，softmax 把它们变成概率。关键直觉是：这个向量是一份**完整的偏好排序表**，不是一个选择，而且它在每个位置都从整个上下文重新算一遍。所以你把第一名设成负无穷，你并没有损伤模型、也没有让它困惑、更没有告诉它任何事。它不"知道"自己被拦了。它只是按第二偏好行动，然后——这里是微妙之处——**下一步*的偏好，是从"已经包含了那个次优词"的上下文重新算出来的。模型会从它落地的位置向前自我合理化。具体点：问它海洋，它想说"海洋是浩瀚的"；禁掉"浩瀚"，得到"海洋是巨大的"；两个都禁，可能变成"海洋覆盖了……"；把前五名都禁掉，也许你会拿到"海洋，就其纯粹的尺度而言……"。每一步局部都合理；问题是整条轨迹是否还落在真相上。
+
+- **绕着说是一种能力，不是故障**：在人类身上，"话到嘴边说不出于是换个说法"是语言能力**强*的标志——它正是流利者的行为，也正是失语症患者失去的东西。这篇论文聪明的重构，是把被迫绕着说当成一种测量。只能用一种方式表达某个事实的模型，记住的是表面串；能用五种方式表达的模型，拥有的东西更接近这个事实的*表示*。具体测试：「谁写了《哈姆雷特》」的答案可以是"莎士比亚"、"埃文河畔的吟游诗人"、"1564 年生于斯特拉特福的英国剧作家"。一个在"莎士比亚"被禁掉之后就崩成胡言乱语的系统，从鲁棒的意义上讲，它从来就不知道答案——它知道的是一个字符串。
+
+- **零提示介入（以及为什么"零提示"才是真正的贡献）**：如果你想用提示做同样的测试——"回答时不要使用 X、Y、Z 这几个词"——你立刻会把另外三种能力污染进实验：理解否定指令、在长输出上追踪约束、以及模型之间本就存在的指令跟随差距。小模型在这类提示上失败，是因为它不会跟指令，不是因为它缺乏词汇灵活性。在 logit 空间做事把这些全绕开了。约束是**构造性成立**的——对 1B 基座模型和 70B 对话模型，合规率都是 100%，且完全相同。这才是跨模型比较有意义的前提，也是这篇论文里我真的会拿去复用的那一块。
+
+## 框架转变
+
+```
+  之前（主流方法）:                      之后（本文方法）:
+
+  提示层是测试面                          解码层是测试面
+
+  +---------------------------+          +---------------------------+
+  | "不要用 X 回答"           |          |  提示: 完全不动           |
+  | 对抗后缀                  |          +---------------------------+
+  | 错别字 / 改写             |                    |
+  +---------------------------+                    v
+            |                             +---------------------+
+            v                             | logits              |
+  +---------------------------+            |  [词边界处禁 top-k] |
+  | 模型可以: 遵守/无视/      |            +---------------------+
+  |   拒绝/部分遵守           |                    |
+  +---------------------------+                    v
+            |                             约束对所有模型
+            v                             100% 成立
+  模型之后照样走它最爱的                  模型在每一个词上
+  输出路径                                都被强行推出通道
+
+  结果: 测到的是                          结果: 测到的是
+    指令跟随 + 鲁棒性                       被隔离出来的
+    纠缠在一起                              离路鲁棒性
+
+  旋钮: 没有(提示是二元的)                 旋钮: k = 强度刻度
+                                                (连续的压力曲线)
+```
+
+**一句话**：从**请求*模型离开舒适区并期待它配合，到*把舒适区从它脚下抽掉*，核心转变是**把实验控制权从提示层搬进解码器**，从而把一个被混淆的请求变成一个强制执行、强度可调的约束。
+
+## 专家评审
+
+**选题眼光**：真缺口，而且选得好。
+
+基准与部署之间的落差是这个领域真正未解决的测量问题之一，而"我们从来只在优化过的路径上做评测"是对其原因一个锐利且不显然的表述。
+
+我也喜欢这个介入与既有评测维度是**正交**的——它不是又一个数据集，而是一片可以架在任意数据集前面的镜片。这种贡献通常经得起时间。
+
+框架的软肋在于那一跃：从"系统提示和护栏会把模型推离路径"跳到"因此在词边界禁掉 top token 是它的好代理"。
+
+这两者的约束几何形状是不同的。JSON schema 全局地限制*结构*；安全过滤器限制一片*语义区域*；Taboo 限制的是"模型最想要的那个，处处、均匀地"。
+
+它们相关是有可能的，但"有可能"在这段动机里承担了太多重量。
+
+只要有一个实验，证明 Taboo 分数能预测模型在*真实*部署约束下的退化，这篇论文的说服力会有质变。
+
+没有那一步，这就是一个不错的压力测试，但外部效度悬着。
+
+**方法成熟度**：巧在框架，不巧在机械。
+
+机制就是一个 logits processor——HuggingFace 的 `NoBadWordsLogitsProcessor` 已经存在多年，禁 token 解码是约束生成里的标准操作，"把 logit 设成 -inf"是任何人第一个会试的东西。
+
+真正的洞见——而且这个洞见是值钱的——是**词边界门控**：它是"测语义"和"测分词器损伤"之间的分界线，我敢打赌很多幼稚的复现都会在这里做错。
+
+零提示那个论证也是一个扎实的方法论要点，讲得很干净。
+
+但有几个更简单或信息量更大的变体似乎没做：屏蔽一个*随机的*非 top token（这是必需的对照——退化中有多少来自"离路"，有多少仅仅来自"低概率文本"？）；只在实词上屏蔽 vs 在虚词上屏蔽（禁"的"和禁"光合作用"是两个完全不同的测试）；以及和纯粹的 temperature/top-p 扫描对比——那是最廉价的离路介入，本方法必须打赢这个基线才能证明自己的必要性。
+
+还有一个据我所知没被处理的问题：**熵混淆**。
+
+在高熵位置上，top token 本来就没多受偏爱，屏蔽它几乎没有代价；在低熵位置上，屏蔽它是毁灭性的。
+
+由于校准更好的大模型有系统性不同的熵分布，"鲁棒性随规模提升"可能部分只是"大模型的尖峰出现在不同地方"的换句话说。
+
+这需要控制，理想做法是按"移除的概率质量"而不是按"排名"来对齐介入强度。
+
+**实验诚意**：这是我会压得最狠的地方，而摘要让人很难宽容。
+
+汇报的两个发现——鲁棒性随规模提升、随指令对齐提升——方向上恰好是任何人读论文之前就会预测的。
+
+这本身不构成否决（用新仪器确认一个预期是正当的科学），但它意味着这篇论文的价值几乎全部押在**仪器的效度**上，而摘要里没有数字、没有误差棒、没有指标定义。
+
+正文里我会重点查两件事。
+
+第一，**退化是怎么打分的？**
+
+如果用 LLM judge，就有循环论证风险：judge 系统性地惩罚不寻常的措辞，而 Taboo 的全部目的就是生产不寻常的措辞，所以"连贯性下降"可能有一部分只是在测 judge 的口味。
+
+如果用参考模型的困惑度，结论近乎同义反复——你把高概率 token 移掉了，困惑度当然上升。
+
+唯一完全安全的度量是可验证任务上的成功率（算术、精确匹配的闭卷 QA、能编译的代码）。
+
+第二，**规模是否与模型家族混淆？**
+
+在"若干开源权重家族"上同时变动规模和对齐方式，正好落进那个经典陷阱：家族级的训练数据差异被读成了规模效应。
+
+干净的设计是家族内的规模阶梯，加上同尺寸的 base 对 instruct 配对（Llama、Qwen、Pythia 都支持这么做）——我希望作者就是这么做的，但摘要没说。
+
+**写作功力**：摘要写得有真功夫，"一条狭窄、高度优化的生成通道"这个说法我要偷走。
+
+但它也暴露了偷懒的地方。
+
+最后一句是一张愿望清单（"合成数据集、护栏压力测试、部署前审计"），却被当作贡献陈述——这是"结果部分比野心薄"的典型信号。
+
+那三件事里任何一件，只要有一个最小的演示，都比三件事都只是断言更值钱。
+
+最能把论文抬一个档次的重写对象是**指标与效度那一节**：把退化定义清楚，补上随机屏蔽和温度扫描两个对照，再加一个把 Taboo 分数和真实生产式约束下的行为联系起来的实验。
+
+做到这些，它就从"有意思的探针"变成"别人会引用的工具"。
+
+另外该删的：行文时不时暗示 Taboo 在*模拟*护栏，这是过度声称——它是一个*通用*的离路压力源，坦白说出来一分钱不花，还能换来可信度。
+
+**判决**：**临界**，作为短文/workshop 论文偏弱接收——一个真正有用且可复用的原语，配上一个论证不足的效度故事，以及一批确认预期而非带来惊讶的结论。
+
+我明天就会在 workshop 上接收它，但会带着上面那几个对照要求把它从主会退回去。
+
+## 要点总结
+
+值得偷走的具体东西：
+
+1. **只要能做到，就把实验控制从提示里搬出去**。这是可迁移的方法论教训，远远超出禁词本身。任何时候你通过**要求*模型做一件不寻常的事来测试它，你的测量就被指令跟随能力污染了——而那恰好是随模型规模和对齐阶段变化最大的变量。在解码器里强制执行约束，构造性地给你 100% 合规，让跨模型比较变得诚实。同样的招数适用于测试格式遵循、长度控制和拒答行为：强制，不要请求。
+
+2. **词边界门控本身就是可复用的原语**。只要你在 token 分布上做介入、且关心语义而非字形，就把介入限制在词首位置。否则你测的是自己的分词器。这个微小细节是"信号"和"噪声"的分界，同样适用于 token 级归因、token dropout、噪声注入鲁棒性研究。
+
+3. **把强制改写当作知识测试**。这是今天就能用、和论文结论无关的实用价值：想检验模型是真的**知道*一个事实、还是*背了一个字符串*，禁掉它的规范表述，看答案能否存活。这是一个廉价、无需 judge 的探针，可以查数据污染和浅层记忆——答案要么还对，要么就不对，没有中间地带。
+
+4. **Taboo 作为合成数据生成器，这可能是最立刻能变现的用法**。同一个提示在 k=1、3、5、10 下各跑一遍，你就从单个模型免费拿到一组语义相近、词汇发散的输出，不需要提示工程，也没有高温采样的退化问题。那是一份改写语料、一批给检索器和 reranker 的难负样本、以及蒸馏数据的多样性注入机制。我预期这个应用会比它的诊断框架活得更久。
+
+5. **一个廉价的红队补充，附带注意事项**。在标称措辞上调好的护栏，可能漏掉同样内容的"绕着说"版本，而 Taboo 能机械地批量生成这些版本，值得加进安全评测流水线。注意事项是：这是对**你自己系统**的防御性审计，而且与基于提示的攻击不同，它需要 logit 访问权限，所以这是模型所有者的工具，不是外部可利用的攻击面。
+
+**不该拿走的**：现在还不要把"Taboo 下的鲁棒性"当成部署表现的已验证预测指标。这篇论文对这个联系的断言多于证明。把 Taboo 当作产生假设的诊断工具，然后回到你真正关心的那个约束上去确认。
+:::

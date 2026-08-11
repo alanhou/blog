@@ -1,0 +1,418 @@
+---
+title:
+  en: "Integrate What You Know, Learn Only the Remainder: LDR and Extrapolative Video World Models"
+  zh: "能算的就别学：LDR 与会外推的视频世界模型"
+description:
+  en: "LDR replaces learned latent transitions with an explicit kinematic integrator over a structured latent, letting the network predict only third-order-and-up residuals — and the resulting model keeps working far outside its training distribution."
+  zh: "LDR 把潜空间的时间转移写成显式的运动学积分，网络只需回归三阶及以上的残差项；代价是需要结构化潜变量，收益是模型在训练分布之外依然算得对。"
+date: 2026-08-11
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-learning-how-the-world-evolves-extrapolative.png"
+---
+:::en
+**Paper**: [2608.09926](https://arxiv.org/abs/2608.09926)
+**Authors**: Haodong Li, Shaoteng Liu, Tianyu Wang, Chongjian Ge, Sihui Ji, Jiahan Zhang, Xin Lin, Haolin Lu, Zhe Lin, Manmohan Chandraker
+**Categories**: cs.CV
+
+## The Gap
+
+Video diffusion models got very good at a task that is not quite the task we want. Sora-class models, and the open equivalents built on latent video diffusion, learn `p(video)` — they fit the joint distribution of pixel sequences. Nothing in that objective asks the model to represent *how state advances*; a plausible-looking frame sequence is a global sample, not a step-by-step consequence of the previous frame. The empirical result, documented most cleanly by PhyWorld (Kang et al.), is that these models interpolate physics beautifully and extrapolate it not at all. Train on balls with initial velocity in `[1, 3]`, test at velocity `5`, and the model produces something that looks like a video of a ball and violates conservation of momentum. Scaling data and parameters moves the interpolation curve and barely moves the extrapolation curve — PhyWorld's central negative result.
+
+The responses so far have mostly been either (a) more data and more parameters, hoping the law falls out, or (b) bolt a simulator or a physics loss onto the side, which requires knowing the equations in advance and gives up the "purely from pixels" premise. What has been missing is an architectural answer: make the *transition operator itself* structurally incapable of memorizing appearance-specific trajectories.
+
+LDR's bet is that the reason learned transitions do not extrapolate is that they are asked to learn something we already know. Position advances by velocity times dt. That is not a fact to be learned from data; it is arithmetic. So integrate the low-order terms numerically and let the network handle only what is genuinely unknown — the third-order-and-higher residual (jerk and beyond).
+
+```
+[ Problem ]  video diffusion fits pixels, not state transitions
+             ==> plausible frames, broken laws off-distribution
+      |
+      v
+[ Assumption ]  (1) scene dynamics live in a few scalar state vars
+                (2) low-order evolution is arithmetic, not knowledge
+                (3) extrapolation needs a linear-in-dt algebra,
+                    not a big function approximator
+      |
+      +--> [ Method ] Latent Dynamics Reasoning
+      |        . structured latent: named state slots
+      |        . explicit kinematic integration of orders 0..2
+      |        . net regresses ONLY 3rd+ order residual
+      |        . residual drives autoregressive rollout
+      v
+[ Evidence ]  PhyWorld white-box bench, 5 tasks, 256^2
+              . (OOD err - ID err) gap  > 20x smaller than VDM
+              . 26x fewer params, 143x faster
+              . train: red ball, L>R  ==>  test: blue square, R>L  ok
+      |
+      v
+[ Conclusion ]  extrapolation is a property of the transition
+                operator's *form*, not of data scale
+```
+
+## The Increment
+
+**One sentence**: Before, "does the world model obey physics out of distribution?" was a scaling question with a discouraging answer; after, it is an architecture question with a constructive answer — put an integrator where the learned transition used to be, and only learn the part the integrator cannot compute.
+
+### Core Mechanism
+
+Three pieces, and the ordering matters. First, a **structured latent**. Standard latent video models encode a frame into a dense `H x W x C` feature grid — a soup in which "the ball's x-coordinate" has no address. LDR instead encodes into a latent where a small number of dimensions carry interpretable, integrable state: object position, velocity, and a separate appearance/identity channel. The paper is explicit that this is a precondition, not a nice-to-have: you cannot run kinematic integration on convolutional features, because `feature + velocity ** dt` is meaningless. Structure is what makes the arithmetic well-typed.
+
+Second, the **explicit kinematic integration**. Given the recent latent history, low-order derivatives are obtained by finite differences, and the next state is written as a truncated Taylor step: `x + v**dt + a*dt^2/2 + j*dt^3/6`. Terms up to second order are computed, not predicted. This is closed-form, has no parameters, and — crucially — is *exactly correct* for whatever velocity magnitude you hand it. It cannot overfit to the training range because it does not fit anything.
+
+Third, the **residual network**. The only learned quantity is `j`, the third-and-higher-order correction, conditioned on the current structured state and context. This is where genuine physics knowledge lives: how jerk behaves near a bounce, what a collision impulse does, how looming distorts apparent size. Because the network's output is a small correction rather than the whole next state, its errors are small corrections too — and its ignorance about out-of-range velocities costs much less, since the dominant term was never its job. Rollout is autoregressive: integrate, decode, feed back.
+
+```
+   frames f_(t-k) ... f_t
+        |
+        v
+   +---------------------+
+   | structured encoder  |
+   +---------------------+
+        |
+        v
+   s_t = ( pos , vel , acc , appearance )      <== named slots
+        |                     |
+        |  finite differences |  (no learning here)
+        v                     |
+   +----------------------+   |   +------------------------+
+   | kinematic integrator |<--+---| residual net f_theta   |
+   |                      |   j   | j = f( s_t , context ) |
+   | x_(t+1) = x          |<------| 3rd order and higher   |
+   |   + v * dt           |       | ONLY learned part      |
+   |   + a * dt^2 / 2     |       +------------------------+
+   |   + j * dt^3 / 6     |
+   +----------------------+
+        |
+        v
+   s_(t+1) ---> decoder ---> f_(t+1)
+        |
+        +------------ rollout feedback -------------+
+                                                    |
+        (appearance channel passes through untouched)
+```
+
+**The metaphor: dead reckoning on a ship.** A navigator in 1750 has no GPS and no photographs. She has a chart with latitude and longitude (the **structured latent* — every quantity has an address and a unit), a log line for speed and a compass for heading (the low-order derivatives read off by finite differences), and a clock. Position at the next hour is speed times heading times elapsed time, plotted with dividers on the chart. That is the *integrator*: pure arithmetic, no experience required, and it works identically at 4 knots or 14 knots — including 14 knots when she has only ever sailed at 4.
+
+What dead reckoning cannot give her is the current, the wind drift, the way the hull behaves in a following sea. For that she needs experience: local knowledge, corrections learned from many voyages. That is the *residual network* — it supplies only the part the arithmetic cannot, and it is small because the arithmetic already did the heavy lifting.
+
+Now the contrast. A video diffusion model is a different navigator: one who has memorized thousands of photographs of coastline and navigates by matching what he sees out the window to the album. Inside surveyed waters he is astonishingly good, often better than the dead-reckoner, because the album is dense and detailed. Sail one day past the edge of the album and he is producing confident, beautiful, wrong answers — a coastline that looks like a coastline. The dead-reckoner sails off the edge of the chart and her arithmetic still holds; only her current corrections degrade. That difference *is* the 20x ID/OOD gap reduction. And the red-ball-to-blue-square result is the navigator noticing that hull paint does not enter the equations: appearance lives in a channel the integrator never reads, so changing it changes nothing about the predicted track.
+
+### Key Concepts
+
+- **Why "third-order residual" and not "learn the whole step"**: Think about predicting where a thrown ball will be a moment from now. You could ask someone to look at a photo and guess — they will be right if they have seen many similar throws and wrong if the throw is faster than any they have seen. Or you could hand them the current position, the current speed, and a stopwatch, and have them multiply. The multiplier is right at any speed. LDR does the multiplication for terms 0, 1, and 2, so the network is only asked "and how is the acceleration itself changing?" For uniform motion and free-fall parabolas that answer is literally zero, so those tasks become nearly parameter-free. For bouncing and collisions the answer is a sharp spike at impact — genuinely hard, genuinely worth learning. The split is: arithmetic gets the smooth bulk, learning gets the events.
+
+- **Structured latent vs. dense features**: A dense feature map is like describing a room by listing the brightness of every square inch of a photograph of it. Everything is in there; nothing is addressable. You cannot say "move the chair two feet left" as an operation on brightness values. A structured latent is like describing the room as a table of objects with coordinates: chair at (3.2, 1.1), color brown. Now "move the chair" is subtraction. Integration requires the second kind of description, because integration is arithmetic on quantities, and arithmetic needs quantities to exist as named things. This is the same instinct behind object-centric representation learning (slot attention and descendants), pointed at a different payoff — not scene understanding but extrapolable dynamics.
+
+- **The ID/OOD **gap* as the metric**: Most papers report OOD error. LDR reports the **difference* between OOD and in-distribution error, and that choice is the honest one for this question. A model could have high OOD error simply because it is a weak model everywhere. What you want to know is whether performance *degrades* when you leave the training range — that is the signature of memorization versus rule-following. A gap near zero means the model does not know it left the training set, which is exactly what "has learned the law" should mean.
+
+## Framework Shift
+
+```
+Before (mainstream video diffusion):     After (LDR):
+
+  f_t                                      f_t
+   |                                        |
+   v                                        v
+ [ dense conv/DiT latent ]              [ structured latent ]
+   |                                     ( x , v , a , look )
+   |                                        |         |
+   v                                        |     appearance
+ [ BIG learned transition ]                 |     bypasses
+ [ everything is learned:  ]                |     dynamics
+ [  motion + appearance +  ]                v
+ [  timing, entangled      ]           [ integrator ]  <-- 0 params
+   |                                    x + v dt + a dt^2/2
+   |                                        ^
+   |                                        | j
+   |                                   [ small net ]  <-- learns
+   |                                    3rd order only
+   v                                        v
+ f_(t+1)                                 f_(t+1)
+
+ fit p(video)                            compute the step,
+ hope law emerges                        learn the remainder
+
+ in-range: excellent                     in-range: good
+ off-range: confidently wrong            off-range: still good
+```
+
+From *learning the transition* to *computing the transition and learning its residual*, the core shift is that generalization stops depending on how much of the input space the training data covered, because the dominant term is closed-form arithmetic that has no training range at all.
+
+## Expert Assessment
+
+**Problem choice**: A real gap, and a well-chosen one. PhyWorld established the negative result — physics does not fall out of video scaling — and the field has been circling it since, mostly with bigger models or external simulators. Asking "what structural change to the transition operator would fix this?" is the right next question, and inverting the usual instinct (learn less, not more) is the kind of move that produces genuine progress rather than another point on a scaling plot. It sits precisely on the fault line between the generative-video camp and the object-centric/neural-ODE camp, and it is a little surprising that the specific combination — structured latent **plus* explicit Taylor integration *plus* residual-only learning — had not been assembled and evaluated on PhyWorld before.
+
+**Method maturity**: Clever insight rather than brute force, which I like, but the cleverness is load-bearing in a way that limits reach. Two concerns. First, the truncation choice deserves more scrutiny than the abstract gives it: for uniform motion and parabolic flight, the true third-order term is exactly zero, so two of the five benchmark tasks are close to solved by the integrator alone with the network only needing to output nothing. That is a legitimate demonstration of the design's value, but it inflates the average and it means the headline 20x is not uniformly earned across tasks. I would want per-task ID/OOD gaps before believing the mechanism generalizes. Second, collision and bouncing are **impulsive* — at contact, acceleration is a delta function and higher derivatives are unbounded. A Taylor step is exactly the wrong local model there. Either the residual network is absorbing a discontinuity into a `dt^3/6` coefficient (which will be brittle in the timing of the bounce even if the pre- and post-bounce segments are clean), or there is contact-handling machinery not visible in the abstract. This is the single most important thing the full paper needs to answer convincingly.
+
+Simpler alternatives being underweighted: a Neural ODE or Hamiltonian/Lagrangian neural network over the same structured latent would get much of this benefit and has a decade of literature; the interesting claim is that discrete Taylor integration with residual learning beats those, and that comparison has to be in the paper for the contribution to be properly located. Likewise, the honest ablation is *structured latent alone, with a fully learned transition*. My suspicion is that a large fraction of the extrapolation gain comes from disentangling position from appearance, not from the integrator per se — the blue-square result is evidence for the latent, not for the Taylor step.
+
+**Experimental integrity**: Mixed. The choice to report the ID/OOD **gap* is the right metric and shows the authors understand what they are measuring. But the efficiency comparison is apples-to-oranges in a way that should be stated rather than headlined: 26x fewer parameters and 143x faster than a video diffusion model is unsurprising when the diffusion model is carrying the capacity to render arbitrary appearance and LDR is rendering colored primitives on plain backgrounds, and when one requires multi-step denoising and the other is a single forward pass. Those numbers say more about diffusion's overhead than about LDR's efficiency, and quoting them alongside the physics result invites the reader to credit LDR with a general-purpose win it has not demonstrated.
+
+The larger red flag is scope. Everything is on PhyWorld: synthetic, white-box, primitive shapes, five hand-designed tasks. That is the correct benchmark for isolating the question — you cannot measure OOD physics on real video because you do not know the ground-truth parameters — but the claim "first video world model that extrapolates learned dynamics beyond its training distribution" then rests entirely on a setting where the structured latent can be a handful of clean scalars. Real video has deformable objects, occlusion, multiple interacting entities, and no canonical state vector. Nothing here shows the structured encoder survives that, and the method's dependence on it means the honest version of the claim is narrower: *in settings where scene state is low-dimensional and recoverable, replacing the learned transition with an integrator buys extrapolation.* That is still a good result. It is not the one the abstract advertises.
+
+**Writing quality**: The abstract is doing marketing where it should be doing scoping — three efficiency multipliers and a superlative in the space where the load-bearing caveat (synthetic only, structured latent required, how impulsive contact is handled) belongs. The section I would rewrite is whatever discusses the structured latent: it is the actual bottleneck of the whole approach, it is presented as a design detail ("rather than dense convolutional features"), and a reader cannot currently tell how much supervision or task-specific prior goes into obtaining it. If the encoder needs any privileged information about object identity, the extrapolation story changes character considerably. A frank limitations section on the path to real video would raise my confidence in the rest.
+
+**Verdict**: weak accept — a genuinely well-aimed architectural idea with a clean, correctly-chosen metric, held back by toy-only evidence, a superlative claim it cannot support at that scope, and missing ablations that would tell us whether the integrator or the structured latent is doing the work.
+
+## Takeaways
+
+Things worth stealing regardless of whether you care about video:
+
+- **Audit your learned components for arithmetic.** The generalizable version of LDR's insight has nothing to do with physics: any time a model is learning a relationship you could have written in closed form, you have converted a fact into a fitted function, and fitted functions have training ranges. Look for these in your own pipelines — coordinate transforms, unit conversions, monotone accumulations, anything where `f(x + delta)` is computable from `f(x)`. Compute it and regress the residual.
+
+- **Residual parameterization changes the failure mode, not just the error.** When the network outputs a correction to a correct-by-construction baseline, its ignorance shows up as a small bias rather than a plausible-looking hallucination. This is a general property worth engineering for in any extrapolative setting: choose parameterizations where being out of distribution degrades gracefully instead of confidently.
+
+- **Report the ID-to-OOD gap, not OOD error.** A cheap methodological upgrade for anyone making generalization claims. Absolute OOD numbers conflate "weak model" with "memorizing model"; the delta isolates the thing you actually care about. Steal this metric for your next generalization experiment.
+
+- **The appearance bypass is a reusable trick.** Routing identity/style through a channel the dynamics module cannot read gives you invariance by construction rather than by augmentation. The red-ball-to-blue-square result is the cheapest possible demonstration, but the pattern — hard-wire the invariances you know about into the connectivity, do not hope the data teaches them — transfers directly to control, forecasting, and any domain with nuisance variables.
+
+- **What not to take:** the efficiency numbers. Do not walk away believing an integrator-based world model is 143x faster than diffusion in general. That comparison is confounded by rendering difficulty and sampling procedure.
+:::
+
+:::zh
+**论文**: [2608.09926](https://arxiv.org/abs/2608.09926)
+**作者**: Haodong Li, Shaoteng Liu, Tianyu Wang, Chongjian Ge, Sihui Ji, Jiahan Zhang, Xin Lin, Haolin Lu, Zhe Lin, Manmohan Chandraker
+**分类**: cs.CV
+
+## 缺口
+
+视频扩散模型把一件"差一点就是我们要的"事情做得非常好。
+Sora 一类模型以及开源的隐空间视频扩散，学的是 `p(video)`——像素序列的联合分布。
+这个目标函数里没有任何一项在要求模型表达"状态如何前进"；一段看起来合理的视频是一次全局采样，而不是逐步从上一帧推出来的结果。
+
+PhyWorld 把这件事的后果测得很干净：这类模型对物理的插值极其漂亮，外推则完全不成立。
+用初速度在 `[1, 3]` 的小球训练，测 `5`，模型会生成一段"看起来很像小球视频"但动量不守恒的东西。
+更关键的是，加数据加参数主要在推插值曲线，几乎推不动外推曲线——这是 PhyWorld 那个让人沮丧的核心结论。
+
+此前的应对基本是两条路：要么继续堆数据堆参数，指望规律自己涌现；要么在旁边挂一个仿真器或物理损失，但那需要事先知道方程，也就放弃了"纯从像素学"的前提。
+一直缺的是一个结构性回答：让**转移算子本身**在结构上就没法去背特定外观下的轨迹。
+
+LDR 的赌注是：学出来的转移之所以不会外推，是因为我们让它去学早就已知的东西。
+位置等于位置加速度乘 dt，这不是需要从数据里学的知识，这是算术。
+所以低阶项用数值积分算掉，只把真正未知的部分——三阶及以上残差（jerk 及更高）——留给网络。
+
+```
+[ 问题 ]  视频扩散拟合像素，不拟合状态转移
+          ==> 帧看起来合理，出分布就违反定律
+      |
+      v
+[ 假设 ]  (1) 场景动力学只活在少数标量状态变量上
+          (2) 低阶演化是算术，不是知识
+          (3) 外推需要的是对 dt 线性的代数式,
+              不是更大的函数逼近器
+      |
+      +--> [ 方法 ] Latent Dynamics Reasoning
+      |        . 结构化潜变量：状态有名字有地址
+      |        . 显式运动学积分，处理 0..2 阶
+      |        . 网络只回归 3 阶及以上残差
+      |        . 残差驱动自回归展开
+      v
+[ 证据 ]  PhyWorld 白盒基准，5 任务，256^2
+          . (OOD 误差 - ID 误差) 差距比 VDM 小 20 倍以上
+          . 参数少 26 倍，速度快 143 倍
+          . 训练：红球 左>右  ==>  测试：蓝方块 右>左 依然对
+      |
+      v
+[ 结论 ]  外推能力取决于转移算子的*形式*,
+          不取决于数据规模
+```
+
+## 增量
+
+**一句话**：从前"世界模型出分布还守物理吗"是一个 scaling 问题，答案令人沮丧；现在它是一个架构问题，答案是建设性的——把积分器放在原来学出来的转移的位置上，只学积分器算不出来的那部分。
+
+### 核心机制
+
+三个部件，顺序很重要。
+
+第一，**结构化潜变量**。
+标准隐空间视频模型把一帧编码成密集的 `H x W x C` 特征图——一锅粥，"球的 x 坐标"在里面没有地址。
+LDR 编码到的潜空间里，少数几个维度承载可解释、可积分的状态：物体位置、速度，以及一条独立的外观/身份通道。
+论文明确把这当作前提而不是加分项：卷积特征上跑不了运动学积分，因为 `特征 + 速度 * dt` 没有意义。
+结构化的作用是让算术在类型上说得通。
+
+第二，**显式运动学积分**。
+拿最近的潜变量历史做有限差分得到低阶导数，下一状态写成截断的泰勒步：`x + v*dt + a*dt^2/2 + j*dt^3/6`。
+二阶以内的项是算出来的，不是预测出来的。
+这一步是闭式的、零参数的，而且——关键——你喂多大的速度它都**精确正确**。
+它不可能过拟合到训练区间，因为它压根没在拟合。
+
+第三，**残差网络**。
+唯一被学的量是 `j`，即三阶及以上的修正，条件是当前结构化状态与上下文。
+真正的物理知识住在这里：弹跳附近 jerk 如何变化、碰撞冲量做了什么、looming 时表观尺寸如何形变。
+因为网络输出的是一个小修正而不是整个下一状态，它的误差也只是小修正；它对超出训练范围的速度一无所知这件事代价也小得多，因为主导项从来不是它的活。
+展开过程是自回归的：积分、解码、回喂。
+
+```
+   帧 f_(t-k) ... f_t
+        |
+        v
+   +---------------------+
+   | 结构化编码器        |
+   +---------------------+
+        |
+        v
+   s_t = ( 位置 , 速度 , 加速度 , 外观 )     <== 有名字的槽位
+        |                        |
+        |  有限差分              |  (这里不学习)
+        v                        |
+   +----------------------+      |   +---------------------+
+   | 运动学积分器         |<-----+---| 残差网 f_theta      |
+   |                      |      j   | j = f( s_t , 上下文 )|
+   | x_(t+1) = x          |<---------| 只管 3 阶及以上     |
+   |   + v * dt           |          | 唯一被学的部分      |
+   |   + a * dt^2 / 2     |          +---------------------+
+   |   + j * dt^3 / 6     |
+   +----------------------+
+        |
+        v
+   s_(t+1) ---> 解码器 ---> f_(t+1)
+        |
+        +----------- 展开回喂 -------------+
+                                           |
+        (外观通道原样穿过，不参与动力学)
+```
+
+**核喻：航海推算（dead reckoning）。**
+1750 年的领航员没有 GPS，也没有照片。
+她有一张带经纬度的海图（**结构化潜变量**——每个量都有地址和单位），有测速的计程绳和罗盘（有限差分读出的低阶导数），有一只钟。
+下一小时的位置就是航速乘航向乘时间，用两脚规在海图上量出来。
+这就是**积分器**：纯算术，不需要经验，4 节和 14 节一样好用——包括她一辈子只跑过 4 节而现在跑 14 节的情况。
+
+推算给不了她的是洋流、风压差、船体在尾随浪中的行为。
+那些要靠经验：本地知识，多次航行攒下来的修正量。
+这就是**残差网络**——只提供算术给不了的那部分，而且它可以很小，因为重活算术已经干完了。
+
+对比来了。
+视频扩散模型是另一种领航员：背下了几千张海岸线照片，靠把窗外景象和相册对上来定位。
+在测绘过的水域里他好得惊人，常常比推算派更准，因为相册又密又细。
+往相册边界外多航一天，他就开始给出自信、漂亮、错误的答案——一条"很像海岸线"的海岸线。
+推算派航出海图边缘，她的算术仍然成立，只有洋流修正在退化。
+这个差别**就是**那个 20 倍的 ID/OOD 差距。
+而红球训练、蓝方块测试之所以成立，是因为领航员发现船漆不进方程：外观住在积分器读不到的通道里，所以改外观完全不改变预测航迹。
+
+### 关键概念
+
+- **为什么是"三阶残差"而不是"学整步"**：想想预测一个抛出的球下一刻在哪。
+你可以让人看一张照片猜——他见过很多类似的抛投就猜得准，抛得比他见过的都快就猜错。
+或者你把当前位置、当前速度和一只秒表交给他，让他做乘法。
+做乘法的人在任何速度下都对。
+LDR 把 0、1、2 阶的乘法自己做了，网络只被问"那加速度本身在怎么变？"。
+对匀速运动和自由落体抛物线，这个答案严格是零，于是这两个任务几乎变成无参数的。
+对弹跳和碰撞，答案是撞击瞬间的一个尖峰——真的难，也真的值得学。
+这个切分是：算术负责平滑的主体，学习负责事件。
+
+- **结构化潜变量 vs 密集特征**：密集特征图像是这样描述一个房间：列出这个房间照片上每平方英寸的亮度。
+信息全在里面，但什么都不可寻址。
+你没法把"椅子往左移两英尺"表达成对亮度值的操作。
+结构化潜变量像是这样描述房间：一张物体表格，椅子在 (3.2, 1.1)，颜色棕。
+现在"移椅子"就是减法。
+积分要求的是第二种描述，因为积分是对量的算术，而算术需要量以有名字的东西存在。
+这跟 slot attention 一脉的以物体为中心表征学习是同一个直觉，只是瞄准了不同的收益——不是场景理解，而是可外推的动力学。
+
+- **把 ID/OOD **差距*当指标**：多数论文报 OOD 误差。
+LDR 报的是 OOD 与分布内误差之**差**，对这个问题而言这是诚实的选择。
+一个模型 OOD 误差高，可能仅仅因为它到处都弱。
+你真想知道的是：离开训练区间时性能**是否退化**——这才是"背下来"与"守规则"的分水岭。
+差距接近零意味着模型不知道自己已经出了训练集，而这正应该是"学到了定律"的含义。
+
+## 框架转变
+
+```
+之前（主流视频扩散）：                 之后（LDR）：
+
+  f_t                                    f_t
+   |                                      |
+   v                                      v
+ [ 密集 conv/DiT 潜变量 ]            [ 结构化潜变量 ]
+   |                                 ( x , v , a , 外观 )
+   |                                    |          |
+   v                                    |      外观绕过
+ [ 巨大的学出来的转移 ]                 |      动力学
+ [ 全都靠学：           ]               |
+ [  运动 + 外观 + 时序  ]               v
+ [  纠缠在一起          ]          [ 积分器 ]  <-- 0 参数
+   |                                x + v dt + a dt^2/2
+   |                                    ^
+   |                                    | j
+   |                               [ 小网络 ]  <-- 只学
+   |                                只管 3 阶以上
+   v                                    v
+ f_(t+1)                             f_(t+1)
+
+ 拟合 p(video)                       转移算出来,
+ 指望定律涌现                        残差学出来
+
+ 区间内：优秀                        区间内：良好
+ 区间外：自信地错                    区间外：依然良好
+```
+
+一句话：从**学习转移**到**计算转移并学习其残差**，核心转变是泛化不再取决于训练数据覆盖了多少输入空间，因为主导项是闭式算术，而闭式算术根本没有"训练区间"这回事。
+
+## 专家评审
+
+**选题眼光**：真缺口，而且选得准。
+PhyWorld 立起了那个否定结论——物理不会从视频 scaling 里自动掉出来——之后领域一直围着它转，多数还是更大的模型或外挂仿真器。
+问"对转移算子做什么结构改动能修好这件事"是正确的下一问，而且把常规直觉反过来（少学一点，而不是多学一点）正是那种能产生真进展而不是又添一个 scaling 数据点的动作。
+它精确落在生成视频派与以物体为中心/neural ODE 派之间的断层线上，说实话有点意外的是：结构化潜变量 + 显式泰勒积分 + 只学残差 这个具体组合此前没被拼起来在 PhyWorld 上测过。
+
+**方法成熟度**：是巧劲不是蛮力，我喜欢，但这个巧劲承重的方式也限制了它的射程。
+两点担心。
+第一，截断阶数的选择值得比摘要给的更多审视：对匀速运动和抛物线，真实三阶项严格为零，所以五个基准任务里有两个几乎光靠积分器就解决了，网络只需要输出零。
+这是设计价值的正当演示，但它抬高了平均值，也意味着头条上的 20 倍并非在各任务上均匀挣来的。
+我要看逐任务的 ID/OOD 差距才敢相信机制是普适的。
+
+第二，碰撞与弹跳是**冲量型**的——接触瞬间加速度是 delta 函数，更高阶导数无界。
+泰勒步在那里恰恰是错误的局部模型。
+要么残差网络在把一个不连续性塞进 `dt^3/6` 的系数里（那么即使碰撞前后两段都干净，弹跳的时刻也会很脆），要么存在摘要里看不到的接触处理机制。
+这是全文最需要说服人的一点。
+
+被低估的更简单方案：在同一套结构化潜变量上跑 Neural ODE 或 Hamiltonian/Lagrangian 神经网络，能拿到相当一部分收益，而且有十年文献。
+有意思的主张是"离散泰勒积分加残差学习打得过它们"，那这个比较必须进正文，否则贡献定位不清。
+同样，真正诚实的消融是**只上结构化潜变量、转移仍然全学**。
+我的怀疑是：外推增益里很大一块来自把位置与外观解耦，而不是来自积分器本身——蓝方块那个结果是潜变量的证据，不是泰勒步的证据。
+
+**实验诚意**：一半一半。
+选择报 ID/OOD **差距**是正确的指标，说明作者清楚自己在测什么。
+但效率对比在方向上不对等，应该说明而不是当头条：比视频扩散少 26 倍参数、快 143 倍并不令人惊讶——扩散模型背着渲染任意外观的容量，LDR 渲染的是纯色背景上的彩色基本形状；一个要多步去噪，另一个是单次前向。
+这些数字讲的更多是扩散的开销，而不是 LDR 的效率；把它们和物理结论并排放，会诱导读者把一个尚未证明的通用胜利记到 LDR 账上。
+
+更大的警示是范围。
+一切都在 PhyWorld 上：合成、白盒、基本形状、五个手工设计的任务。
+作为隔离该问题的基准这是正确的选择——你没法在真实视频上测 OOD 物理，因为你不知道真值参数——但"首个能把学到的动力学外推到训练分布之外的视频世界模型"这个论断就完全建立在一个"结构化潜变量可以是几个干净标量"的设定上。
+真实视频有可变形物体、遮挡、多体交互，且没有规范的状态向量。
+这里没有任何结果表明结构化编码器能在那种条件下存活，而方法对它的依赖意味着诚实版本的论断要窄得多：**在场景状态低维且可恢复的设定里，用积分器替换学出来的转移，能买到外推能力。**
+这依然是个好结果，但不是摘要在卖的那个。
+
+**写作功力**：摘要在该做范围界定的位置做了营销——三个效率倍数加一个"首个"，占掉了本该属于承重限定条件（仅合成场景、需要结构化潜变量、冲量接触怎么处理）的位置。
+我最想重写的是讨论结构化潜变量的那节：它是整个方法真正的瓶颈，却被当成一句设计细节（"而不是密集卷积特征"）带过，读者目前无法判断获得它需要多少监督或任务先验。
+如果编码器需要任何关于物体身份的特权信息，整个外推故事的性质就变了。
+一节坦率的"通往真实视频的局限"会显著提升我对其余部分的信任。
+
+**判决**：弱接收 —— 瞄得很准的架构思路，指标选得干净且正确，但被"只有玩具场景的证据""该范围支撑不起的最高级论断""缺少能判定到底是积分器还是结构化潜变量在起作用的消融"拖住。
+
+## 要点总结
+
+不管你做不做视频，这几样值得偷：
+
+- **审计你的可学习模块里有没有算术**。
+LDR 洞见的可迁移版本跟物理无关：任何时候你让模型去学一个本可以写成闭式的关系，你就把一个事实变成了一个拟合函数，而拟合函数是有训练区间的。
+在自己的流水线里找这类东西——坐标变换、单位换算、单调累积，任何 `f(x + delta)` 能从 `f(x)` 算出来的地方。
+算掉它，回归残差。
+
+- **残差参数化改变的是失败模式，不只是误差大小**。
+当网络输出的是对一个"构造上正确"的基线的修正时，它的无知表现为一个小偏差，而不是一个看起来很合理的幻觉。
+这是任何需要外推的场景都值得为之做工程的通用性质：选那种"出分布时优雅退化"而不是"自信地错"的参数化。
+
+- **报 ID 到 OOD 的差距，而不是 OOD 误差**。
+对任何声称泛化的人来说这是廉价的方法论升级。
+OOD 绝对数把"弱模型"和"记忆型模型"混在一起；差值才隔离出你真正关心的东西。
+下一个泛化实验里直接把这个指标偷走。
+
+- **外观旁路是个可复用的招**。
+把身份/风格路由到动力学模块读不到的通道，你就用构造而不是数据增强拿到了不变性。
+红球到蓝方块只是最廉价的演示，但这个模式——把你已知的不变性硬连到连接结构里，别指望数据教会模型——可以直接迁移到控制、时序预测，以及任何有干扰变量的领域。
+
+- **不要偷的**：效率数字。
+别带走"基于积分器的世界模型普遍比扩散快 143 倍"这个印象。
+那个对比被渲染难度和采样流程双重混淆了。
+:::

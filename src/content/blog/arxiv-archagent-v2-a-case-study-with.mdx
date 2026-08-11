@@ -1,0 +1,443 @@
+---
+title:
+  en: "ArchAgent v2: When an Evolutionary Agent Out-Prefetches the Champion"
+  zh: "ArchAgent v2：当进化式智能体在预取器上击败人类冠军"
+description:
+  en: "An agentic search framework designs a three-level data prefetcher that edges out the DPC4 winner, using cascaded per-level evolution and a hardware-size checker wired into the feedback loop."
+  zh: "一个智能体搜索框架自动设计出三级数据预取器，微弱超越 DPC4 冠军方案——靠的是逐级级联进化，以及把硬件面积估算器直接接进反馈回路。"
+date: 2026-08-11
+tags: ["arxiv", "ai", "cs.ai", "cs.ar"]
+image: "/arxiv-visuals/arxiv-archagent-v2-a-case-study-with.png"
+---
+
+![Concept animation](/arxiv-visuals/archagent-v2-a-case-study-with/ConceptScene.gif)
+
+
+:::en
+**Paper**: [2608.09874](https://arxiv.org/abs/2608.09874)
+**Authors**: Abraham Gonzalez, Raghav Gupta, Akanksha Jain, Hanna Alam, Alexander Novikov, Po-Sen Huang, Matej Balog, Marvin Eisenberger, Sergey Shirobokov, Ngân Vũ
+**Categories**: cs.AI, cs.AR
+
+## The Gap
+
+The FunSearch/AlphaEvolve line of work established a recipe: let an LLM propose code mutations, score them with a cheap deterministic evaluator, keep a population of winners, repeat. It works beautifully when the artifact is one self-contained function and the evaluator returns a number in milliseconds.
+
+ArchAgent v1 pushed that recipe into computer architecture and won on **cache replacement policies** — a good fit, because a replacement policy is a single decision function at a single cache level, and the storage budget is easy to keep in your head. Prefetching breaks all three of those conveniences at once:
+
+- **The artifact is not one function.** DPC4 asks for prefetchers at L1D, L2, and LLC. They interact: an aggressive L1 prefetcher changes the access stream the L2 prefetcher sees, which changes what the LLC prefetcher should do. The joint space is a product, not a sum.
+- **The budget is a hard constraint the LLM cannot see.** A candidate that writes a 64K-entry table is a fine C++ program and a fantasy chip. Prior agentic loops treat this as a prompt instruction, which LLMs violate cheerfully.
+- **The evaluator is slow.** ChampSim over a full trace suite is minutes to hours, and multi-core configurations are worse. Evolution speed is bounded by simulation latency, not by model quality.
+
+The human baseline to beat is **BertiGO**, the hand-designed DPC4 winner — a strong, tuned, published artifact, not a strawman.
+
+```
+[Problem] 3 interacting prefetchers + hard storage budget + slow sim
+     |
+     v
+[Assumption] cross-level coupling is weak enough that
+             greedy per-level optimization is near-optimal
+     |
+     +---> [Method A] cascaded evolution:
+     |                evolve L1 -> freeze -> evolve L2
+     |                -> freeze -> evolve LLC
+     |
+     +---> [Method B] realizability loop:
+     |                candidate code -> size estimator
+     |                -> byte count fed back as signal
+     |
+     v
+[Evidence] DPC4 rules, same traces, same budget:
+           +3.8% geomean IPC over baseline
+           +0.3% over BertiGO (the champion)
+           +4.6% vs +2.6% on low-bandwidth single core
+           multi-core: no win, sim latency kills it
+     |
+     v
+[Conclusion] agentic search can beat a human champion on a
+             real budgeted uarch task -- *if* you decompose
+             the space and make the constraint checkable
+```
+
+## The Increment
+
+**One sentence**: Before this paper, agentic microarchitecture search could design one component at one cache level; after it, the same machinery designs a coordinated three-level prefetcher that fits a real hardware budget and narrowly beats the human champion.
+
+### Core Mechanism
+
+The outer loop is standard evolutionary code search: a database of scored candidate programs, an LLM that reads a few of them plus their feedback and emits a mutated version, an evaluator that produces a fitness score. What v2 adds are two modifications to *what the loop is searching over* and *what the evaluator says back*.
+
+**Cascaded search** turns one hard problem into three easier ones arranged in a sequence. The agent evolves only the L1D prefetcher first, with L2 and LLC held at a fixed reference (baseline or empty). Once that population converges, the best L1D design is **frozen** — its code becomes part of the immutable environment — and the search moves to L2, then repeats for LLC. Each stage sees a smaller mutation surface, so the LLM's edits are more likely to be meaningful, and each stage's fitness signal is less noisy because only one component is moving. The price is explicit: this is greedy coordinate descent over cache levels, so any design whose value only appears when two levels change together is unreachable.
+
+**The hardware-realizability feedback loop** puts a size estimator inside the evaluator, next to the simulator. Every candidate is parsed for its declared state — tables, counters, history buffers — and a byte count is computed and returned to the agent in the **same* feedback channel as the performance number. So the agent is not told "stay under the budget" once in a prompt; it is told "your design is 41 KB, the limit is 32 KB" after every attempt, which is a signal it can actually optimize against. Oversized candidates can be rejected or penalized rather than silently accumulating in the population as unimplementable champions.
+
+```
+                    +--------------------------+
+                    |   candidate database     |
+                    |  (code + score + size)   |
+                    +--------------------------+
+                        ^                  |
+                sample  |                  | k parents +
+                        |                  v feedback text
+                    +--------------------------+
+                    |    LLM mutation step     |
+                    |  edits ONE level's code  |
+                    +--------------------------+
+                                 |
+                                 v new candidate
+              +------------------------------------+
+              |             EVALUATOR              |
+              |                                    |
+              |  [size estimator] --> bytes, pass? |
+              |         |  (fast, cents)           |
+              |         v                          |
+              |  if over budget: reject / penalize  |
+              |         |                          |
+              |         v                          |
+              |  [ChampSim] --> IPC over traces    |
+              |         (slow: the bottleneck)     |
+              +------------------------------------+
+                                 |
+                                 v  score + size + notes
+                    (back into database)
+
+  STAGE CONTROLLER (the cascade):
+
+  stage 1:  [ L1D: evolving ] [ L2: fixed ] [ LLC: fixed ]
+                    |  converge, take best, freeze
+                    v
+  stage 2:  [ L1D: FROZEN   ] [ L2: evolving ] [ LLC: fixed ]
+                    |
+                    v
+  stage 3:  [ L1D: FROZEN   ] [ L2: FROZEN ] [ LLC: evolving ]
+                    |
+                    v
+             final three-level prefetcher
+```
+
+**The metaphor: renovating a three-story building with the inspector standing next to you.**
+
+The building is the memory hierarchy; each floor is a cache level. The architect (the LLM) redraws blueprints; the occupancy trial (ChampSim) tells you how well tenants actually live in the result, but it takes days and you can only run so many.
+
+v1 renovated a single-floor cottage, so none of this mattered. In a three-story building, letting the architect redraw all three floors at once produces incoherent drafts — every revision changes too much to learn anything from the trial. So you renovate **floor by floor and seal each one**: finish the ground floor, lock the door, move up. You lose the designs that require knocking out a shared wall between floors, and you accept that, because the alternative is never converging.
+
+The second change is the **inspector with a tape measure**. Previously the architect was handed the building code at the start of the project and then drew whatever they liked; violations were discovered at the very end, wasting the whole trial. Now the inspector measures every draft immediately and says "this is 41 square meters over" before the trial ever runs. Cheap check first, expensive check second — and because the number comes back every time, the architect learns to design within the envelope rather than being nagged about it.
+
+The admitted failure fits the metaphor too: **multi-core** is renovating a whole city block. The trial takes so long that the architect gets almost no feedback, and the search stalls.
+
+### Key Concepts
+
+- **Data prefetching, from zero**: Main memory is slow — hundreds of cycles. If the CPU waits until it **needs* a piece of data before asking for it, it stalls. A prefetcher watches the stream of addresses the program touches, guesses what it will touch next, and fetches it early so it's already sitting in cache. Concretely: if a program reads array elements at addresses 100, 164, 228, a prefetcher spots the stride of 64 and pre-fetches 292. Real programs are messier — pointer chasing, hash lookups — which is why prefetcher design is a decades-old research sport. Guess wrong and you waste memory bandwidth and evict useful data, which is exactly why the *low-bandwidth* result (4.6% vs BertiGO's 2.6%) is the most interesting number in the paper: it says the discovered design is unusually well-behaved about not wasting bandwidth.
+
+- **Why multiple levels make it a product, not a sum**: The L1 prefetcher's requests become part of the traffic the L2 prefetcher observes. If L1 already caught all the simple strides, the patterns remaining for L2 look completely different than they would in isolation. So you cannot design each level independently and staple them together — the **input distribution* to level N+1 depends on your choice at level N. This is precisely why cascading (rather than parallel independent search) is the right decomposition: freezing L1 fixes the input distribution that L2 is being optimized against.
+
+- **Realizability as a feedback signal, not a prompt rule**: There's a general lesson here. Hard constraints given as instructions ("use at most 32 KB") are weak — the model has no way to check itself. Hard constraints given as a **fast automated checker inside the evaluation loop* become part of the optimization landscape. The size estimator costs essentially nothing compared to a simulation, so it doubles as a filter that saves the expensive evaluator from wasting cycles on fantasy hardware.
+
+## Framework Shift
+
+```
+Before (agentic uarch search, v1 style):     After (ArchAgent v2):
+
+  prompt: "design a prefetcher,               stage-wise search:
+   budget 32KB, here is the API"
+           |                                   [L1] evolve --> freeze
+           v                                        |
+  +------------------------+                        v
+  |  LLM edits everything  |                   [L2] evolve --> freeze
+  |  L1 + L2 + LLC at once |                        |
+  +------------------------+                        v
+           |                                   [LLC] evolve --> done
+           v
+     [ ChampSim ] --> IPC                     each candidate first hits
+           |                                  a cheap gatekeeper:
+           v
+   population of candidates,                    code -> [size est.]
+   many silently oversized,                        |         |
+   signal diluted across 3                     over? drop  under? simulate
+   simultaneously-changing parts                             |
+                                                             v
+                                                        IPC + bytes
+                                                     both fed back as text
+```
+
+**From "search the whole space and hope the model respects the rules" to "search one axis at a time, and make every rule a number the model gets told after every attempt."**
+
+## Expert Assessment
+
+**Problem choice**: A real gap, and a well-chosen one. Prefetching is genuinely the harder sibling of replacement policy — multi-component, budget-constrained, benchmark-standardized — so it is the natural next rung after v1. Using DPC4 rules with a published champion as the baseline is the right move: it makes the claim falsifiable in a way that most "LLM designs hardware" papers are not. Where it sits in the trajectory: this is the paper that tests whether agentic design scales past toy component counts, and the honest answer it gives is "to three components, yes; past single-core simulation cost, not yet."
+
+**Method maturity**: Clever framing, unremarkable machinery. Cascaded freezing is greedy coordinate descent, which architects have been doing by hand forever; the contribution is recognizing that it's also the right **curriculum* for an LLM evolutionary loop, because it shrinks the mutation surface and de-noises the fitness signal simultaneously. The realizability loop is even simpler — a static analyzer wired into the evaluator — and it is probably the more transferable idea precisely because it is so cheap. Two things a reviewer should press on: the cascade **order** is a hyperparameter (why L1 first? does LLC-first do better? an ablation here is mandatory, and the abstract doesn't advertise one), and the greedy decomposition provably forfeits jointly-designed solutions, so some accounting of how much is lost — even a small two-level joint search as a reference point — would strengthen the claim considerably.
+
+**Experimental integrity**: The headline is honest in a way I appreciate: **+0.3% over BertiGO** is stated plainly rather than dressed up, and the multi-core failure is admitted in the abstract. But 0.3% geomean on a benchmark suite that was **also the fitness function* is exactly where I get nervous. Evolutionary search with the simulator score as fitness is, structurally, training on the test set. ChampSim is deterministic, so this isn't statistical noise — it's overfitting, which is worse, because it looks clean. The question that decides how much this paper is worth is: **was there a held-out set of traces the search never saw?** If yes, and the margin holds, this is a solid result. If the reported number is on the same traces that drove 12,000 evaluations, then +0.3% over a human design should be read as roughly a tie. The low-bandwidth single-core number (4.6% vs 2.6%) is more convincing to me than the headline, because a bandwidth-constrained configuration punishes exactly the overfitting failure mode — sloppy, speculative prefetching — so a large gap there suggests real behavioral quality, not curve-fitting. Two other gaps: "size estimation" of C++ state is a proxy for realizability that says nothing about timing, ports, or power; and there's no compute-cost comparison — 12,000 simulated candidates versus one human team is a resource asymmetry that belongs in the paper, not just in the reader's head.
+
+**Writing quality**: The abstract signals the usual corner-cut: the **interesting* section is the profiling of 12,000 candidates — how the agent actually explores, which prefetcher motifs it rediscovers (does it reinvent Berti-like delta learning? IP-stride? something genuinely unfamiliar?), where it plateaus, what fraction of candidates die on the size check — and that section is almost certainly the one given the least space. Rewriting it as the paper's centerpiece, with concrete examples of the synthesized logic and a diff against known human designs, would move this from "we won a competition" to "here is what automated search teaches us about the prefetcher design space." That's the difference between a case study and a contribution. Secondary ask: describe the frozen-stage handoff precisely enough to reproduce, including what the non-evolving levels are set to during each stage.
+
+**Verdict**: **weak accept** — a real, falsifiable result against a strong human baseline with honestly reported limits, held back by a margin thin enough that generalization beyond the fitness traces, not the method, decides whether it holds up.
+
+## Takeaways
+
+Things worth stealing, in rough order of transferability:
+
+1. **Turn hard constraints into fast checkers inside the fitness function, never prompt text.** If your agent must respect a budget (memory, latency, token count, API cost, code size), write a cheap static estimator and return its number in the feedback string every iteration. It does double duty: optimization signal **and* a filter that stops the expensive evaluator from burning cycles on invalid candidates. This applies far outside architecture — any agentic search with a resource envelope.
+
+2. **Cascade-and-freeze for multi-component search.** When the artifact has N interacting parts and your evaluator is expensive, evolving all N at once dilutes credit assignment into uselessness. Evolve one, freeze it, move on. Crucially, order the cascade so that each frozen stage **fixes the input distribution* of the next — that's why L1-then-L2-then-LLC is coherent rather than arbitrary. The same shape works for multi-stage data pipelines, compiler pass sequences, or chained model prompts.
+
+3. **Evaluator latency is the real ceiling of agentic search, not model capability.** The multi-core failure here is the paper's most useful negative result. If you're building an agentic optimization loop, budget your engineering effort toward cheap proxy evaluators (shortened traces, sampled workloads, staged evaluation where only survivors get the full run) before you spend it on better prompts or bigger models.
+
+4. **Test discovered designs in the regime that punishes overfitting.** The low-bandwidth result is the trustworthy one. Whatever your domain, find the configuration where sloppy-but-lucky solutions get penalized, and report that separately — it's the cheapest available evidence that your search found structure rather than memorized the benchmark.
+
+5. **Treat the evolution log as a research artifact.** 12,000 scored candidates with lineage is a dataset about how design spaces are shaped. Mining it for rediscovered motifs and plateau points is often more durable than the winning candidate itself.
+:::
+
+:::zh
+**论文**: [2608.09874](https://arxiv.org/abs/2608.09874)
+**作者**: Abraham Gonzalez, Raghav Gupta, Akanksha Jain, Hanna Alam, Alexander Novikov, Po-Sen Huang, Matej Balog, Marvin Eisenberger, Sergey Shirobokov, Ngân Vũ
+**分类**: cs.AI, cs.AR
+
+## 缺口
+
+FunSearch / AlphaEvolve 这一脉确立了一套配方：让 LLM 提出代码变异，用便宜的确定性评估器打分，保留优胜种群，循环往复。
+
+当被搜索的产物是**一个自包含的函数**、评估器**毫秒级**返回一个数字时，这套配方极其漂亮。
+
+ArchAgent v1 把这套配方搬进了计算机体系结构，在**缓存替换策略**上拿下了成绩。这是个恰好合适的任务：替换策略是单一层级上的单个决策函数，存储预算简单到能装在脑子里。
+
+而预取（prefetching）一次性打破了上述三个便利条件：
+
+- **产物不是一个函数**。DPC4 要求同时给出 L1D、L2、LLC 三级预取器，而它们互相耦合：激进的 L1 预取器会改变 L2 预取器看到的访问流，进而改变 LLC 该做什么。联合空间是乘法，不是加法。
+- **预算是 LLM 看不见的硬约束**。一个申请 64K 条目表的候选，作为 C++ 程序完全正常，作为芯片纯属幻想。此前的智能体循环把这件事写在 prompt 里当"要求"，而 LLM 违反 prompt 从不脸红。
+- **评估器很慢**。ChampSim 跑完整个 trace 套件是分钟到小时级，多核更糟。进化速度的上限由仿真延迟决定，而不是模型能力。
+
+要打败的人类基线是 **BertiGO**——DPC4 的手工设计冠军。这是一个经过调优、公开发表的强基线，不是稻草人。
+
+```
+[问题] 三级互相耦合的预取器 + 硬存储预算 + 慢仿真
+     |
+     v
+[假设] 跨层级耦合弱到可以逐级贪心优化而接近最优
+     |
+     +---> [方法 A] 级联进化：
+     |              进化 L1 -> 冻结 -> 进化 L2
+     |              -> 冻结 -> 进化 LLC
+     |
+     +---> [方法 B] 可实现性回路：
+     |              候选代码 -> 面积估算器
+     |              -> 字节数作为反馈信号回灌
+     |
+     v
+[证据] 同一套 DPC4 规则 / trace / 预算：
+       相对 baseline 几何均值 IPC +3.8%
+       相对冠军 BertiGO +0.3%
+       低带宽单核：+4.6% vs BertiGO 的 +2.6%
+       多核：未取胜，仿真延迟拖死进化
+     |
+     v
+[结论] 智能体搜索能在真实带预算的微架构任务上
+       击败人类冠军——前提是把空间拆解，
+       并把约束变成"可自动检查"的东西
+```
+
+## 增量
+
+**一句话**：这篇论文之前，智能体微架构搜索只能设计"单层级的单个部件"；之后，同一套机器能设计出协同的三级预取器，塞进真实硬件预算，并以微弱优势超过人类冠军。
+
+### 核心机制
+
+外层循环是标准的进化式代码搜索：一个存放候选程序及其分数的数据库，一个读取若干候选及其反馈后产出变异版本的 LLM，一个给出适应度分数的评估器。
+
+v2 的新东西在于两处改动：**改变搜索的对象**，以及**改变评估器说回来的话**。
+
+**级联搜索**把一个难问题变成串联的三个较易问题。智能体先只进化 L1D 预取器，此时 L2 和 LLC 固定在参考实现上。
+
+该阶段收敛后，最优的 L1D 设计被**冻结**——它的代码成为不可变环境的一部分——搜索转向 L2，然后同样处理 LLC。
+
+每个阶段面对的变异面更小，LLM 的改动更容易有意义；同时每阶段的适应度信号噪声更低，因为只有一个部件在动。
+
+代价是明确的：这本质上是在缓存层级上做贪心坐标下降，任何"只有两个层级同时改动才显现价值"的设计都不可达。
+
+**硬件可实现性反馈回路**把一个面积估算器放进评估器内部，与仿真器并列。每个候选都会被解析出它声明的状态——表、计数器、历史缓冲——算出字节数，并把这个数字放进**与性能数字同一条反馈通道**返还给智能体。
+
+于是智能体不是在 prompt 里被叮嘱一次"别超预算"，而是每次尝试后都被告知"你的设计是 41 KB，上限 32 KB"。这是一个它真的能去优化的信号。
+
+超预算的候选可以被直接拒绝或惩罚，而不是作为"不可实现的冠军"悄悄堆积在种群里。
+
+```
+                    +--------------------------+
+                    |       候选数据库         |
+                    |  (代码 + 分数 + 面积)    |
+                    +--------------------------+
+                        ^                  |
+                   采样  |                  | k 个父本 +
+                        |                  v 反馈文本
+                    +--------------------------+
+                    |      LLM 变异步骤        |
+                    |  只改"一个层级"的代码    |
+                    +--------------------------+
+                                 |
+                                 v 新候选
+              +------------------------------------+
+              |              评估器                |
+              |                                    |
+              |  [面积估算] --> 字节数, 是否合规?  |
+              |         |   (极快, 近乎免费)       |
+              |         v                          |
+              |  超预算: 拒绝 / 惩罚               |
+              |         |                          |
+              |         v                          |
+              |  [ChampSim] --> trace 上的 IPC     |
+              |         (慢: 真正的瓶颈)           |
+              +------------------------------------+
+                                 |
+                                 v  分数 + 面积 + 说明
+                          (回灌数据库)
+
+  阶段控制器（级联）：
+
+  阶段 1:  [ L1D: 进化中 ] [ L2: 固定 ] [ LLC: 固定 ]
+                    |  收敛, 取最优, 冻结
+                    v
+  阶段 2:  [ L1D: 已冻结 ] [ L2: 进化中 ] [ LLC: 固定 ]
+                    |
+                    v
+  阶段 3:  [ L1D: 已冻结 ] [ L2: 已冻结 ] [ LLC: 进化中 ]
+                    |
+                    v
+              最终三级预取器
+```
+
+**核喻：装修一栋三层楼，验收员就站在你旁边。**
+
+这栋楼是存储层次，每一层楼对应一级缓存。建筑师（LLM）反复改图纸；入住试验（ChampSim）告诉你住户实际住得好不好，但要跑好几天，而且次数有限。
+
+v1 装修的是单层小屋，所以上面这些麻烦都不存在。到了三层楼，让建筑师一次性重画三层的图纸只会产出互相矛盾的草案——每次改动的东西太多，从试验结果里学不到任何东西。
+
+于是改成**一层一层装、装完就封门**：先把一楼做完，锁门，再上二楼。你因此失去了那些"必须打通楼层间共用墙"才成立的方案，而你接受这个损失，因为另一条路是永远收敛不了。
+
+第二个改动是**拿着卷尺的验收员**。以前是项目开始时把建筑规范丢给建筑师，之后他随便画，违规要等到最后才被发现，整轮试验白费。
+
+现在验收员当场量每一版草案，在试验开始前就说"这里超了 41 平米"。便宜的检查在前，昂贵的检查在后；而且因为这个数字每次都回来，建筑师会学会"在包线内设计"，而不是被反复念叨。
+
+论文承认的失败也能装进这个比喻：**多核**相当于装修一整个街区。试验时间长到建筑师几乎拿不到反馈，搜索就停滞了。
+
+### 关键概念
+
+- **数据预取，从零讲起**：主存很慢，动辄几百个周期。
+
+  如果 CPU 等到"真的需要"某份数据时才去要，它就得停顿等待。预取器盯着程序访问的地址流，猜它接下来会碰哪里，提前取回缓存。
+
+  具体点：程序依次读地址 100、164、228，预取器认出步长 64，就提前把 292 取回来。
+
+  真实程序要脏得多——指针追逐、哈希查表——所以预取器设计是一门做了几十年的研究竞技。
+
+  猜错的代价是浪费内存带宽、把有用数据挤出缓存。这正是为什么**低带宽**那个数字（4.6% vs BertiGO 的 2.6%）是全文最有意思的一项：它说明这个自动发现的设计在"不浪费带宽"这件事上表现得异常好。
+
+- **为什么多层级让它变成乘法而非加法**：L1 预取器发出的请求，本身就成为 L2 预取器观察到的流量的一部分。
+
+  如果 L1 已经吃掉了所有简单步长，那么留给 L2 的模式，和"L2 单独看到的世界"完全不同。
+
+  所以你不能各层独立设计然后拼起来——第 N+1 级的**输入分布**取决于你在第 N 级的选择。
+
+  这恰恰说明级联（而非并行独立搜索）是正确的拆解方式：冻结 L1 就等于固定了 L2 被优化时所面对的输入分布。
+
+- **把可实现性做成反馈信号，而不是 prompt 规则**：这里有个通用教训。
+
+  以指令形式给出的硬约束（"最多用 32 KB"）是弱的——模型没有办法自我核对。
+
+  以**评估回路内部的快速自动检查器**形式给出的硬约束，则成为优化地形的一部分。
+
+  面积估算器相对仿真几乎不花钱，所以它还兼任过滤器，替昂贵的评估器省下花在幻想硬件上的算力。
+
+## 框架转变
+
+```
+之前（v1 式智能体微架构搜索）：          之后（ArchAgent v2）：
+
+  prompt: "设计一个预取器,                分阶段搜索:
+   预算 32KB, 这是 API"
+           |                              [L1] 进化 --> 冻结
+           v                                   |
+  +------------------------+                   v
+  |   LLM 一次改全部       |              [L2] 进化 --> 冻结
+  |  L1 + L2 + LLC 同时动  |                   |
+  +------------------------+                   v
+           |                              [LLC] 进化 --> 完成
+           v
+     [ ChampSim ] --> IPC                每个候选先撞上
+           |                              一个便宜的门卫:
+           v
+   一堆候选, 其中很多                       代码 -> [面积估算]
+   悄悄超预算而无人知,                         |          |
+   信号被三个同时变动的                     超了? 丢弃  合规? 仿真
+   部件稀释掉                                            |
+                                                         v
+                                                    IPC + 字节数
+                                                  两者一起写进反馈
+```
+
+**一句话：从"搜索整个空间并指望模型遵守规则"，到"一次只搜一个轴，并把每条规则都变成每次尝试后都会被告知的数字"。**
+
+## 专家评审
+
+**选题眼光**：真缺口，而且选得准。
+
+预取确实是替换策略"更难的兄弟"：多部件、带预算约束、有标准化基准，因此是 v1 之后自然的下一级台阶。
+
+用 DPC4 规则、以公开发表的冠军作为基线，是正确的姿态：它让论文的主张变得**可被推翻**，而绝大多数"LLM 设计硬件"的论文做不到这一点。
+
+在领域轨迹中的位置：这是检验"智能体设计能否跨过玩具级部件数量"的那篇论文，而它给出的诚实答案是——"扩到三个部件，能；跨过单核仿真的成本墙，还不能"。
+
+**方法成熟度**：框架巧，机器平。
+
+级联冻结就是贪心坐标下降，架构师手工干这事干了几十年；真正的贡献是意识到它同时也是 LLM 进化回路的正确**课程表**：它同时缩小了变异面并降低了适应度信号的噪声。
+
+可实现性回路更简单——一个静态分析器接进评估器——但它可能是更可迁移的那个想法，正因为它足够便宜。
+
+审稿人该追问两点：级联**顺序**是个超参（为什么先 L1？先 LLC 会不会更好？这里的消融实验是必须的，而摘要没有宣传）；以及贪心拆解可证明地放弃了联合设计的解，因此需要给出"损失了多少"的交代——哪怕只是一个小规模的双层联合搜索作为参照点，也会让结论扎实得多。
+
+**实验诚意**：标题数字的呈现方式我很欣赏——**相对 BertiGO 只有 +0.3%**，直说，没有包装；多核失败也写进了摘要。
+
+但"在同时充当适应度函数的基准套件上取得 0.3% 几何均值提升"，正是让我警惕的地方。
+
+以仿真分数为适应度的进化搜索，结构上就是在测试集上训练。ChampSim 是确定性的，所以这不是统计噪声，而是过拟合——那更糟，因为它看起来很干净。
+
+决定这篇论文价值的问题是：**有没有一批搜索从未见过的留出（held-out）trace？**
+
+如果有，且优势保持，这是个扎实的结果。如果报告的数字就是驱动了 12000 次评估的那批 trace，那么"比人类设计好 0.3%"应该读成"大致打平"。
+
+低带宽单核那个数字（4.6% vs 2.6%）对我比标题数字更有说服力：带宽受限配置恰好惩罚过拟合的典型病症——粗糙的投机性预取——因此在那里出现明显差距，暗示的是真实的行为质量，而非曲线拟合。
+
+另有两处空白：对 C++ 状态做"面积估算"只是可实现性的代理，它对时序、端口、功耗一无所知；以及全文没有算力成本对比——12000 个仿真候选 vs 一个人类团队，这种资源不对称应该写在论文里，而不是只留在读者心里。
+
+**写作功力**：摘要透露了惯常的偷懒之处：真正有意思的一节是**对 12000 个候选的剖析**——智能体实际如何探索、它重新发现了哪些预取器母题（它会不会重新发明 Berti 式的 delta 学习？IP-stride？还是某种真正陌生的东西？）、它在哪里进入平台期、有多少候选死在面积检查上——而这一节几乎必然是篇幅最少的。
+
+把它重写成论文的主体，配上合成逻辑的具体例子、以及与已知人类设计的逐条对照，能把这篇从"我们赢了一场比赛"抬到"自动搜索告诉我们预取器设计空间长什么样"。
+
+这就是 case study 与 contribution 的差别。次要要求：把冻结阶段的交接过程写到可复现的精度，包括每个阶段里非进化层级具体设成什么。
+
+**判决**：**弱接收** —— 面对强人类基线的真实、可被推翻的结果，且限制交代诚实；但优势薄到"能否推广到适应度 trace 之外"而非方法本身，才是决定它成立与否的关键。
+
+## 要点总结
+
+值得"偷"的东西，按可迁移程度粗排：
+
+1. **把硬约束变成适应度函数里的快速检查器，绝不要只写进 prompt。**
+   如果你的智能体必须遵守某个预算（内存、延迟、token 数、API 成本、代码体积），就写一个便宜的静态估算器，并在每一轮反馈字符串里返还它的数字。
+   它一举两得：既是优化信号，也是拦住昂贵评估器、不让它把算力烧在无效候选上的过滤器。
+   这远远超出体系结构范围——任何带资源包线的智能体搜索都适用。
+
+2. **多部件搜索用"级联 + 冻结"。**
+   当产物有 N 个互相耦合的部件、而评估器很贵时，同时进化 N 个会把信用分配稀释到毫无用处。
+   进化一个、冻结、下一个。关键在于排序要让每个冻结阶段**固定住下一阶段的输入分布**——这就是 L1 → L2 → LLC 这个顺序不是随意而是自洽的原因。
+   同样的形状适用于多阶段数据流水线、编译器 pass 序列、串联的模型 prompt 链。
+
+3. **智能体搜索的真实天花板是评估器延迟，不是模型能力。**
+   本文的多核失败是最有用的负面结果。
+   如果你在搭一个智能体优化回路，先把工程预算花在便宜的代理评估器上（截短 trace、抽样负载、分级评估——只让幸存者跑完整版），再考虑更好的 prompt 或更大的模型。
+
+4. **在"惩罚过拟合"的工况下测试自动发现的设计。**
+   低带宽那个结果才是可信的那个。
+   不管你在哪个领域，找到那个"糊弄但侥幸"的解会被扣分的配置，单独报告它——这是证明搜索找到了结构而非背下了基准的最便宜证据。
+
+5. **把进化日志本身当成研究产出。**
+   12000 个带谱系的打分候选，是一份关于"设计空间长什么样"的数据集。
+   从里面挖出被重新发现的母题和平台期位置，往往比那个获胜候选本身更耐用。
+:::
