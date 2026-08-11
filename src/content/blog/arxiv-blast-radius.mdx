@@ -1,0 +1,482 @@
+---
+title:
+  en: "Blast Radius: Predicting How Far a Prompt Reaches Before You Pay For It"
+  zh: "Blast Radius：在付钱之前，先算清一个 prompt 能炸多远"
+description:
+  en: "A context-management layer that estimates a prompt's reach across conversation and code before loading anything, then evicts dead context verbatim so it can be restored byte-for-byte. 17-26% fewer tokens across seven models — and zero resurrections, a number that cuts both ways."
+  zh: "一个上下文管理层：在加载任何东西之前先估算 prompt 在对话与代码两条通道上的触及范围，再把死掉的上下文原样下葬、可字节级还原。七个模型上省下 17-26% token——以及零次复活，这个数字是双刃剑。"
+date: 2026-08-11
+tags: ["arxiv", "ai", "cs.ai"]
+image: "/arxiv-visuals/arxiv-blast-radius.png"
+---
+
+![Concept animation](/arxiv-visuals/blast-radius/ConceptScene.gif)
+
+
+:::en
+**Paper**: [2608.07440](https://arxiv.org/abs/2608.07440)
+**Authors**: MY Pitsane, Hope Mogale
+**Categories**: cs.AI
+
+## The Gap
+
+Everyone building coding agents hits the same wall: the context window fills, and then you have to throw something away. The existing answers are all *reactive and lossy*.
+
+Sliding windows and truncation drop the oldest turns regardless of whether they mattered — you lose the stack trace from turn 3 that explains the bug you're chasing in turn 40. Recursive summarization (the MemGPT / self-editing-memory lineage) compresses old turns into prose, which is a one-way door: "there was an auth error" does not get you back the line number. RAG-style memory retrieves by embedding similarity, which helps recall but keeps no account of what was evicted or why, and chunking is itself lossy. KV-cache eviction work (H2O, StreamingLLM, SnapKV) is rigorous but operates at the attention-token level, below the semantics of "this transcript is dead," and is likewise irreversible. And on the code side, most agents either dump a repo map or let retrieval decide, with no *budget* on how far into the dependency graph a given request is allowed to reach.
+
+So there are two unaddressed boundaries. First, eviction is treated as an accident (we ran out of room) rather than a *prediction* (this request will never touch those files, so don't load them). Second, eviction is treated as destruction rather than a *reversible* operation with an address you can come back to. Blast Radius attacks both.
+
+```
+PROBLEM:  agentic coding burns tokens
+          context grows > window fills > truncate or summarize > info lost
+             |
+             v
+PRIOR:  [sliding window]  [recursive summary]  [RAG recall]  [KV eviction]
+         lossy tail        lossy + one way      no ledger      token level
+             |                 |                   |               |
+             +-----------------+---------+---------+---------------+
+                                        |
+                                        v
+ASSUMPTION: a prompt's future reach is predictable *before* expansion
+            and dead context is identifiable *and* highly repetitive
+                                        |
+                                        v
+METHOD:  [radius estimator: context channel + code channel]
+         [NECROPHORESIS: verbatim reversible burial]
+         [RDM: detect + bury recurring transcripts]
+         [formal layer: Polish context space ~ entropy vs resurrection]
+                                        |
+                                        v
+EVIDENCE: 7 OpenAI models  ==>  -17% to -26% tokens
+                                lowest overflow rate among tested policies
+                                450 buried / 378 RDM / 0 recalled
+                                byte exact restore verified
+                                        |
+                                        v
+CLAIM:    eviction can be cheap *and* reversible
+          caveat: 0 recalls means the reverse path never ran under load
+```
+
+## The Increment
+
+**One sentence**: Before this paper, context management was damage control after the window overflowed; after it, you estimate how far a prompt will reach **before* loading anything, and everything you drop goes into a byte-exact archive with an address instead of into a shredder.
+
+### Core Mechanism
+
+Three parts, stacked. The **blast radius estimator** takes an incoming prompt and predicts its reach along two independent channels. The context channel asks how deep into the transcript this request needs to go — a follow-up like "now do the same for the other file" reaches back a few turns; "why did we choose this schema?" may reach back forty. The code channel asks how far into the codebase it propagates — editing a docstring has radius one, renaming a public interface has radius equal to every importer, transitively. The output is a reach budget, and that budget becomes an **admission control* decision: records inside the radius get loaded, records outside never enter the window at all. This is the part that saves tokens, and it saves them on the input side, before generation.
+
+**NECROPHORESIS** handles what's already in the window and has gone dead — records with no live reach under the current radius. Instead of summarizing them (lossy) or truncating them (gone), it archives them verbatim with a key. The claim, and the paper verifies it, is byte-exact restoration: what comes out of the archive is bit-identical to what went in. Eviction becomes a move operation rather than a delete.
+
+**Recurring Dead Matter (RDM)** is the dedup layer. In real agent loops the same dead content shows up over and over: identical tool outputs, repeated file headers, the same failing test log, boilerplate system preambles re-injected each turn. RDM identifies transcripts that recur and buries them permanently rather than paying to re-evict them each cycle. Empirically this dominated: 378 of 450 buried items were recurring dead matter, which tells you most context bloat in agentic coding is **repetition*, not novelty.
+
+Underneath sits a formal layer: contexts live in a Polish space so that conditional probabilities are guaranteed to exist, eviction is modeled as a measurable map with a measurable inverse on the archive, and context entropy is tied to resurrection probability — the more unpredictable the context stream, the more often you should expect to go dig something back up.
+
+```
+        incoming prompt
+              |
+              v
+    +===========================+
+    |   BLAST RADIUS ESTIMATOR  |
+    +===========================+
+      |                        |
+      v                        v
+ [channel A: context]     [channel B: code]
+  turns / transcripts      files / imports / defs
+      |                        |
+      +----------+-------------+
+                 |
+                 v
+      reach budget  R = < r_ctx : r_code >
+                 |
+      +----------+-----------+
+      |                      |
+      v                      v
+ ADMIT inside R          DENY beyond R
+      |                      |
+      v                      v
+ live working set        never loaded (token savings)
+      |
+      | staleness cue: no live reach under R
+      v
+ +=======================+  bury   +=======================+
+ | NECROPHORESIS         | ------> | ARCHIVE / midden      |
+ | verbatim eviction     |         | byte exact + key       |
+ +=======================+ <------ +=======================+
+      ^                   resurrect ( observed count: 0 )
+      |
+ +=======================+
+ | RDM DETECTOR          |
+ | recurrence count n    |
+ | n >= k  ==>  bury deep|
+ +=======================+
+
+ layer above:  [ HCRC governance ]
+ layer below:  [ Blast Radius: who gets buried + how far to reach ]
+```
+
+Now the metaphor — and the authors handed it to us, since *necrophoresis* is the real behavior of ant colonies removing dead nestmates from the nest.
+
+Think of the agent as an ant colony. The **nest chamber** is the live context window: finite, crowded, expensive to keep clean. A **task order** arrives (the prompt). Before the colony mobilizes, **scouts** assess how far this job actually extends — how far out into the terrain (the codebase, along import trails) and how far back along the existing pheromone trails (the transcript). That assessment is the blast radius, and it determines how many workers leave the nest. A colony that sends every ant in every direction for every crumb starves; that is today's agent loading the whole repo map for a typo fix.
+
+Inside the chamber, some occupants are dead — records that no live trail leads to anymore. **Undertaker ants** carry them out **intact*. This is the load-bearing distinction: they do not eat them, chew them up, or compost them into something smaller. Composting would be summarization — lighter to store, impossible to reconstruct. Instead the bodies go to the **midden**, the refuse pile outside the nest, laid out and labeled, so if the colony ever needs one back it can be carried in unchanged. That is NECROPHORESIS and the byte-exact archive.
+
+**RDM** is the colony noticing that the same corpse keeps blowing back into the chamber — the same tool output, the same log — and burying it deep in the midden instead of re-carrying it out every hour. And the striking empirical fact fits the metaphor uncomfortably well: real ants essentially never retrieve from the midden. Zero of 450 bodies were recalled. Either the undertakers have excellent judgment about what is truly dead, or the colony maintains a carefully labeled graveyard it never visits.
+
+### Key Concepts
+
+- **Blast radius of a prompt**: the set of things a request will actually end up touching before it's done — both conversation history and source files. The point is that this is **estimable in advance* from the request's shape. "Fix the typo in this docstring" touches one file and zero prior turns. "Rename `UserSession` to `Session`" touches every file that imports it, plus everything those files re-export, plus the tests. Same length prompt, radius differing by three orders of magnitude. Today's agents largely load the same amount of context for both. If you can classify the request into a radius bucket, you can set a budget instead of discovering it by overflowing.
+
+- **Reversible eviction (and why verbatim beats summarized)**: normal eviction is a delete; a summary is a lossy compress. Both are one-way. Reversible eviction is a **move with a forwarding address* — the record leaves the window, goes to cheap storage, and a key stays behind. The test that matters is whether restoration is bit-identical, because near-identical is useless for code: a stack trace missing its line numbers, a diff missing its hunk headers, a JSON payload with reordered keys. Concretely: turn 3 dumps a 4000-token failing test log. Summarize it and you keep "test_auth failed on token expiry." Twelve turns later the agent needs the exact assertion values. Summarized: gone forever, and the agent re-runs the test at full cost. Archived verbatim: one key lookup, byte-identical, no re-execution.
+
+- **Polish space, and why anyone would drag topology into this**: a Polish space is a space that is **not weird* in two specific ways — you can approximate any point using a countable list of reference points (separable), and any sequence that keeps getting tighter actually converges to a point that is still in the space (complete). The real numbers are Polish; so is the space of infinite text sequences under a reasonable metric. Why bother? Because the conditional probability you want to write down — "given the current memory state, what is the chance this specific buried record gets resurrected?" — is not guaranteed to exist on arbitrary measurable spaces. Polishness is the standard hypothesis that makes the disintegration theorem apply, so conditioning is well-defined. It licenses statements like "high context entropy implies high resurrection probability" rather than making them hand-waving. Honestly assessed: this is bookkeeping hygiene, not the paper's engine.
+
+## Framework Shift
+
+```
+Before (mainstream approach):        After (this paper):
+
+ prompt                              prompt
+   |                                   |
+   v                                   v
+ load everything plausible          estimate reach R first
+   |                                   |
+   v                                   v
+ window fills                       admit only inside R
+   |                                   |
+   v                                   v
+ O V E R F L O W                    evict dead -> ARCHIVE
+   |                                   |     (verbatim + key)
+   v                                   v
+ truncate / summarize                restore on demand
+   |                                   |
+   v                                   v
+ info gone (one way)                 state recoverable (two way)
+
+ reactive + lossy                    predictive + lossless
+ cost discovered at runtime          cost budgeted up front
+```
+
+From reactive lossy compression to predictive reversible relocation, the core shift is: stop asking *what do I delete now that I am out of room* and start asking *how far does this request actually reach, and where do I park everything outside that radius so I can get it back unchanged*.
+
+## Framework Shift, One Line
+
+Eviction stops being a failure mode and becomes an addressable operation.
+
+## Expert Assessment
+
+Caveat up front: I am judging from the abstract and the numbers it reports, so treat the method-internals commentary as a reading rather than a full audit.
+
+**Problem choice**: Real gap, not manufactured. Token cost dominates agentic coding economics, most of the waste is context you loaded and never needed, and prior work is genuinely split between lossy compression and unaccounted retrieval. The predictive-scoping framing is where the field is heading — Aider's ranked repo map and various agent budgeters gesture at it without formalizing it. Good instincts on the target.
+
+**Method maturity**: A clever insight wrapped in far too much costume. The load-bearing ideas are two: predict reach before loading, and make eviction a move rather than a delete. Both are sound and both are cheap to implement. But the paper is carrying a lot of weight it doesn't need: "NECROPHORESIS," "buried bodies," "resurrection probability," "Algosophy," and an undefined "HCRC" that the reader is expected to know. Neologism density this high usually signals a system being branded rather than positioned, and it actively obscures how much overlaps with existing work — MemGPT already pages between a main context and an external archival store. The differentiation is real (predictive rather than reactive, verbatim rather than summarized, plus recurrence detection) but the paper's naming makes it harder, not easier, to see.
+
+And there is a simpler approach hiding in plain sight. If 378 of 450 buried items are *recurring* transcripts, then a content hash plus provider-side prompt caching captures a large share of that win with almost none of this machinery. I would want an ablation isolating RDM-alone against plain dedup and against prefix caching, because it is plausible that most of the 17-26% comes from the boring dedup component rather than the radius estimator or the reversibility layer.
+
+**Experimental integrity**: Mixed. Seven models is decent breadth but all from one vendor, which is a problem when your headline metric is token consumption — tokenizers, cache pricing, and system-prompt overhead differ across providers, and the effect could shrink or grow on open-weight models you can actually instrument. The abstract never says what the **task suite* is, and for agentic coding that is the number that matters most: a 20% token reduction is worthless if task success drops 5%, and the abstract reports no quality metric at all. "Lowest overflow rate among tested policies" is only meaningful with the policy list, and comparing against LRU/FIFO/sliding-window is a much softer bar than comparing against a tuned summarization agent.
+
+The zero-recall result deserves a hard look. It's presented as vindication, but it is ambiguous in an important way. Either the eviction policy is genuinely precise, or the evaluation runs were too short and too shallow for anything buried to ever be needed again — in which case the entire reversibility apparatus, the paper's most distinctive contribution, was never exercised in the loop and only verified offline. Those two readings have opposite implications for whether NECROPHORESIS earns its complexity, and the abstract does not let you distinguish them. I'd want long-horizon runs with deliberate callbacks, plus a report of what happens to task success when resurrection is disabled entirely.
+
+**Writing quality**: The formalism section is where the corners got cut in the direction of **more* rather than less. Invoking a Polish context space is legitimate — you need it for conditional distributions to exist — but as presented it reads as rigor-signaling rather than doing work, because nothing in the reported results depends on the topology. The entropy-to-resurrection connection is the interesting formal claim, and it should have been the centerpiece with an empirical curve attached: measure context entropy, measure resurrection rate, show the relationship holds. Instead, with zero observed resurrections, the theory's key prediction is untestable against the paper's own data. Rewriting that section around a falsifiable, measured entropy-recall relationship would elevate the whole paper from a system report with vocabulary to a contribution with a spine.
+
+**Verdict**: **borderline** — the two core ideas are genuinely useful and the token savings are plausible, but the evaluation omits any task-quality metric, the zero-recall headline may quietly mean the reversibility mechanism was never actually needed, and the theoretical layer is decorative rather than predictive.
+
+## Takeaways
+
+Things worth stealing regardless of what you think of the paper:
+
+**Budget context reach as an admission-control problem, not a garbage-collection problem.** Classify incoming requests into radius buckets before retrieval fires. Cheapest possible version: a small classifier or even a heuristic that routes "single-file edit" vs "cross-cutting refactor" to different retrieval budgets. Most of the win is in never loading, not in cleverly dropping.
+
+**Two channels, not one.** Reach along the conversation and reach along the code graph are genuinely independent axes and most systems conflate them into one relevance score. A request can be shallow in code and deep in history ("why did we do it this way?") or the reverse. Separating the budgets is a small change with immediate effect.
+
+**Make eviction a move, and make byte-exactness the acceptance test.** This is the most transferable piece. Summarize-to-forget is popular because it's easy, but verbatim archive plus a key is cheaper than people assume — cold storage is orders of magnitude below context tokens — and it eliminates a whole class of agent failure where the model re-runs an expensive tool because the output was summarized away. Test it the way the paper does: round-trip and diff bytes, not embeddings.
+
+**Instrument recurrence before you build anything sophisticated.** The 378/450 finding is the most actionable number in the paper: most context bloat is the same content arriving repeatedly. Hash your context records and count duplicates over a week of real traffic. If your distribution looks like theirs, plain dedup plus prefix caching may get you most of the way, and you can skip the rest.
+
+**Transferable framing**: "blast radius" is a good name for a general question that shows up well beyond context windows — in CI test selection, in incremental build scoping, in permission granting. **Estimate the reach of an operation before authorizing its cost.* That framing is worth more than this specific implementation.
+:::
+
+:::zh
+**论文**: [2608.07440](https://arxiv.org/abs/2608.07440)
+**作者**: MY Pitsane, Hope Mogale
+**分类**: cs.AI
+
+## 缺口
+
+做 coding agent 的人都撞过同一堵墙：上下文窗口满了，必须扔东西。
+
+而现有的所有答案都是**被动的、有损的**。
+
+滑动窗口和截断按时间扔最老的内容，不管它重不重要——第 3 轮那段 stack trace 正好解释了你第 40 轮在追的 bug，它先被扔了。
+
+递归摘要（MemGPT / self-editing memory 这一脉）把旧对话压成散文，这是一道单向门：「auth 报了个错」这句话没法还原出行号。
+
+RAG 式记忆用向量相似度召回，对 recall 有帮助，但对「扔了什么、为什么扔」没有任何账本，而且分块本身就有损。
+
+KV cache eviction 那一支（H2O、StreamingLLM、SnapKV）方法很严谨，但工作在 attention token 层，低于「这段 transcript 已经死了」这种语义层，而且同样不可逆。
+
+代码侧更粗糙：多数 agent 要么直接扔一份 repo map 进去，要么全交给检索决定，对「这个请求最多允许往依赖图里伸多远」没有任何预算概念。
+
+所以有两个没人处理的边界。
+
+第一，eviction 被当成事故（我没地方了），而不是**预测**（这个请求根本不会碰那些文件，别加载）。
+
+第二，eviction 被当成销毁，而不是一个**可逆的、带地址的搬运操作**。
+
+Blast Radius 同时打这两个点。
+
+```
+PROBLEM:  agentic coding burns tokens
+          context grows > window fills > truncate or summarize > info lost
+             |
+             v
+PRIOR:  [sliding window]  [recursive summary]  [RAG recall]  [KV eviction]
+         lossy tail        lossy + one way      no ledger      token level
+             |                 |                   |               |
+             +-----------------+---------+---------+---------------+
+                                        |
+                                        v
+ASSUMPTION: reach is predictable *before* expansion
+            dead context is identifiable *and* highly repetitive
+                                        |
+                                        v
+METHOD:  [radius estimator: context channel + code channel]
+         [NECROPHORESIS: verbatim reversible burial]
+         [RDM: detect + bury recurring transcripts]
+         [formal layer: Polish context space ~ entropy vs resurrection]
+                                        |
+                                        v
+EVIDENCE: 7 OpenAI models  ==>  -17% to -26% tokens
+                                lowest overflow rate among tested policies
+                                450 buried / 378 RDM / 0 recalled
+                                byte exact restore verified
+                                        |
+                                        v
+CLAIM:    eviction can be cheap *and* reversible
+          caveat: 0 recalls ==> reverse path never ran under load
+```
+
+## 增量
+
+**一句话**：在这篇论文之前，上下文管理是窗口爆掉之后的抢险；在它之后，你在加载任何东西之前先估算这个 prompt 能伸多远，而所有被丢下的东西进的是一个可按 key 取回、字节级一致的档案库，不是碎纸机。
+
+### 核心机制
+
+三层，叠起来。
+
+**Blast radius 估算器**接收 prompt，沿两条独立通道预测它的触及范围。
+
+上下文通道问：这个请求需要往对话历史里回溯多深。「现在对另一个文件做同样的事」只回溯几轮；「我们当初为什么选这个 schema」可能要回溯四十轮。
+
+代码通道问：它在代码库里传播多远。改一个 docstring 半径是 1，重命名一个公开接口的半径等于所有 import 它的文件，还要传递闭包。
+
+输出是一个 reach budget，而这个 budget 直接变成**准入控制**：半径内的记录加载，半径外的记录**根本不进窗口**。
+
+这是省 token 的部分，而且省在输入侧、生成之前。
+
+**NECROPHORESIS** 处理已经在窗口里、但在当前半径下已经「死掉」的记录——没有任何活跃引用指向它。
+
+它不做摘要（有损），也不做截断（没了），而是带 key 原样归档。
+
+论文的主张（也做了验证）是字节级可还原：从档案库里取出来的东西和放进去的 bit 完全一致。
+
+eviction 从 delete 变成 move。
+
+**Recurring Dead Matter (RDM)** 是去重层。
+
+真实 agent 循环里，同样的死内容反复出现：一模一样的工具输出、重复的文件头、同一份失败测试日志、每轮重新注入的样板前言。
+
+RDM 识别出这些反复出现的 transcript，永久下葬，而不是每一轮都再付一次「搬运费」。
+
+实测里这一项是主导：450 件下葬物中 378 件是 RDM。
+
+这个比例本身就是个结论——agentic coding 里的上下文膨胀主要是**重复**，不是新信息。
+
+底下垫着一层形式化：上下文活在 Polish 空间里，从而保证条件概率存在；eviction 被建模为一个可测映射、在档案库上有可测逆；context entropy 与 resurrection probability 被联系起来——上下文流越不可预测，你越应该预期要回去挖东西。
+
+```
+        incoming prompt
+              |
+              v
+    +===========================+
+    |   BLAST RADIUS ESTIMATOR  |
+    +===========================+
+      |                        |
+      v                        v
+ [channel A: context]     [channel B: code]
+  turns / transcripts      files / imports / defs
+      |                        |
+      +----------+-------------+
+                 |
+                 v
+      reach budget  R = < r_ctx : r_code >
+                 |
+      +----------+-----------+
+      |                      |
+      v                      v
+ ADMIT inside R          DENY beyond R
+      |                      |
+      v                      v
+ live working set        never loaded (token savings)
+      |
+      | staleness cue: no live reach under R
+      v
+ +=======================+  bury   +=======================+
+ | NECROPHORESIS         | ------> | ARCHIVE / midden      |
+ | verbatim eviction     |         | byte exact + key       |
+ +=======================+ <------ +=======================+
+      ^                   resurrect ( observed count: 0 )
+      |
+ +=======================+
+ | RDM DETECTOR          |
+ | recurrence count n    |
+ | n >= k  ==>  bury deep|
+ +=======================+
+
+ layer above:  [ HCRC governance ]
+ layer below:  [ Blast Radius: who gets buried + how far to reach ]
+```
+
+核喻作者直接送给我们了——necrophoresis 是真实存在的蚂蚁行为：工蚁把死去的同伴搬出巢穴。
+
+把 agent 想成一个蚁巢。
+
+**巢室**就是活跃上下文窗口：有限、拥挤、维持整洁很贵。
+
+一个**任务指令**到达（prompt）。在整个巢动员之前，**侦察蚁**先评估这活儿到底铺多开——往外的地形铺多远（代码库，沿着 import 路径），往回的信息素路径追多深（transcript）。
+
+这个评估就是 blast radius，它决定派出多少工蚁。
+
+一个不管掉一块面包屑都全员出巢的蚁群会饿死；那正是今天的 agent 为了修一个 typo 加载整份 repo map。
+
+巢室里有些「住户」已经死了——没有任何活跃路径通向它们。
+
+**送葬蚁**把它们**完整地**搬出去。
+
+这是整个核喻的承重点：它们不吃掉、不咬碎、不堆肥。
+
+堆肥就是摘要——存起来更轻，但永远拼不回来。
+
+尸体去的是**垃圾堆（midden）**，巢穴外的弃置区，摊开、贴好标签，万一哪天需要，可以原封不动搬回来。
+
+这就是 NECROPHORESIS 加字节级档案库。
+
+**RDM** 是蚁群发现同一具尸体老是被风吹回巢室——同一份工具输出、同一份日志——于是把它埋深一点，而不是每小时再搬一次。
+
+而那个实测事实和核喻贴合得让人有点不适：真实的蚂蚁基本从不从垃圾堆里往回取东西。
+
+450 具，0 次召回。
+
+要么送葬蚁对「什么是真的死了」判断极准，要么这个蚁群维护了一座标签精美、却从不造访的墓园。
+
+### 关键概念
+
+- **Prompt 的 blast radius**：一个请求在完成之前实际会触碰到的东西的集合，包括对话历史和源文件。关键在于这个量**可以事先估计**，从请求的形状就能看出来。「修一下这个 docstring 的拼写」触碰 1 个文件、0 轮历史；「把 `UserSession` 改名成 `Session`」触碰所有 import 它的文件、这些文件再导出的东西、以及测试。两个 prompt 长度差不多，半径差三个数量级。今天的 agent 基本上给两者加载同样多的上下文。如果你能把请求分到半径档位，你就能设预算，而不是靠爆窗口来发现代价。
+
+- **可逆 eviction（以及为什么原样比摘要好）**：普通 eviction 是 delete；摘要是有损压缩。两者都是单向的。可逆 eviction 是**带转发地址的搬迁**——记录离开窗口，进便宜存储，窗口里留一个 key。真正要验的指标是还原是否 bit 级一致，因为对代码来说「差不多一样」等于没用：缺行号的 stack trace、缺 hunk 头的 diff、键序被打乱的 JSON。举个具体的：第 3 轮吐出一份 4000 token 的失败测试日志。做摘要，你留下「test_auth 在 token 过期处失败」。十二轮之后 agent 需要那几个精确的断言值。摘要版：永久丢失，agent 只能全价重跑测试。原样归档版：一次 key 查询，字节一致，零重跑。
+
+- **Polish 空间，以及为什么有人要把拓扑拖进来**：Polish 空间就是在两个特定意义上「不古怪」的空间——任何点都能用一个可数的参考点列表逼近（可分），任何越收越紧的序列真的收敛到一个仍然在这个空间里的点（完备）。实数是 Polish 的；在合适度量下的无穷文本序列空间也是。为什么要费这个劲？因为你想写下的那个条件概率——「给定当前记忆状态，这条被埋掉的记录被复活的概率是多少」——在任意可测空间上并**不保证存在**。Polish 性是让 disintegration 定理适用的标准前提，条件化因此才有定义。它让「context entropy 高意味着 resurrection 概率高」成为一个有定义的陈述，而不是挥手。但诚实评估：这是记账卫生，不是这篇论文的引擎。
+
+## 框架转变
+
+```
+Before (mainstream approach):        After (this paper):
+
+ prompt                              prompt
+   |                                   |
+   v                                   v
+ load everything plausible          estimate reach R first
+   |                                   |
+   v                                   v
+ window fills                       admit only inside R
+   |                                   |
+   v                                   v
+ O V E R F L O W                    evict dead -> ARCHIVE
+   |                                   |     (verbatim + key)
+   v                                   v
+ truncate / summarize                restore on demand
+   |                                   |
+   v                                   v
+ info gone (one way)                 state recoverable (two way)
+
+ reactive + lossy                    predictive + lossless
+ cost discovered at runtime          cost budgeted up front
+```
+
+一句话：从「被动的有损压缩」到「预测性的可逆搬迁」，核心转变是——不再问*我没地方了该删谁*，而是问*这个请求实际伸多远，半径外的东西停在哪里才能原样取回*。
+
+## 专家评审
+
+先声明：我是基于摘要和它报告的数字来判断的，方法内部的评论请当作一种读法，而不是完整审计。
+
+**选题眼光**：真缺口，不是人造的。
+
+token 成本主导 agentic coding 的经济性，浪费的大头是你加载了却从没用上的上下文，而先前工作确实卡在「有损压缩」和「无账本检索」两边。
+
+预测性 scoping 这个方向是这个领域正在走的路——Aider 的 ranked repo map 和各种 agent budgeter 都在朝这个方向比划，但没人把它形式化。
+
+对靶子的判断很准。
+
+**方法成熟度**：一个巧劲，套了太多层戏服。
+
+真正承重的想法只有两个：加载之前先预测范围；把 eviction 从 delete 变成 move。
+
+两个都成立，两个都好实现。
+
+但论文背了很多不必要的重量：NECROPHORESIS、buried bodies、resurrection probability、Algosophy，还有一个从没定义、却假设读者知道的 HCRC。
+
+这么高的造词密度通常说明一个系统在做品牌而不是做定位，而且它主动遮蔽了与已有工作的重叠——MemGPT 早就在 main context 和外部 archival store 之间做分页了。
+
+差异化是真实的（预测式而非被动式、原样而非摘要、加上重复检测），但这套命名让人更难、而不是更容易看到这一点。
+
+而且有一个更简单的方案就摆在明处。
+
+如果 450 件下葬物里 378 件是**重复**的 transcript，那么内容哈希加上服务商侧的 prompt caching，几乎不需要这套机制就能吃掉相当一部分收益。
+
+我很想看一个 ablation：RDM 单独 vs 朴素去重 vs prefix caching。
+
+因为完全有可能 17-26% 里的大头来自那个乏味的去重组件，而不是半径估算器或可逆层。
+
+**实验诚意**：好坏参半。
+
+七个模型广度还行，但全来自一家厂商——当你的头号指标是 token 消耗时这是个问题，因为 tokenizer、缓存计价、系统 prompt 开销跨厂商都不一样，换成你能真正插探针的开源权重模型，效应可能缩小也可能放大。
+
+摘要从没说**任务集**是什么，而对 agentic coding 来说这恰恰是最要命的数字：token 降 20% 但任务成功率掉 5% 等于白干，而摘要里**一个质量指标都没有**。
+
+「在所测策略中 overflow 率最低」只有给出策略清单才有意义，而跟 LRU / FIFO / 滑动窗口比，是比跟一个调好的摘要式 agent 比软得多的门槛。
+
+零召回这个结果值得盯一下。
+
+它被当成佐证呈现，但它在一个重要的意义上是歧义的。
+
+要么 eviction 策略确实精准；要么评测轮次太短太浅，埋掉的东西根本没机会被再次需要——那样的话，整套可逆装置，也就是本文最有辨识度的贡献，从未在真实回路里被触发过，只是离线验证了一下。
+
+这两种读法对「NECROPHORESIS 的复杂度是否值得」给出相反结论，而摘要不让你区分它们。
+
+我想看的是长周期、带刻意回溯的运行，加上一个报告：完全关掉 resurrection，任务成功率会怎样。
+
+**写作功力**：形式化那一节偷懒的方向是「加更多」而不是「减更少」。
+
+引入 Polish 上下文空间本身是正当的——条件分布存在性确实需要它——但按现在的呈现，它读起来像在打鸣严谨，而不是在干活，因为报告的结果里没有任何一项依赖那个拓扑。
+
+entropy 与 resurrection 的联系才是那个有意思的形式化断言，它本该是全文中心，并配一条实测曲线：测 context entropy，测 resurrection 率，展示关系成立。
+
+结果是，在零次观测到的 resurrection 之下，这套理论最关键的预测**无法用论文自己的数据检验**。
+
+把这一节围绕一个可被证伪、被实测的 entropy-recall 关系重写，能把整篇从「带词汇表的系统报告」提到「有脊梁的贡献」。
+
+**判决**：**临界** — 两个核心想法确实有用、token 节省也可信，但评测缺失任何任务质量指标，零召回这个头条数字可能悄悄意味着可逆机制从未被真正需要过，而理论层是装饰性的、不具预测力。
+
+## 要点总结
+
+不管你怎么评价这篇论文，以下几样值得偷走：
+
+**把上下文范围当准入控制问题，而不是垃圾回收问题。** 在检索启动之前，把请求分到半径档位。最便宜的版本：一个小分类器，甚至一条启发式规则，把「单文件编辑」和「跨切面重构」路由到不同的检索预算。收益的大头在于**从没加载**，而不是在于聪明地丢弃。
+
+**两条通道，不是一条。** 「沿对话的范围」和「沿代码图的范围」是真正独立的两个轴，而多数系统把它们揉成一个相关性分数。一个请求可以在代码上很浅、在历史上很深（「我们当初为什么这么做？」），也可以反过来。把预算拆开是个小改动，但立刻见效。
+
+**让 eviction 成为 move，并把字节级一致当验收标准。** 这是最可迁移的一块。摘要式遗忘流行是因为它好写，但「原样归档 + key」比大家以为的便宜——冷存储比上下文 token 便宜好几个数量级——而且它消掉了一整类 agent 失效模式：因为输出被摘要掉了，模型不得不重跑一个昂贵的工具。验的方式就照论文来：round-trip 之后 diff 字节，不是 diff embedding。
+
+**在造任何复杂东西之前，先测重复率。** 378/450 是全文最可操作的数字：上下文膨胀的大头是同一份内容反复到达。给你的上下文记录做哈希，在一周真实流量上数重复。如果你的分布长得跟他们的像，那么朴素去重加 prefix caching 可能就够走完大半路，剩下的可以跳过。
+
+**可迁移的思维框架**：「blast radius」是个好名字，对应的是一个远远超出上下文窗口的通用问题——CI 测试选择、增量构建范围、权限授予都是它。**在授权代价之前，先估算一个操作的触及范围。* 这个框架比这个具体实现更值钱。
+:::

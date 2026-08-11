@@ -1,0 +1,394 @@
+---
+title:
+  en: "COVER: Giving Video Temporal Grounders an Error Bar They Can Prove"
+  zh: "COVER：给视频时序定位装上可证明的误差条"
+description:
+  en: "A post-hoc conformal wrapper that turns any video temporal grounder into one that outputs a time region guaranteed to contain the true moment with probability 1-alpha, plus grounding-specific theory on how wide that region gets."
+  zh: "一个事后校准的保形包装器，让任意视频时序定位模型输出一个以 1-alpha 概率包含真实时刻的时间区域，并给出针对定位任务的区域宽度与条件覆盖理论。"
+date: 2026-08-11
+tags: ["arxiv", "ai", "cs.cv", "cs.ir"]
+image: "/arxiv-visuals/arxiv-conformal-coverage-guarantees-for-any-video.png"
+---
+:::en
+**Paper**: [2608.07434](https://arxiv.org/abs/2608.07434)
+**Authors**: Aseel Mohamed, Rasul Khanbayov, Erchin Serpedin, Hasan Kurban
+**Categories**: cs.CV, cs.IR
+
+## The Gap
+
+Video temporal grounding ("given this sentence, when does it happen in this video?") has been an interval-regression problem since the beginning. 2D-TAN and its descendants score candidate spans; Moment-DETR / QD-DETR / UniVTG / MomentDiff regress or decode a start and an end; and lately people just prompt a video-LLM (Video-LLaMA, VTimeLLM, TimeChat) and parse timestamps out of the text. Every one of these returns exactly one interval. The whole field then reports R@1 at IoU 0.5 / 0.7 and mIoU, which are population averages: they tell you the model is right 55% of the time, and tell you nothing about *which* 55%.
+
+Two things break here. First, the evaluation target itself is shaky. Re-annotate the same query-video pair with independent annotators and, as the paper reports, a large fraction of pairs get moments overlapping by less than half. So "IoU 0.5 against the single stored label" is measuring agreement with one annotator's draw from a distribution, not distance from truth. Second, and worse for anyone deploying this, a wrong interval and a right interval look identical at inference. Confidence scores from these models are uncalibrated softmax or DETR class logits; temperature scaling or Bayesian heads would give you a number, but no guarantee attached to it.
+
+The prior art on uncertainty is either (a) heuristic — ensemble spread, dropout variance, "predict a wider box when unsure" — with no coverage claim, or (b) conformal prediction applied to classification and regression, where the output is a label set or a scalar interval. Nobody had defined what a conformal prediction *set* even is when the label lives in the space of time intervals, nor handled the case where the model emits a per-frame relevance curve rather than an interval.
+
+```
+PROBLEM: grounders emit one interval, no reliability statement
+    |          a wrong interval looks like a right one at deploy time
+    v
+OBSERVATION: re-annotation disagrees (IoU < 0.5 on many pairs)
+    |          => the label is a DISTRIBUTION over intervals
+    v
+ASSUMPTION: calibration pairs and test pairs are exchangeable
+    |
+    v
+METHOD: COVER == nonconformity score + quantile + widen
+    |          post-hoc, black-box, no retraining
+    +--> score A: two-sided boundary widening   (grounder emits interval)
+    +--> score B: super-level-set on relevance  (grounder emits a signal)
+    |
+    v
+THEORY: (i) how wide the certified region gets
+    |   (ii) when coverage survives conditioning on event length
+    |  (iii) how much slack when one video's moments break exchangeability
+    v
+EVIDENCE: 3 benchmarks x 5 grounders; realized coverage tracks 1 - alpha
+    |          width exposes failure modes that mIoU hides
+    v
+CONCLUSION: change the output object -- ship a certified temporal region
+```
+
+## The Increment
+
+**One sentence**: Before, a grounder handed you a timestamp pair and you had to trust it; after, the same frozen grounder hands you a time region with a finite-sample, distribution-free promise that the true moment is inside it at least 1-alpha of the time.
+
+### Core Mechanism
+
+COVER is split conformal prediction, ported to the interval-output world, and the port is where the actual work is. Phase one: take a held-out calibration set of labeled (query, video, ground-truth moment) triples. Run the frozen grounder on each. For every calibration example compute a single nonconformity number that says "how much would I have had to stretch this prediction for it to contain the truth?" Collect those n numbers, sort them, and take the ceil((n+1)(1-alpha))-th smallest. That one scalar q is the entire calibrated artifact. Phase two: at test time, run the grounder, stretch by q, ship the region. No gradients, no logits, no retraining, no access to the model's insides — it works on an API that only returns "12.4s to 19.8s".
+
+The interesting design choice is the score family, because it determines the *shape* of the region. For grounders that emit an interval, the two-sided boundary-widening score asks how far each boundary missed in the direction that would have excluded the truth: roughly s = max(pred_start - gt_start, gt_end - pred_end), possibly normalized by predicted duration. This score is monotone in the widening amount, which is exactly the nested-set property conformal needs, so thresholding it yields the region [pred_start - q, pred_end + q]. Symmetric widening is a modeling decision, and the paper notes you can calibrate the two sides separately if start and end errors are asymmetric (they usually are — ends are fuzzier than starts).
+
+For grounders that emit a per-frame or per-clip relevance signal r(t) — highlight-detection heads, retrieval similarity curves, attention over frames — you don't have boundaries to widen. Here the score is built on the super-level-set: define the score from the relevance value at the true moment (e.g., s = 1 - r evaluated on the ground-truth span), calibrate q, and return the region \{ t : r(t) >= 1 - q \}. Lowering the threshold monotonically grows the set, again giving nesting. The catch, and it's a real one, is that a super-level-set need not be contiguous: you can get a union of disjoint time chunks. That is arguably more honest (the model genuinely thinks there are three candidate spots) but it complicates both the "region width" accounting and downstream consumption.
+
+```
+ CALIBRATION PHASE   (run once, on held-out labeled pairs)
+
+  (query, video) --> [ ANY GROUNDER ] --> base output
+                        (frozen, black box)     |
+                                                v
+   ground truth [g_s, g_e] -----> [ NONCONFORMITY SCORE ]
+                                                |
+      A:  s_i = max( g_s - p_s ,  p_e - g_e )   |   (interval output)
+      B:  s_i = 1 - min r(t) over [g_s, g_e]    |   (signal output)
+                                                v
+                                  [ s_1 , s_2 , ... , s_n ]  sorted
+                                                |
+                        q = ceil( (n+1)(1-alpha) )-th smallest
+                                                v
+                                    q  ==  ONE SCALAR
+
+
+ TEST PHASE   (per query, no labels, no retraining)
+
+  (query, video) --> [ ANY GROUNDER ] --> [p_s, p_e]      or      r(t)
+                                              |                    |
+                                     widen by q                threshold
+                                              v                    v
+                              [ p_s - q , p_e + q ]     \{ t : r(t) >= 1 - q \}
+                                              |                    |
+                                              +---------+----------+
+                                                        v
+                                          CERTIFIED REGION  C(x)
+                              P( true moment contained in C(x) ) >= 1 - alpha
+                              width( C(x) ) == usable reliability signal
+```
+
+Think of the **hurricane forecast cone**. The National Hurricane Center's model spits out a single predicted center track — that's your base grounder's interval, one confident line through a space of possibilities. Nobody publishes the bare line, because it's wrong by construction. What they publish is a cone drawn around it, and the cone's width is not a model output at all: it comes from an archive of past storms where they measured how far the actual track ended up from the forecast track. Take the 2/3 quantile of those historical misses and you get the two-thirds cone. That archive is COVER's calibration set; the historical miss distances are the nonconformity scores; the quantile is q; the cone is the certified region.
+
+The metaphor keeps paying. The cone is drawn on *both* sides of the track because the storm can veer either way — that's the two-sided boundary-widening score, and if storms in this basin veer right more often than left you'd draw an asymmetric cone, which is per-side calibration. Some forecast products don't give you a center track at all; they give you a spaghetti plot of ensemble members, and you shade the area where enough members pass through. That's the super-level-set score: threshold a density instead of widening a line, and yes, sometimes the shaded area breaks into two blobs because the ensemble disagrees about which way the storm splits. The width bound in the paper is the observation that a cone is only useful if it's narrower than the ocean — a bad base model forces a cone so wide the guarantee is technically true and practically vacuous. Length-conditional coverage is the known complaint that a cone calibrated over all storms under-covers the fast, erratic ones. And the exchangeability discussion is the fact that successive forecasts of the *same* storm are correlated, so treating them as independent archive entries inflates your effective sample size — in COVER's case, multiple query-moments drawn from one video.
+
+### Key Concepts
+
+- **Split conformal prediction**: Suppose you have a black-box predictor and you want an honest error bar without assuming anything about the data distribution or the model. Here's the whole trick: on 500 examples the model has never trained on, write down how badly it missed each one. Sort those 500 miss magnitudes. The 450th one is a number q such that, historically, 90% of misses were smaller than q. Now on a fresh example, output "prediction plus or minus q". Why is this valid rather than hand-waving? Because if the new example is statistically interchangeable with the 500 old ones, its miss magnitude is equally likely to land in any of the 501 slots of the sorted list, so the probability it exceeds the 450th is at most 10%. That's it — a rank argument, no Gaussians, no asymptotics, no assumption that the model is any good. It's finite-sample exact (with the ceil((n+1)(1-alpha)) correction) and works if your model is a neural net, a lookup table, or a coin flip. The cost: the guarantee is **marginal*, averaged over all test examples, and it says nothing about any particular one.
+
+- **Nonconformity score, and why the interval case is not obvious**: A score is just "how surprising is this label given this prediction?" For scalar regression it's |y - yhat| and everyone agrees. For a **moment*, the label is a pair (start, end) and the prediction is a pair, so there are many candidate scores: symmetric difference, 1 - IoU, max boundary error, sum of boundary errors. The constraint that narrows it down is nesting: as you loosen the threshold, the region you output must only grow, never shift or shrink. Max-boundary-error has this property (widen both ends by q), which is why COVER uses it; 1 - IoU does not correspond to any clean nested family of intervals, which is why you can't just conformalize the metric everybody reports. This is the transferable lesson: conformalizing a structured output means finding a one-parameter family of nested sets that your score induces, and that family *is* your design space.
+
+- **Exchangeability, and how video breaks it**: Exchangeability means you could shuffle your calibration and test examples and the joint distribution wouldn't notice. Grounding datasets violate this in a specific way: Charades-STA and QVHighlights give you many queries per video, and moments from the same video share scene, lighting, actor, and annotator. If your calibration set contains 12 moments from a video and your test set contains 3 more from it, those 15 are correlated, your effective n is closer to 1 than 15, and the quantile you computed is optimistic. The clean fix is to split by video rather than by sample, and the paper's contribution here is quantifying the coverage slack when you don't — useful because in practice you often can't get a clean video-level split.
+
+## Framework Shift
+
+```
+Before (mainstream grounding):        After (COVER):
+
+video timeline                        video timeline
+|____________________________|        |____________________________|
+        [==pred==]                        [<=====  C(x)  =====>]
+     [==gt==]                                  [==pred==]  core
+                                            [==gt==]  inside == covered
+IoU = 0.41  ->  logged as "miss"
+                                      calibrate once on held-out set:
+report: R@1@0.5 = 55.2                    q = quantile of past misses
+        mIoU    = 47.8
+                                      report: coverage 0.90 (target 0.90)
+at deploy time:                               mean width 8.4s / 31% of video
+  output = [12.4s, 19.8s]
+  reliability = ???                    at deploy time:
+  a miss is invisible                   output = [9.1s, 23.1s], covered w.p. .9
+                                        width small  -> act on it
+one number per DATASET                  width huge   -> route to human
+                                      one number per PREDICTION
+```
+
+From point prediction to set prediction, the core shift is that reliability stops being a dataset-level average you report in a table and becomes a per-instance quantity you can act on at deployment.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, and well chosen. The annotator-disagreement observation is the strongest card in the paper — if independent annotators overlap by less than 0.5 IoU on a large fraction of samples, then a decade of R@1@0.7 leaderboard climbing has partly been fitting annotator idiosyncrasy, and that deserves saying out loud. Conformal prediction has been sweeping through CV one output space at a time (classification sets, detection boxes, segmentation masks, pose), so temporal grounding was going to get conformalized by someone this year; this paper got there with more task-specific theory than a minimal port would have. The honest framing is "timely and correct" rather than "surprising."
+
+**Method maturity**: Clever in the framing, mostly standard in the machinery. Split conformal with a monotone score is textbook; the increment is choosing the right score families and noticing that the two big classes of grounders need different ones. The super-level-set score is the more interesting of the two, because it's the only route to certifying video-LLMs and highlight heads that don't emit clean boundaries, and it generalizes beyond this task. What's underplayed: the simpler baseline of "just report a wider interval scaled by predicted confidence" would fail to give a guarantee, but a **calibrated* per-instance-normalized score (divide by predicted duration, or by an uncertainty estimate) is the standard efficiency fix in conformal regression, and I'd want to see how far that alone closes the gap to the fancier machinery. Also missing from the abstract: any treatment of adaptivity via conformalized quantile regression, which is the natural stronger competitor.
+
+**Experimental integrity**: Three benchmarks and five grounders spanning trained localizers and black-box video-LLMs is the right breadth, and "realized coverage tracks the target" is the correct primary result — though it's also the easy result. Split conformal covers by construction; if it didn't, you'd have a bug or an exchangeability violation. So the paper's real experimental burden is **efficiency*, and that's where I'd push hardest: what is the mean certified width as a fraction of video duration at alpha = 0.1? If Charades-STA's certified regions average 40% of a 30-second video, the guarantee is honest but the product is a shrug. The abstract promises a width bound theoretically and "calibration exposes what point metrics hide" empirically, but I can't tell from the abstract whether widths are competitive or merely reported. Second red flag to check: whether the calibration/test split is by video or by sample. The paper explicitly develops theory for the within-video dependence case, which suggests they know the issue — but it also means the headline coverage numbers may come from a sample-level split, which is mildly optimistic. Third: coverage is measured against the single stored label, which is exactly the annotator draw the introduction argues is unreliable. That's not a contradiction (conformal covers the label-generating distribution, which is what you actually get at test time) but it does mean the guarantee inherits the noise rather than resolving it, and the paper should not let readers conflate "covers the annotation" with "covers the true event."
+
+**Writing quality**: Judging from the abstract, the theory got the attention and the motivation got compressed. The re-annotation study is the paper's most quotable finding and it's a single clause in the abstract — that should be a figure and a subsection with the protocol, the annotator count, and the IoU histogram, because it justifies the entire enterprise and is citable independently. Conversely, the three theory results are described so telegraphically ("bounds how large the certified region becomes, when coverage survives conditioning on event length, and how it degrades when moments from one video break exchangeability") that a reader can't tell if these are tight or cosmetic. The section I'd rewrite: a dedicated efficiency analysis that puts width, coverage, and mIoU on the same axes across all five grounders, so the claim "calibration exposes what point metrics hide" becomes a picture rather than an assertion.
+
+**Verdict**: weak accept — correct, useful, and well-motivated, but the conformal machinery is off-the-shelf and the paper's value hinges on efficiency numbers and the annotator study, both of which need more room than they appear to get.
+
+## Takeaways
+
+Specific things worth stealing:
+
+1. **The nesting-constraint heuristic for conformalizing structured outputs.** When you want a coverage guarantee over something that isn't a scalar, don't start from your favorite metric — start by asking "what one-parameter family of nested sets can I even build here?" That question kills 1 - IoU as a score and hands you max-boundary-error for free. Same recipe applies to bounding boxes (grow by q), masks (dilate by q), ranked lists (extend to top-k(q)), and code completions (accept top-p(q)).
+
+2. **The super-level-set score as a universal adapter.** Any model that emits a dense relevance/score signal over a domain can be conformalized by calibrating a threshold on that signal, no matter what its final decoder does. This is how you certify a black-box you can't get boundaries out of, and it transfers straight to anomaly detection (threshold the anomaly score), retrieval (threshold similarity), and audio event detection. Budget for non-contiguous output regions and decide up front whether your consumer can handle a union of chunks.
+
+3. **Split by cluster, not by sample.** If your dataset has multiple labeled items per underlying entity (moments per video, sentences per document, patches per slide, readings per patient), sample-level calibration splits quietly inflate your effective n and give you optimistic quantiles. Split by entity. Cheap to do, and the failure is invisible if you don't.
+
+4. **Width as a deployment-time router.** The most practical output of this paper isn't the guarantee, it's that the certified region's width is a per-instance reliability number you can threshold: narrow region, auto-accept; wide region, send to a human or fall back to full-video search. That's a usable selective-prediction system built on top of a frozen model you don't control.
+
+5. **The evaluation-critique framing.** Before optimizing a metric further, measure the label noise floor by re-annotating. If independent annotators only agree at 0.5 IoU, chasing 0.7 IoU is partly overfitting to annotator style. This move is available in any task with subjective boundaries — summarization spans, entity boundaries, segmentation edges — and it's usually more interesting than another point on the leaderboard.
+:::
+
+:::zh
+**论文**: [2608.07434](https://arxiv.org/abs/2608.07434)
+**作者**: Aseel Mohamed, Rasul Khanbayov, Erchin Serpedin, Hasan Kurban
+**分类**: cs.CV, cs.IR
+
+## 缺口
+
+视频时序定位（"给一句话，它在视频里什么时候发生"）从诞生起就被当成一个区间回归问题。
+
+2D-TAN 一脉给候选片段打分；Moment-DETR、QD-DETR、UniVTG、MomentDiff 直接回归或解码出一个起点和终点；最近流行的做法是直接问视频大模型（VTimeLLM、TimeChat 之类），再从文本里把时间戳抠出来。
+
+所有这些方法的输出都是一个区间。然后整个领域用 R@1 at IoU 0.5/0.7 和 mIoU 来汇报成绩——这些都是群体平均量：它告诉你模型有 55% 的时候是对的，但完全不告诉你**是哪 55%**。
+
+这里有两个断裂点。
+
+第一，评测靶子本身是晃动的。让不同标注者重新标注同一个（查询，视频）对，本文报告：相当大比例的样本上，两次标注的重叠不到一半。所以"与唯一存储标签的 IoU 大于 0.5"衡量的是与某一个标注者某一次抽样的一致程度，而不是与真相的距离。
+
+第二，对任何真要部署的人来说更致命：推理时，一个错的区间和一个对的区间长得一模一样。这些模型的置信度是未校准的 softmax 或 DETR 类别 logit，温度缩放、贝叶斯头能给你一个数，但那个数背后没有任何保证。
+
+此前关于不确定性的工作，要么是启发式的——集成方差、dropout 采样、"不确定就输出宽一点"——没有任何覆盖率承诺；要么是保形预测在分类和标量回归上的成熟应用，那里的输出对象是标签集合或标量区间。
+
+没有人定义过：当标签活在"时间区间"这个空间里时，保形预测集合到底该长什么样；也没有人处理过模型只输出逐帧相关性曲线、根本没有边界可言的情形。
+
+```
+问题: 定位器只吐一个区间, 不附带任何可靠性陈述
+    |        部署时, 错的区间和对的区间无法区分
+    v
+观察: 重新标注会大量分歧 (很多样本 IoU < 0.5)
+    |        => 真值本质上是区间上的一个 分布
+    v
+假设: 校准样本与测试样本可交换 (exchangeable)
+    |
+    v
+方法: COVER == 不符合度分数 + 分位数 + 加宽
+    |        事后校准, 黑箱可用, 不需重训
+    +--> 分数 A: 双侧边界加宽    (输出为区间的定位器)
+    +--> 分数 B: 超水平集       (输出为相关性信号的定位器)
+    |
+    v
+理论: (i) 认证区域会宽到什么程度
+    |  (ii) 按事件时长条件化后覆盖率还成立吗
+    | (iii) 同一视频内多个时刻破坏可交换性时的松弛量
+    v
+证据: 3 个基准 x 5 个定位器; 实测覆盖率贴合 1 - alpha
+    |        宽度暴露了 mIoU 掩盖掉的失效模式
+    v
+结论: 换掉输出对象 -- 交付一个带认证的时间区域
+```
+
+## 增量
+
+**一句话**：以前定位器给你一对时间戳，你只能选择信或不信；现在同一个冻结的模型给你一个时间区域，并附带一个有限样本、免分布假设的承诺——真实时刻至少有 1-alpha 的概率落在里面。
+
+### 核心机制
+
+COVER 是分裂式保形预测（split conformal）移植到区间输出世界，而移植本身就是全部的工作量所在。
+
+第一阶段：取一批留出的、带标签的（查询，视频，真实时刻）三元组，用冻结的定位器跑一遍。对每个校准样本算出一个数，含义是"我得把这个预测撑开多少，它才能包住真相"。把这 n 个数排序，取第 ceil((n+1)(1-alpha)) 小的那个。这一个标量 q 就是整个校准产物。
+
+第二阶段：测试时跑定位器，按 q 撑开，输出区域。没有梯度，不看 logit，不重训，不需要模型内部——只要 API 会返回"12.4 秒到 19.8 秒"就能用。
+
+有意思的设计抉择在于分数族，因为它决定了区域的**形状**。
+
+对于输出区间的定位器，双侧边界加宽分数问的是：每个边界在"会把真相排除在外"的那个方向上差了多少，大致是 s = max(pred_start - gt_start, gt_end - pred_end)，也可以按预测时长归一化。
+
+这个分数对加宽量是单调的，正好满足保形预测需要的嵌套集合性质，于是按阈值截断就得到 [pred_start - q, pred_end + q]。对称加宽是一个建模选择；如果起点和终点的误差不对称（实际上通常不对称，终点比起点模糊得多），可以两侧分别校准。
+
+对于输出逐帧或逐片段相关性信号 r(t) 的模型——highlight 检测头、检索相似度曲线、帧上的注意力——你根本没有边界可以加宽。
+
+这里的分数建在超水平集上：用真实时刻处的相关性值定义分数（比如 s = 1 减去真值跨度上 r 的最小值），校准出 q，然后返回区域 \{ t ： r(t) >= 1 - q \}。
+
+阈值降低会让集合单调变大，嵌套性同样成立。麻烦之处很实在：超水平集不一定连通，你可能拿到若干个不相邻的时间块。这某种意义上更诚实（模型确实觉得有三个候选位置），但同时也让"区域宽度"的统计和下游消费都变复杂。
+
+```
+ 校准阶段   (只跑一次, 用留出的带标签数据)
+
+  (查询, 视频) --> [ 任意定位器 ] --> 基础输出
+                     (冻结, 黑箱)        |
+                                         v
+   真值 [g_s, g_e] ---------> [ 不符合度分数 ]
+                                         |
+      A:  s_i = max( g_s - p_s ,  p_e - g_e )   (区间输出)
+      B:  s_i = 1 - min r(t) , t 属于 [g_s, g_e] (信号输出)
+                                         v
+                            [ s_1 , s_2 , ... , s_n ]  排序
+                                         |
+                     q = 第 ceil( (n+1)(1-alpha) ) 小的值
+                                         v
+                                 q  ==  一个标量
+
+
+ 测试阶段   (逐条查询, 无标签, 无需重训)
+
+  (查询, 视频) --> [ 任意定位器 ] --> [p_s, p_e]      或      r(t)
+                                         |                    |
+                                    加宽 q                  取阈值
+                                         v                    v
+                           [ p_s - q , p_e + q ]   \{ t : r(t) >= 1 - q \}
+                                         |                    |
+                                         +---------+----------+
+                                                   v
+                                       认证区域  C(x)
+                          P( 真实时刻落在 C(x) 内 ) >= 1 - alpha
+                          width( C(x) ) == 可直接使用的可靠性信号
+```
+
+**核喻：飓风预报锥。**
+
+美国国家飓风中心的模型给出的是一条预测中心路径——那就是你的基础定位器输出的那个区间，一条自信地穿过可能性空间的细线。没人会单独发布这条线，因为它必然是错的。
+
+真正发布的是围绕它画出的一个锥形，而锥的宽度根本不是模型的输出：它来自一份历史风暴档案，记录了过去每次实际路径偏离预报路径多远。取这些历史偏差的三分之二分位数，就得到"三分之二概率锥"。
+
+这份档案就是 COVER 的校准集；历史偏差就是不符合度分数；分位数就是 q；锥形就是认证区域。
+
+这个比喻能一路走到底。
+
+锥画在路径**两侧**，因为风暴可能往任一边偏——这就是双侧边界加宽分数；如果这个海域的风暴更常右偏，你就该画一个不对称的锥，那就是两侧分别校准。
+
+有些预报产品根本不给中心路径，只给一张集合成员的"意面图"，然后把足够多成员穿过的区域涂上颜色——那就是超水平集分数：不是加宽一条线，而是对密度取阈值；而且是的，有时涂色区会裂成两块，因为集合成员对风暴往哪边分歧很大。
+
+论文里的宽度上界，本质是那句常识：锥只有比大洋窄才有用——基础模型太差，锥就宽到把整片海都圈进去，保证在技术上成立、在实践上等于没说。
+
+按事件时长条件化的覆盖率，对应的是那个老抱怨：用所有风暴校准出来的锥，对移动快、路径飘的风暴是覆盖不足的。
+
+而可交换性的讨论，对应的是同一场风暴的连续多次预报彼此相关，把它们当成独立档案条目会虚增有效样本量——在 COVER 里就是同一个视频里抽出的多个查询-时刻。
+
+### 关键概念
+
+- **分裂式保形预测**：你有一个黑箱预测器，想要一个诚实的误差条，又不想对数据分布或模型本身做任何假设。全部技巧就是：拿 500 个模型没训过的样本，记下它每一个错了多少；把这 500 个偏差排序；第 450 个就是一个数 q，历史上 90% 的偏差都小于它。
+
+  面对新样本时，输出"预测 加减 q"。为什么这不是拍脑袋？因为如果新样本与那 500 个旧样本在统计上可互换，那它的偏差落在排好序的 501 个位置中任何一个的概率都相同，于是它超过第 450 个的概率最多 10%。
+
+  就这么一个排序论证。不需要高斯假设，不需要渐近性，也不需要假设你的模型好——它对神经网络、查找表、抛硬币都成立，而且是有限样本精确（配上 ceil((n+1)(1-alpha)) 的修正）。
+
+  代价：这个保证是**边缘的**，在所有测试样本上平均，对任何一个具体样本什么都没说。
+
+- **不符合度分数，以及为什么区间情形不显然**：分数就是"给定预测，这个标签有多意外"。标量回归里它是 |y - yhat|，大家没有分歧。
+
+  但对一个"时刻"来说，标签是一对（起点，终点），预测也是一对，于是候选分数一大堆：对称差、1 减 IoU、最大边界误差、边界误差之和。
+
+  真正把选择收窄的约束是嵌套性：阈值放松时，你输出的区域只能变大，不能平移也不能变小。最大边界误差满足这一点（两端各加宽 q），所以 COVER 用它；而 1 减 IoU 不对应任何干净的嵌套区间族——这就是为什么你不能直接把大家汇报的那个指标拿来保形化。
+
+  这条才是可迁移的教训：给结构化输出做保形化，等价于找到你的分数所诱导的单参数嵌套集合族，而这个族**就是**你的设计空间。
+
+- **可交换性，以及视频如何破坏它**：可交换性的意思是，你把校准样本和测试样本洗牌，联合分布察觉不到差别。
+
+  定位数据集以一种很具体的方式违反它：Charades-STA、QVHighlights 里一个视频对应很多条查询，同一视频的多个时刻共享场景、光照、演员，往往还共享标注者。
+
+  如果校准集里有某视频的 12 个时刻，测试集里还有它的 3 个，这 15 条是相关的，你的有效 n 更接近 1 而不是 15，算出来的分位数就偏乐观。
+
+  干净的做法是按视频而不是按样本切分。本文的贡献是量化了"不这么做"时的覆盖率松弛——这有实用价值，因为现实中你常常拿不到干净的视频级划分。
+
+## 框架转变
+
+```
+之前（主流定位范式）：                之后（COVER）：
+
+视频时间轴                            视频时间轴
+|____________________________|        |____________________________|
+        [==预测==]                        [<=====  C(x)  =====>]
+     [==真值==]                                [==预测==]  核心
+                                            [==真值==]  在内 == 被覆盖
+IoU = 0.41  ->  记为 "miss"
+                                      留出集上校准一次:
+汇报: R@1@0.5 = 55.2                      q = 历史偏差的分位数
+      mIoU    = 47.8
+                                      汇报: 覆盖率 0.90 (目标 0.90)
+部署时:                                     平均宽度 8.4s / 占视频 31%
+  输出 = [12.4s, 19.8s]
+  可靠性 = ???                        部署时:
+  一次失误是不可见的                    输出 = [9.1s, 23.1s], 0.9 概率覆盖
+                                        宽度小  -> 直接采纳
+每个 数据集 一个数字                     宽度大  -> 转人工复核
+                                      每个 预测 一个数字
+```
+
+一句话：从点预测到集合预测，核心转变是可靠性不再是你填进表格的数据集级平均值，而是部署时可以据以行动的逐样本量。
+
+## 专家评审
+
+**选题眼光**：真缺口，而且选得准。
+
+标注者分歧那个观察是全文最强的一张牌——如果独立标注者在相当大比例样本上重叠不到 0.5 IoU，那么十年来在 R@1@0.7 榜上的攀爬，有一部分是在拟合标注者的个人习惯，这件事值得大声说出来。
+
+保形预测正在一个个输出空间地扫过计算机视觉（分类集合、检测框、分割掩码、姿态），时序定位今年被人保形化几乎是注定的；这篇比一个最小移植多做了一些任务专属的理论。
+
+诚实的定位是"及时且正确"，而不是"令人意外"。
+
+**方法成熟度**：框架层面有巧劲，机器层面基本是标准件。
+
+带单调分数的分裂式保形是教科书内容；增量在于选对了分数族，以及注意到两大类定位器需要不同的分数。
+
+超水平集分数是两者中更有意思的那个，因为它是给不输出干净边界的视频大模型和 highlight 头做认证的唯一通路，而且它能迁出这个任务。
+
+被弱化的一点：所谓"直接输出更宽的区间"当然给不了保证，但**按实例归一化的分数**（除以预测时长，或除以某个不确定性估计）是保形回归里提升效率的标准手段，我想看只靠它能把差距缩到多少。
+
+摘要里也没提到分位数回归式保形（CQR）这条自适应路线——那才是自然的强竞争者。
+
+**实验诚意**：三个基准、五个定位器，覆盖训练式定位器和黑箱视频大模型，广度是对的；"实测覆盖率贴合目标"是正确的主结果——但它同时也是最容易的结果。
+
+分裂式保形按构造就该覆盖；如果没覆盖上，那是有 bug，或者可交换性被破坏了。
+
+所以本文真正的实验负担是**效率**，我会在这里施压最狠：alpha = 0.1 时，认证区域的平均宽度占视频时长的多少？如果 Charades-STA 上 30 秒视频的认证区域平均占 40%，保证很诚实，但产品价值只值一个耸肩。
+
+摘要在理论上承诺了宽度上界，在实验上说"校准暴露了点指标掩盖的东西"，但仅从摘要判断不出宽度到底有竞争力，还是只是被列了出来。
+
+第二个要警惕的点：校准/测试划分是按视频还是按样本。论文明确为同视频依赖发展了理论，说明作者知道这个问题——但这也意味着头条覆盖率数字可能来自样本级划分，那就略微乐观。
+
+第三：覆盖率是相对于那个唯一存储的标签来度量的，而引言恰恰在论证这个标注抽样不可靠。这不构成自相矛盾（保形覆盖的是标签生成分布，而这确实是你测试时能拿到的东西），但它意味着保证**继承**了这份噪声而非解决它，论文不该让读者把"覆盖了标注"混同为"覆盖了真实事件"。
+
+**写作功力**：从摘要看，理论拿走了注意力，动机被压缩了。
+
+重新标注那个研究是全文最值得被引用的发现，却在摘要里只占一个从句——它应该是一张图加一个小节，写清协议、标注者数量、IoU 直方图，因为它撑起了整篇论文的立论，而且本身就可被独立引用。
+
+反过来，三条理论结果描述得过于电报化（"界定认证区域会有多大、按事件时长条件化时覆盖率何时仍成立、同视频时刻破坏可交换性时如何退化"），读者无法判断这些界是紧的还是装饰性的。
+
+要我重写的一节：一个专门的效率分析，把宽度、覆盖率、mIoU 放在同一组坐标上横跨五个定位器，让"校准暴露了点指标掩盖的东西"这句话从断言变成一张图。
+
+**判决**：弱接收 —— 正确、有用、动机扎实，但保形机器是现成的，论文的价值系于效率数字和标注者研究，而这两块看起来都没拿到应有的篇幅。
+
+## 要点总结
+
+值得"偷"走的具体东西：
+
+1. **结构化输出保形化的"嵌套性"启发式**。想给一个非标量的对象拿到覆盖率保证时，不要从你最爱的指标出发，先问"这里我到底能构造出什么样的单参数嵌套集合族"。这一问就干掉了 1 减 IoU，同时白送你最大边界误差。同样的套路适用于检测框（膨胀 q）、掩码（形态学膨胀 q）、排序列表（扩到 top-k(q)）、代码补全（接受 top-p(q)）。
+
+2. **超水平集分数是一个通用转接头**。任何在定义域上输出稠密相关性/得分信号的模型，都能通过校准该信号的阈值来保形化，跟它最终的解码器是什么无关。这是给"你拿不到边界的黑箱"做认证的办法，可以直接迁到异常检测（对异常分数取阈值）、检索（对相似度取阈值）、音频事件检测。要预留处理"输出区域不连通"的预算，并提前决定下游能否消费一组时间块。
+
+3. **按簇切分，而不是按样本切分**。如果你的数据集里每个底层实体对应多个标注项（一个视频多个时刻、一篇文档多个句子、一张切片多个 patch、一个病人多次测量），样本级校准划分会悄悄虚增有效 n，给你偏乐观的分位数。改成按实体切分，成本极低；而如果你不做，这个错误是完全不可见的。
+
+4. **把宽度当作部署时的路由信号**。这篇论文最实用的产出不是那个保证，而是认证区域的宽度构成一个逐样本的可靠性数字，你可以对它取阈值：窄就自动采纳，宽就转人工或退回全视频检索。这就是在一个你无法控制的冻结模型之上搭出的选择性预测系统。
+
+5. **那套评测批判的框架**。在继续优化一个指标之前，先靠重新标注测出标签噪声地板。如果独立标注者只在 0.5 IoU 上达成一致，那么追 0.7 IoU 有一部分是在过拟合标注风格。这一招在任何边界主观的任务上都可用——摘要跨度、实体边界、分割边缘——而且通常比榜上再加一个点更有意思。
+:::

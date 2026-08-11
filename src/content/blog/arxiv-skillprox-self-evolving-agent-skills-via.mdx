@@ -1,0 +1,493 @@
+---
+title:
+  en: "SkillProx: Teaching Agent Skills to Shrink, Not Just Grow"
+  zh: "SkillProx：让智能体的技能库学会瘦身，而不只是长胖"
+description:
+  en: "SkillProx adds two missing pieces to text-space skill evolution: re-running edits on the same batch to check whether they actually helped, and treating deletion as a dedicated leave-one-out audit rather than another edit."
+  zh: "SkillProx 给文本空间的技能进化补上两块拼图：把编辑放回同一批任务上重跑以验证是否真的有效，以及把删除当作独立的留一法审计机制，而不是又一次普通编辑。"
+date: 2026-08-11
+tags: ["arxiv", "ai", "cs.ai", "cs.cl"]
+image: "/arxiv-visuals/arxiv-skillprox-self-evolving-agent-skills-via.png"
+---
+:::en
+**Paper**: [2608.07449](https://arxiv.org/abs/2608.07449)
+**Authors**: Mingxuan Zheng, Yujin Zhou, Chuxue Cao, Boqin Yin, Yuyao Zhang, Jiapeng Sun, Shuaishuai Gong, Sirui Han, Yike Guo
+**Categories**: cs.AI, cs.CL
+
+## The Gap
+
+The current mainstream for "agents that get better without fine-tuning" is text-space self-improvement. You keep a textual artifact (call it a skill, a playbook, a cheatsheet, a memory) that gets loaded into context. The agent runs a task, fails, an LLM diagnoses why, and that diagnosis becomes an edit to the artifact. TextGrad-style "textual gradients," Reflexion-style verbal reinforcement, ExpeL, Voyager's skill library, Dynamic Cheatsheet, and the recent context-engineering line all live in this space.
+
+Two things in that loop are quietly broken.
+
+First, the loop is open. The diagnoser says "you failed because you forgot to normalize units," the edit is applied, and then the pipeline moves on to the next batch. Nobody ever checks whether that specific edit made the agent better on the tasks it was supposed to fix. So bad edits persist, and worse, the diagnoser never learns which of its own diagnoses were correct — it keeps generating plausible-sounding explanations with zero feedback signal.
+
+Second, deletion is a second-class citizen. Existing frameworks expose "edit the text" as one operation, and removing a line is just one more way to edit. In practice this means artifacts monotonically bloat: redundant rules, task-specific overfitted hacks, and outright harmful instructions accumulate because nothing is ever measured for its individual contribution. The context window becomes a landfill, and retrieval/attention degrades.
+
+SkillProx's claim is that these two holes are the same hole viewed from two sides, and that the proximal-gradient template from convex optimization gives you the right shape to fill both.
+
+```
+PROBLEM: text-space skill evolution both drifts and bloats
+   |
+   +-- prior work: diagnose -> edit -> move on   (open loop, unverified)
+   +-- prior work: delete == yet another edit    (no consolidation step)
+   |
+   v
+ASSUMPTION: skill quality ~ task_loss + lambda * skill_complexity
+   and the value of any single edit or line is measurable
+   by re-executing with a frozen agent
+   |
+   v
+METHOD: forward step  = diagnose, edit, RE-RUN same batch,
+                        roll back regressions, report outcome
+                        back into the next diagnosis
+        backward step = split skill into units, leave-one-out
+                        utility audit, validation-gated
+                        merge / demote / remove
+   |
+   v
+EVIDENCE: +3.0 pp average accuracy vs strongest gradient-based
+          baseline; in-distribution and OOD; multiple backbones;
+          ablations show the two stages are complementary
+   |
+   v
+CONCLUSION: measured edits plus first-class deletion beat
+            a larger unaudited pile of text
+```
+
+## The Increment
+
+**One sentence**: Before, a skill artifact grew by unverified LLM-proposed edits; after, every edit must survive a re-run on the batch it claimed to fix, and every surviving line must justify its own existence in a leave-one-out audit.
+
+### Core Mechanism
+
+The framing is proximal gradient descent. In convex optimization, when you minimize `smooth_loss(x) + lambda * penalty(x)`, you alternate: take a gradient step on the smooth part, then apply a proximal operator that pulls the result back toward simplicity (for an L1 penalty, that operator is soft thresholding — it literally zeroes out small coordinates). SkillProx maps this onto text. The forward stage is the gradient step: diagnosis-driven edits that reduce task loss. The backward stage is the proximal operator: shrink the artifact, zeroing out the "coordinates" (knowledge units) whose measured contribution is near zero or negative.
+
+The forward stage's distinguishing move is re-execution on the *same* batch. Run the agent with skill `S`, record score. Diagnose, propose an edit, apply it to get `S'`, then run the agent again on that identical batch. If the score went down, roll back — the edit is discarded. Either way, the measured outcome ("your fix for the unit-normalization failure moved accuracy from 0.62 to 0.58") is written back into the context of the next diagnosis. That turns the diagnoser from a one-shot commentator into something closer to a learner with a reward signal: it sees which of its hypotheses paid off.
+
+The backward stage does credit assignment inside the artifact. The skill is decomposed into auditable knowledge units — discrete, individually addressable claims or procedures rather than one blob of prose. Then, with the executor frozen (same model, same decoding, nothing else changing), each unit is removed one at a time and the batch is re-run. The accuracy delta is that unit's estimated utility. High-utility units are kept. Near-zero units get consolidated into a sibling or demoted to an archive tier instead of hard-deleted. Negative-utility units are removed outright. Finally, the whole trimmed artifact has to pass a validation gate: if the compressed skill scores worse on held-out validation, the compression is rejected. That gate is what keeps the shrink step from being a fancy way to delete useful knowledge.
+
+```
+    task batch B                       skill S_t = units u1..un
+         |                                        |
+         +-------------------+--------------------+
+                             v
+             [ FORWARD STEP : the "gradient" ]
+
+    run agent(S_t, B) --------------------> score_0
+         |
+         v
+    diagnose failures ---> proposed edit e
+         |
+         v
+    S' = apply(e, S_t) ;  re-run agent(S', B) --> score_1
+         |
+         +--- score_1 > score_0 ? ---- yes ---> accept S'
+         |                       |
+         |                       +---- no ----> ROLLBACK to S_t
+         |                                          |
+         +------------> outcome record <------------+
+                             |
+         (fed into the NEXT diagnosis == closed loop)
+                             v
+             [ BACKWARD STEP : the "prox" / shrink ]
+
+    decompose:   [u1] [u2] [u3] [u4] [u5] ... [un]
+                   |    |    |    |    |
+                   v    v    v    v    v
+    frozen executor, leave-one-out re-runs:
+        util(ui) = score(S) - score(S without ui)
+                   |
+      +------------+------------+-------------+
+      v                         v             v
+   util high                util ~ 0      util < 0
+    KEEP                 MERGE or DEMOTE    REMOVE
+      |                         |             |
+      +------------+------------+-------------+
+                   v
+        validation gate: accept trimmed S only if
+        held-out score is not worse
+                   v
+                 S_t+1
+```
+
+Here's the load-bearing analogy: **an aviation checklist and its two review boards.**
+
+The skill artifact is the cockpit checklist. Each knowledge unit is one line on it. The task batch is a set of simulator scenarios.
+
+The *incident review board* is the forward stage. After a crash in the simulator, investigators write up a cause ("the crew didn't cross-check the altimeter") and add a line to the checklist. In today's methods, that's where it ends — the new line ships, and the board moves to the next incident. SkillProx makes the board re-fly the exact same scenarios with the amended checklist. If the crash rate goes up — maybe the extra line pushed a critical item off the pilot's attention — the amendment is struck from the record. And crucially, the board is told the outcome of its last amendment before it writes the next one, so it stops repeating the kinds of fixes that never worked.
+
+The *checklist hygiene board* is the backward stage. Checklists bloat; every incident adds a line and nothing ever removes one, until pilots start skimming. So this board takes each line, covers it up, and re-flies the scenarios with the same pilot (frozen executor — you don't get to swap in a better pilot, or the measurement means nothing). Lines whose removal changes nothing get merged into a neighboring item or moved to the reference appendix rather than shredded. Lines whose removal *improves* safety get deleted — they were actively misleading. And the trimmed checklist doesn't go into service until it passes a certification flight on scenarios the board didn't use for trimming.
+
+Tell someone that story and they can reconstruct the paper. The "proximal gradient" vocabulary is the mathematician's name for "incident board plus hygiene board."
+
+### Key Concepts
+
+- **Proximal gradient descent, without the math**: Suppose you want a model that fits data **and* is simple. You write down a single score: error plus a penalty on size. Rather than optimizing that mess directly, you split the work. Step one: improve the fit, ignoring size. Step two: apply a fixed shrinking rule that pulls everything back toward zero and snaps small values exactly to zero. Repeat. This is how LASSO gets sparse solutions. The key property is that the shrinking step is a *separate, dedicated operation* — not something you hope the fitting step will do incidentally. SkillProx's whole argument is that prior work only has step one, and expects sparsity to emerge from a generic "you may also delete text" affordance. It doesn't. Big caveat: text edits are not gradients and there is no proximal operator here in any formal sense, so this is a design template, not a theorem.
+
+- **Leave-one-out utility audit with a frozen executor**: How do you know whether line 7 of your prompt is earning its tokens? Delete it, run the same tasks with the same model at the same temperature, and see what happens to accuracy. If nothing changes, the line is decoration. If accuracy **rises*, the line was hurting you. This is just ablation, but applied at the granularity of individual statements inside a living artifact, and used as a control signal rather than a paper table. "Frozen" is the load-bearing word: if the executor changes between measurements, you can't attribute the delta to the line. The cost is the obvious problem — auditing `n` units means `n` extra batch runs.
+
+- **Closed-loop diagnosis**: A doctor who writes prescriptions and never sees the patient again will keep writing confident, plausible, wrong prescriptions forever. An LLM asked "why did this trajectory fail?" produces fluent causal stories; fluency is uncorrelated with correctness. Feeding the measured outcome of the previous edit back into the next diagnosis prompt is the cheapest possible fix: the diagnoser now has evidence about its own track record in context. Not gradient descent, not RL — just refusing to let the critic operate without a scoreboard.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+  +-------------------+                 +-------------------+
+  |  run task batch   |                 |  run task batch   |
+  +-------------------+                 +-------------------+
+          |                                     |
+          v                                     v
+  +-------------------+                 +-------------------+
+  |  LLM diagnoses    |                 |  LLM diagnoses    |<--+
+  +-------------------+                 |  (sees outcome of |   |
+          |                             |   its last edit)  |   |
+          v                             +-------------------+   |
+  +-------------------+                         |               |
+  |  apply text edit  |                         v               |
+  |  (delete = one    |                 +-------------------+   |
+  |   edit among many)|                 | apply edit, RERUN |   |
+  +-------------------+                 | SAME batch        |   |
+          |                             +-------------------+   |
+          v                                 |          |        |
+  +-------------------+                 worse|          |better  |
+  |   next batch      |                      v          v       |
+  +-------------------+                 ROLLBACK    ACCEPT      |
+                                            |          |        |
+  skill over time:                          +----+-----+--------+
+  [u1]                                           v
+  [u1][u2]                              +-------------------+
+  [u1][u2][u3]                          |  SHRINK STEP      |
+  [u1][u2][u3][u4]                      |  LOO audit each   |
+  [u1][u2][u3][u4][u5] ...              |  unit, merge /    |
+                                        |  demote / remove, |
+  monotone growth, nothing              |  validation gate  |
+  ever measured individually            +-------------------+
+                                                 v
+                                        skill over time:
+                                        [u1][u2][u3][u4][u5]
+                                        [u1][u2+u4][u5]
+                                        [u1][u2+u4][u5][u6]
+                                        [u1][u2+u4+u6]
+                                        (archive: u3, u7)
+
+                                        grows and shrinks,
+                                        every unit priced
+```
+
+From *accumulating text* to *maintaining a measured portfolio of text*, the core shift is that both writing and deleting now require a receipt — an observed accuracy delta on a re-run batch.
+
+## Expert Assessment
+
+A note on calibration: I'm working from the abstract, so my read on experimental details is inference about what the setup likely looks like, not verification of tables I've inspected.
+
+**Problem choice**: Real gap, and well-chosen within a crowded neighborhood. Context/skill engineering exploded through 2025 — cheatsheets, playbooks, agentic context engineering, evolving prompt libraries — and nearly all of it has the same two pathologies the paper names. The observation that these systems have no mechanism for **contraction* is correct and slightly embarrassing for the field; we spent a decade internalizing that regularization is not optional in parameter space and then rebuilt the same optimizer in text space with no penalty term. Naming deletion as a first-class operator rather than an edit type is the paper's sharpest contribution. That said, the ingredients aren't new individually: accept-if-improved hill climbing, rollback, ablation-based credit assignment, and validation gating are all standard. This is a careful assembly, not a new idea.
+
+**Method maturity**: Clever assembly with a bolted-on theory costume. The proximal-gradient framing genuinely organizes the design — it tells you **why* you need a separate shrink step — but there's no metric space, no operator, no convergence claim, and almost certainly no way to actually set the complexity weight `lambda` in a principled way. Readers should treat "proximal-gradient-inspired" as an architecture diagram, not a guarantee. The real cost concern is compute: the forward stage doubles executions per edit (run, edit, re-run), and the backward stage adds roughly one batch run per knowledge unit. On an artifact with 40 units, an audit round is 40 batch re-runs. That's a substantial multiplier over baselines that just edit and move on. Simpler things I'd want to see ruled out: (a) plain hill climbing with rollback and no audit at all — how much of the 3.0 pp is just "don't keep edits that hurt"? (b) a hard token budget on the skill with an LLM asked to rewrite within the budget; (c) usage-frequency pruning, which is nearly free compared to leave-one-out. The ablations reportedly cover the two stages, but "closed loop vs open loop" and "audit vs cheap heuristic pruning" are different questions.
+
+**Experimental integrity**: The honest signal is that 3.0 pp average over the strongest gradient-based baseline is a modest, believable number — nobody fabricating results claims 3.0. Including OOD evaluation and multiple backbones is the right instinct, since text-space skill methods notoriously overfit to their tuning batch. Three things I'd scrutinize. First, variance: these pipelines are wildly seed-sensitive because a single LLM edit can swing a batch, and a 3.0 pp mean without multi-seed error bars is fragile. Second, compute parity: if baselines aren't given the same number of LLM calls, SkillProx is partly buying its gain with budget, and the honest comparison is accuracy-per-call. Third, the validation gate — if the same held-out set gates every consolidation across many rounds, it's been optimized against, and its "held-out" status is nominal. Also, "average accuracy" across benchmarks can conceal per-benchmark regressions, which matters a lot for a method whose selling point is not regressing.
+
+**Writing quality**: The abstract is disciplined and the mechanism is legible, which is more than most papers in this area manage. The corner-cutting is in the objective. "Motivated by a composite objective balancing task loss and skill complexity" is doing a lot of hand-waving — the objective is never optimized, it's a mood. The section I'd rewrite is exactly that one: state the objective, then state plainly which parts of the algorithm are principled instantiations and which are heuristics wearing the notation. Second priority: a cost-normalized results table. A paper that adds this many extra LLM calls and doesn't foreground the accuracy/compute tradeoff invites the reviewer to assume the worst.
+
+**Verdict**: weak accept — the mechanism (regression rollback plus dedicated audit-driven deletion) is genuinely useful and under-explored, but the gains are modest, the theoretical framing is decorative, and the compute overhead is the elephant the abstract doesn't address.
+
+## Takeaways
+
+Concrete things worth stealing, roughly in order of value-per-effort:
+
+- **Re-run the same batch after every edit, and roll back regressions.** This is nearly trivial to add to any prompt- or playbook-optimization loop and it's my bet for where most of the paper's gain comes from. You already have the batch loaded; the marginal cost is one extra pass.
+- **Put the outcome of your last edit into the next critic prompt.** If you're using an LLM to diagnose failures, it is currently guessing without a scoreboard. Two lines of prompt plumbing — "your previous change was X; accuracy went from 0.62 to 0.58" — converts a fluent storyteller into something with feedback. This transfers to any LLM-as-critic setup, not just skills.
+- **Make your text artifact addressable.** You cannot prune prose. If your system prompt, tool documentation, or memory store is one blob, no audit mechanism can attach to it. Store it as enumerated units with stable IDs from day one, even if you never audit them — this is a cheap structural decision with a large option value.
+- **Leave-one-out ablation as a control signal, not a paper table.** Removing one chunk and re-running with a frozen model is a general credit-assignment primitive. It applies to RAG chunks, few-shot exemplars, tool descriptions, and system prompt sections. Budget it: it's O(units) runs, so sample units or run it on a schedule rather than every round.
+- **A demotion tier beats binary keep/delete.** Moving low-utility units to an archive that can be recalled later is strictly safer than deletion when your utility estimates are noisy — and with batch-level accuracy deltas on a handful of tasks, they are very noisy. This is a good default for any lossy-compression-of-knowledge problem.
+- **The framing itself**: any self-improving text system needs an explicit complexity penalty and a dedicated contraction operator, or it will monotonically bloat. That's a design rule you can carry into agent memory, documentation maintenance, and prompt libraries regardless of whether you adopt this paper's specific machinery.
+:::
+
+:::zh
+**论文**: [2608.07449](https://arxiv.org/abs/2608.07449)
+**作者**: Mingxuan Zheng, Yujin Zhou, Chuxue Cao, Boqin Yin, Yuyao Zhang, Jiapeng Sun, Shuaishuai Gong, Sirui Han, Yike Guo
+**分类**: cs.AI, cs.CL
+
+## 缺口
+
+"不动权重也能变强的智能体"目前的主流路线是文本空间自我改进：维护一份会被载入上下文的文本产物（叫技能、剧本、备忘单、记忆都行）。
+智能体跑任务、失败、让 LLM 诊断原因，诊断结论转化为对这份文本的一次编辑。
+TextGrad 式的"文本梯度"、Reflexion 式的言语强化、ExpeL、Voyager 的技能库、Dynamic Cheatsheet，以及最近这一波上下文工程的工作，全都在这条线上。
+
+这个循环里有两处悄悄坏掉的地方。
+
+第一，环是开的。
+诊断器说"你失败是因为忘了统一单位"，编辑照做，然后流水线就走向下一批任务了。
+没有人回头检查这次编辑到底有没有让智能体在它本该修好的那些任务上变好。
+于是坏编辑一直留着；更糟的是，诊断器永远不知道自己哪些诊断是对的——它持续产出听起来很有道理的因果故事，反馈信号为零。
+
+第二，删除是二等公民。
+现有框架把"改文本"暴露成一个操作，删掉一行只是改文本的一种方式而已。
+实际后果是文本产物单调膨胀：冗余规则、针对某个任务过拟合的土办法、乃至纯粹有害的指令，都会堆积下来，因为从来没有人单独衡量过某一条的贡献。
+上下文窗口变成垃圾填埋场，检索和注意力一起劣化。
+
+SkillProx 的主张是：这两个洞其实是同一个洞的两个侧面，而凸优化里的近端梯度（proximal gradient）模板刚好给出了填补它们的正确形状。
+
+```
+PROBLEM: 文本空间的技能进化既会漂移，也会膨胀
+   |
+   +-- 已有工作: 诊断 -> 编辑 -> 往下走   (开环, 不验证)
+   +-- 已有工作: 删除 == 又一次普通编辑   (没有专门的收缩步)
+   |
+   v
+ASSUMPTION: 技能质量 ~ 任务损失 + lambda * 技能复杂度
+   且任一次编辑 / 任一条知识的价值,
+   都可以用"冻结智能体 + 重跑"来测量
+   |
+   v
+METHOD: forward  = 诊断, 编辑, 在同一批任务上重跑,
+                   退步就回滚, 把结果写回下一次诊断
+        backward = 拆成知识单元, 留一法效用审计,
+                   验证集门控下的 合并 / 降级 / 删除
+   |
+   v
+EVIDENCE: 相比最强的梯度式基线, 平均准确率 +3.0 个百分点;
+          分布内与分布外; 多个骨干模型;
+          消融显示两个阶段互补
+   |
+   v
+CONCLUSION: 被测量过的编辑 + 一等公民地位的删除,
+            胜过一堆更长但从未审计的文本
+```
+
+## 增量
+
+**一句话**: 以前技能产物靠未经验证的 LLM 编辑单调长胖；现在每次编辑必须在它声称要修的那批任务上重跑并活下来，每条留下的知识必须在留一法审计中为自己的存在付账。
+
+### 核心机制
+
+框架取自近端梯度下降。
+在凸优化里，当你要最小化 `光滑损失(x) + lambda * 复杂度惩罚(x)` 时，你交替执行：先对光滑那部分走一步梯度，再作用一个近端算子把结果往"简单"拉回去（对 L1 惩罚，这个算子就是软阈值——它字面意义上把小分量归零）。
+SkillProx 把这套搬到文本上。
+前向阶段是梯度步：诊断驱动的编辑，目标是降低任务损失。
+后向阶段是近端算子：收缩产物，把那些实测贡献接近零或为负的"分量"（知识单元）归零。
+
+前向阶段最有辨识度的动作，是在**同一批**任务上重跑。
+用技能 `S` 跑一遍，记下分数；诊断、提出编辑、应用得到 `S'`，再用完全相同的那批任务跑第二遍。
+分数掉了就回滚，编辑作废。
+无论采纳还是回滚，实测结果（"你针对单位归一化失败提出的修补，把准确率从 0.62 变成了 0.58"）都会写回下一次诊断的上下文。
+这一下就把诊断器从一次性的评论员，变成了某种带奖励信号的学习者：它能看见自己哪些假设兑现了。
+
+后向阶段做的是产物内部的信用分配。
+技能被拆解为可审计的知识单元——离散、可单独定位的断言或流程，而不是一坨连续散文。
+然后冻结执行器（同一个模型、同样的解码参数、其他一切不变），一次移除一个单元，重跑那批任务。
+准确率的差值就是这个单元的估计效用。
+高效用的保留；接近零的被合并进兄弟单元，或降级进归档层，而不是硬删；负效用的直接移除。
+最后，整个瘦身后的产物还要过一道验证门：如果压缩后的技能在留出验证集上更差，这次压缩就被拒绝。
+这道门是整个收缩步不至于沦为"花式删掉有用知识"的关键。
+
+```
+    任务批 B                         技能 S_t = 单元 u1..un
+         |                                    |
+         +-------------------+----------------+
+                             v
+             [ FORWARD : 那个 "梯度步" ]
+
+    run agent(S_t, B) --------------------> score_0
+         |
+         v
+    诊断失败 ---> 提出编辑 e
+         |
+         v
+    S' = apply(e, S_t) ;  重跑 agent(S', B) --> score_1
+         |
+         +--- score_1 > score_0 ? ---- yes ---> 采纳 S'
+         |                       |
+         |                       +---- no ----> 回滚到 S_t
+         |                                          |
+         +------------> 结果记录 <------------------+
+                             |
+              (喂给"下一次"诊断 == 闭环)
+                             v
+             [ BACKWARD : "近端" / 收缩步 ]
+
+    拆解:   [u1] [u2] [u3] [u4] [u5] ... [un]
+              |    |    |    |    |
+              v    v    v    v    v
+    冻结执行器, 留一法重跑:
+        util(ui) = score(S) - score(去掉 ui 的 S)
+              |
+      +-------+--------+-------------+
+      v                v             v
+   效用高           效用 ~ 0      效用 < 0
+    KEEP           合并 或 降级      删除
+      |                |             |
+      +-------+--------+-------------+
+              v
+    验证门控: 只有留出分数没变差, 才接受瘦身版
+              v
+            S_t+1
+```
+
+下面是承重的核喻：**一份航空检查单，和它的两个审查委员会。**
+
+技能产物就是驾驶舱检查单。
+每个知识单元是检查单上的一行。
+任务批是一组模拟机场景。
+
+**事故调查委员会**对应前向阶段。
+模拟机里坠机之后，调查员写下原因（"机组没有交叉核对高度表"），并在检查单上加一行。
+在今天的方法里，故事到这儿就结束了——新行上线，委员会转向下一起事故。
+SkillProx 强迫这个委员会拿修订后的检查单，把完全相同的那批场景**再飞一遍**。
+如果坠机率上升了——也许那多出来的一行把某个关键项挤出了飞行员的注意力——这条修订就被从记录里划掉。
+更关键的是，委员会在写下一条修订之前，会被告知上一条修订的实测结果，于是它不再反复提出那类从来没管用过的修补。
+
+**检查单卫生委员会**对应后向阶段。
+检查单会膨胀：每起事故加一行，从来没有谁减一行，直到飞行员开始跳读。
+所以这个委员会把每一行盖住，用**同一个飞行员**（冻结执行器——你不许换一个更好的飞行员，否则测量就没有意义了）把场景重飞一遍。
+盖住之后毫无变化的行，被并进相邻条目或挪进参考附录，而不是撕掉。
+盖住之后安全性**变好**的行，直接删除——它本来就在误导人。
+瘦身后的检查单也不会立刻投入使用，它得先在委员会做瘦身时**没用过**的场景上通过一次认证飞行。
+
+把这个故事讲给别人听，他能自己把这篇论文重建出来。
+"近端梯度"这套词汇，只是数学家对"事故委员会 + 卫生委员会"的另一种叫法。
+
+### 关键概念
+
+- **近端梯度下降（去掉数学）**: 假设你想要一个既拟合数据、又简单的模型。
+你写下一个总分：误差 + 规模惩罚。
+但你不直接去优化这团东西，而是把工作拆开。
+第一步：只管改善拟合，不管规模。
+第二步：施加一个固定的收缩规则，把所有值往零拉，并把足够小的值直接掐成零。
+重复。
+LASSO 就是这样得到稀疏解的。
+关键性质在于，收缩这一步是**独立的、专门的操作**，而不是指望拟合那一步顺手帮你做掉。
+SkillProx 的全部论点就是：已有工作只有第一步，却指望稀疏性从一个泛化的"你也可以删文本"的许可里自己长出来。
+它长不出来。
+但要说清楚：文本编辑不是梯度，这里也不存在任何形式意义上的近端算子，所以这是一个设计模板，不是定理。
+
+- **冻结执行器下的留一法效用审计**: 你怎么知道提示词第 7 行对得起它占的 token？
+删掉它，用同一个模型、同一个温度跑同一批任务，看准确率怎么变。
+没变，这行就是装饰。
+准确率**升了**，这行一直在害你。
+这本质就是消融实验，只不过被下放到"活着的产物里的单条陈述"这个粒度，并且被当作控制信号而不是论文里的一张表。
+"冻结"是承重词：如果两次测量之间执行器变了，你就没法把差值归因到那一行。
+代价是显而易见的问题——审计 `n` 个单元意味着 `n` 次额外的批次重跑。
+
+- **闭环诊断**: 一个开完处方就再也见不到病人的医生，会永远自信、流畅、错误地开下去。
+让 LLM 回答"这条轨迹为什么失败"，它会产出通顺的因果故事；而通顺程度和正确性无关。
+把上一次编辑的实测结果塞回下一次诊断的提示里，是最便宜的修补：诊断器现在的上下文里有了关于自己战绩的证据。
+不是梯度下降，不是强化学习——只是拒绝让评论员在没有记分牌的情况下上班。
+
+## 框架转变
+
+```
+之前（主流方法）：                       之后（本文方法）：
+
+  +-------------------+                 +-------------------+
+  |   跑一批任务      |                 |   跑一批任务      |
+  +-------------------+                 +-------------------+
+          |                                     |
+          v                                     v
+  +-------------------+                 +-------------------+
+  |   LLM 诊断        |                 |   LLM 诊断        |<--+
+  +-------------------+                 |  (能看到上一次    |   |
+          |                             |   编辑的结果)     |   |
+          v                             +-------------------+   |
+  +-------------------+                         |               |
+  |   应用文本编辑    |                         v               |
+  |  (删除只是众多    |                 +-------------------+   |
+  |   编辑中的一种)   |                 | 应用编辑, 同批重跑|   |
+  +-------------------+                 +-------------------+   |
+          |                                 |          |        |
+          v                             变差|          |变好    |
+  +-------------------+                      v          v       |
+  |   下一批任务      |                   回滚       采纳       |
+  +-------------------+                      |          |        |
+                                             +----+-----+--------+
+  技能随时间：                                    v
+  [u1]                                  +-------------------+
+  [u1][u2]                              |    收缩步         |
+  [u1][u2][u3]                          |  留一法审计每个   |
+  [u1][u2][u3][u4]                      |  单元, 合并/降级/ |
+  [u1][u2][u3][u4][u5] ...              |  删除, 验证门控   |
+                                        +-------------------+
+  单调增长, 没有任何一条                          v
+  被单独测量过                          技能随时间：
+                                        [u1][u2][u3][u4][u5]
+                                        [u1][u2+u4][u5]
+                                        [u1][u2+u4][u5][u6]
+                                        [u1][u2+u4+u6]
+                                        (归档: u3, u7)
+
+                                        能长也能缩,
+                                        每条都被标了价
+```
+
+一句话：从**累积文本**到**维护一个被测量过的文本组合**，核心转变是写入和删除现在都需要一张收据——一次重跑批次上观测到的准确率差值。
+
+## 专家评审
+
+先交代校准：我手上只有摘要，所以关于实验细节的判断是"这类设置通常长什么样"的推断，不是我核过表格之后的结论。
+
+**选题眼光**: 真缺口，而且在一个拥挤的街区里选得不错。
+上下文/技能工程在 2025 年一路爆发——备忘单、剧本、agentic context engineering、演化提示库——而这些工作几乎全都带着本文点出的那两个病。
+"这些系统没有任何**收缩**机制"这个观察是对的，而且对整个领域来说有点尴尬：我们花了十年内化"参数空间里正则化不是可选项"，然后在文本空间里重建了同一个优化器，却没带惩罚项。
+把删除命名为一等算子而不是一种编辑类型，是这篇论文最锋利的贡献。
+但要说清楚，单看每个配料都不新：接受即改进的爬山、回滚、基于消融的信用分配、验证集门控，都是标准件。
+这是一次细致的组装，不是一个新想法。
+
+**方法成熟度**: 巧劲的组装，外面套了一件理论戏服。
+近端梯度的框架确实在组织设计——它告诉你**为什么**需要一个独立的收缩步——但这里没有度量空间、没有算子、没有收敛性主张，而且那个复杂度权重 `lambda` 几乎肯定没有任何有原则的设定方式。
+读者应该把"proximal-gradient-inspired"理解成架构图，不是保证。
+真正让我在意的成本是算力：前向阶段让每次编辑的执行次数翻倍（跑、改、再跑），后向阶段大致每个知识单元加一次批次重跑。
+一个有 40 个单元的产物，一轮审计就是 40 次批次重跑。
+相对那些"改完就走"的基线，这是相当可观的倍数。
+我想看到被排除掉的更简单方案：(a) 纯爬山 + 回滚、完全不做审计——那 3.0 个百分点里有多少只是"别留下有害的编辑"带来的？
+(b) 给技能设一个硬 token 预算，让 LLM 在预算内重写；
+(c) 按使用频次剪枝，相比留一法几乎免费。
+消融据说覆盖了两个阶段，但"闭环 vs 开环"和"留一法审计 vs 廉价启发式剪枝"是两个不同的问题。
+
+**实验诚意**: 一个诚实的信号是，相比最强梯度式基线 +3.0 个百分点，这是个温和、可信的数字——没人编数据会编出 3.0。
+纳入分布外评测和多个骨干模型是对的直觉，因为文本空间技能方法出了名地容易对调优批次过拟合。
+三点我会重点盯。
+一是方差：这类流水线对随机种子极其敏感，单次 LLM 编辑就能把一批任务的分数掀翻，没有多种子误差棒的 3.0 个百分点是脆弱的。
+二是算力对齐：如果基线没有拿到同等的 LLM 调用次数，SkillProx 的一部分收益是用预算买来的，诚实的比较应该是"每次调用换到多少准确率"。
+三是那道验证门——如果多轮合并共用同一个留出集做门控，它已经被反复优化过了，"留出"就只是名义上的。
+另外，跨基准的"平均准确率"可以藏住单个基准上的退步，而这对一个以"不退步"为卖点的方法来说尤其要命。
+
+**写作功力**: 摘要写得克制，机制是可读的，这在这个方向上已经胜过多数论文。
+偷懒的地方在目标函数。
+"Motivated by a composite objective balancing task loss and skill complexity"这句话在挥手：这个目标从来没被优化过，它是一种氛围。
+我会重写的正是这一节：先把目标写清楚，再坦白说明算法的哪些部分是它有原则的实例化、哪些部分只是穿着数学符号的启发式。
+第二优先级是一张按成本归一化的结果表。
+一篇多花了这么多 LLM 调用、却不把准确率/算力权衡放在显眼处的论文，等于在邀请审稿人往最坏处想。
+
+**判决**: 弱接收 —— 机制本身（退步回滚 + 由审计驱动的专门删除）确实有用且被探索不足，但增益温和、理论框架是装饰性的，而摘要没有正面处理算力开销这头大象。
+
+## 要点总结
+
+值得"偷"走的具体东西，大致按性价比排序：
+
+- **每次编辑后在同一批任务上重跑，退步就回滚。**
+  这对任何提示词/剧本优化循环来说几乎是零成本的增补，而我打赌论文增益的大头就出自这里。
+  批次已经加载好了，边际成本就是多跑一遍。
+
+- **把上一次编辑的结果塞进下一次评论员提示里。**
+  如果你在用 LLM 诊断失败，它现在是在没有记分牌的情况下猜。
+  两行提示管道——"你上次的改动是 X，准确率从 0.62 变成 0.58"——就把一个流畅的说书人变成了带反馈的东西。
+  这可以迁移到任何 LLM-as-critic 的场景，不限于技能。
+
+- **让你的文本产物可寻址。**
+  散文是没法剪枝的。
+  如果你的系统提示、工具文档、记忆库是一坨整体，任何审计机制都无处挂载。
+  从第一天就把它存成带稳定 ID 的枚举单元，哪怕你永远不审计它们——这是一个廉价的结构决策，期权价值很高。
+
+- **把留一法消融当控制信号，而不是论文里的一张表。**
+  移除一个片段、用冻结模型重跑，是一个通用的信用分配原语。
+  它适用于 RAG 片段、few-shot 样例、工具描述、系统提示分段。
+  但要给它做预算：复杂度是 O(单元数) 次运行，所以采样单元或者按周期跑，别每轮都跑。
+
+- **降级层比"留/删"二选一更好。**
+  当效用估计有噪声时，把低效用单元移到一个日后可召回的归档区，严格比删除更安全——而基于几个任务的批次级准确率差值，估计噪声非常大。
+  这对任何"知识的有损压缩"问题都是个好默认值。
+
+- **框架本身**: 任何自我改进的文本系统都需要一个显式的复杂度惩罚和一个专门的收缩算子，否则它一定单调膨胀。
+  无论你是否采用本文的具体机械装置，这条设计准则都能带进智能体记忆、文档维护和提示库管理。
+:::
