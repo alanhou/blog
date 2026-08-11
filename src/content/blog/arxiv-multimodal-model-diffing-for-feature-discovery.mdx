@@ -1,0 +1,353 @@
+---
+title:
+  en: "MMDiff: Diffing SAEs to Find (and Flip) the Features Multimodal Training Added"
+  zh: "MMDiff：用 SAE 对比找出多模态训练新增的特征，并直接操控它"
+description:
+  en: "MMDiff trains sparse autoencoders on both a base LM and its multimodal-adapted version, diffs the dictionaries to isolate features created by multimodal training, then ablates or steers them to control spatial reasoning, OCR, and jailbreak susceptibility."
+  zh: "MMDiff 在基础语言模型和其多模态版本上分别训练稀疏自编码器，通过对比字典定位多模态训练新增的特征，再通过消融或引导来控制空间推理、OCR 与越狱敏感性。"
+date: 2026-08-11
+tags: ["arxiv", "ai", "cs.ai", "cs.cl", "cs.cv", "cs.lg"]
+image: "/arxiv-visuals/arxiv-multimodal-model-diffing-for-feature-discovery.png"
+---
+:::en
+**Paper**: [2608.09928](https://arxiv.org/abs/2608.09928)
+**Authors**: Hunar Batra, Lachin Naghashyar, Ashkan Khakzar, Philip Torr, Christian Schroeder de Witt, Constantin Venhoff, Ronald Clark
+**Categories**: cs.AI, cs.CL, cs.CV, cs.LG
+
+## The Gap
+
+Sparse autoencoders have become the default tool for pulling interpretable directions out of a language model's residual stream. Train an SAE on activations, get a dictionary of sparse features, browse the max-activating examples, write a label. That pipeline works, and people have applied it to multimodal models too — train an SAE on a VLM, find "features that fire on text in images" or "features about left/right."
+
+Two things it does not give you. First, it does not tell you which of those features are *new*. An MLLM is almost always a language model plus a vision encoder plus adaptation training. When you find a spatial feature in LLaVA, you do not know whether the base LM already had it and the projector merely learned to address it, or whether multimodal training built it. That distinction matters if your question is "what did this fine-tune actually change, and what did it break?" Model diffing work in the text-only setting (crosscoders between base and chat models) asks exactly this question, but the multimodal version has been mostly unexamined.
+
+Second, browsing max-activating examples is descriptive, not causal. A feature that lights up on OCR-ish tokens might be a bystander. And the control literature has largely gone a different route: activation steering with a single contrast-derived vector injected at one layer (CAA, ITI, refusal directions). That is coarse — one direction, one layer, tuned by hand — and it lives disconnected from the interpretability pipeline that produced the feature labels in the first place.
+
+MMDiff tries to close both gaps with one pipeline: diff to localize, contrast to establish causality, then intervene at the feature level.
+
+```
+[Problem] MLLM visual behaviors are opaque.
+   |      SAEs give features but do not say which ones
+   v      multimodal training created and are not control knobs.
+[Assumption] Multimodal adaptation writes its changes into a
+   |         small number of feature directions that survive
+   v         being read out by a sparse dictionary.
+[Method] MMDiff = SAE(base LM) vs SAE(MLLM) diff
+   |            + per token contrastive firing analysis
+   v            + ablate or steer the surviving features
+[Evidence] ablation: -12% spatial . -17% OCR . -24% attack success
+   |        VQA control flat . steering +3.6% / +1.8% over
+   v        single layer steering baseline . 3 model families
+[Conclusion] The features multimodal training adds are sparse
+             causally specific and directly steerable.
+```
+
+## The Increment
+
+**One sentence**: Before, an SAE on an MLLM was a browsing interface over an undifferentiated feature soup; after, it is a diff plus a switchboard — you can say **this* feature came from multimodal training, *this* one causes the OCR behavior, and here is what happens when I turn it off.
+
+### Core Mechanism
+
+Three stages, and the ordering is the whole idea. Stage one is isolation by subtraction. Train an SAE on residual-stream activations of the base language model, train one on the multimodal-adapted model, and compare the two dictionaries. Features present in both are inherited language-model machinery; features that appear only in the multimodal dictionary (or whose behavior shifts substantially) are the candidates attributable to multimodal training. This cuts the search space from tens of thousands of features to a manageable candidate pool without running a single intervention.
+
+Stage two is causal narrowing by contrast. For a target behavior — say, spatial relations — build two prompt sets that differ in whether the behavior is required, then measure per-token firing rates across the candidate pool. Per-token, not per-sequence, matters here: the firing that carries OCR or spatial content is concentrated on a few token positions (the image patch tokens, the relation word), and sequence-averaged statistics wash it out. What survives is a small set that fires differentially exactly where the behavior is being computed.
+
+Stage three is intervention, in both directions. Clamp the surviving features to zero and measure whether the target task degrades while a control task (general VQA) holds. Or add the feature directions back with positive coefficients — across layers rather than at one hand-picked layer — and measure whether the target task improves. The bidirectional test is what upgrades the claim from correlation to causal specificity: removal must hurt the target and spare the control, addition must help.
+
+```
+ image + text
+      |
+      v
+ +--------------------------+
+ |  residual stream acts    |  layer L
+ +--------------------------+
+      |                        \
+      | (A) SAE on MLLM acts     (B) SAE on base LM acts
+      v                            v
+   [ D_mm ]                     [ D_base ]
+      \                            /
+       \_________  diff  _________/
+                   |
+                   v
+      candidate multimodal only features
+                   |
+        per token contrastive firing
+        prompts_need_task  vs  prompts_no_task
+                   |
+                   v
+           causal feature set F*
+             /              \
+       ablate F*            steer +F*
+     (clamp to zero)      (add across layers)
+            |                    |
+            v                    v
+   target task drops       target task improves
+   VQA control flat        over single layer baseline
+```
+
+Think of an electrician handed a house that has been renovated. The SAE is the breaker panel: the wall wiring is a hopeless tangle of overlapping currents, and the panel's job is to expose it as a set of labeled, individually switchable circuits. Now the renovation question. The electrician has the pre-renovation panel photo (base-LM SAE) and the current panel (multimodal SAE). Comparing them tells you which breakers the contractors added — that is the diff, and it is why you do not have to test all eighty breakers. Next, causality: labels on breaker panels lie. So you run one appliance at a time and watch the ammeter on each new circuit — the dishwasher draws on breaker 14, not on 12, even though 12 is labeled "kitchen." That is per-token contrastive firing: run spatial prompts, see which candidate circuits actually draw current, and at which moment. Finally, verification and use. Flip breaker 14 off: the dishwasher dies and the lights stay on — that is selective ablation with the VQA control. Or upgrade the service on that circuit at several points in the run rather than only at the panel — that is multi-layer steering, and it is why it beats injecting one vector at one layer, the electrical equivalent of only ever touching the main breaker.
+
+### Key Concepts
+
+- **Sparse autoencoder (SAE)**: A model's internal state at a given layer is one long vector of numbers, and each number is a mush of many unrelated things at once — this is superposition. An SAE is trained to re-express that vector as a sum of a **few* items drawn from a large catalogue: instead of "3000 numbers all slightly on," you get "features 41, 902, and 7715 are on, everything else is off." The catalogue entries tend to be human-nameable ("this is a street sign," "this is a comparison of two positions"). The catch: nothing forces two independently trained SAEs to use the same catalogue ordering or the same decomposition, which is exactly the difficulty that makes diffing two of them nontrivial.
+- **Model diffing**: Rather than asking "what does this model know," ask "what did this training stage change." You have a before-checkpoint and an after-checkpoint; you want the delta expressed in interpretable units rather than in raw weight differences. It is a change-of-state audit. Applied here: multimodal adaptation is the training stage, and the delta is the set of features that vision brought into existence.
+- **Feature-level control vs activation steering**: Classic steering computes one direction (average activation on "safe" prompts minus "unsafe" prompts), then adds it at one layer with a scaling knob. Feature-level control instead uses directions that came out of the dictionary — units the pipeline has already labeled and causally tested — and can act on several of them at multiple layers. The difference is between nudging the whole vehicle sideways and adjusting the specific control you identified as responsible.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+  MLLM acts                             base LM acts    MLLM acts
+     |                                      |               |
+     v                                      v               v
+  [ one SAE ]                           [ SAE_base ]   [ SAE_mm ]
+     |                                      \_____ diff ____/
+     v                                              |
+  browse max activating                             v
+  examples . write labels                 candidates from
+     |                                    multimodal training
+     v                                              |
+  (separate track)                        per token contrast
+  one contrast vector                               |
+  injected at one layer                             v
+     |                                      causal feature set
+     v                                          /        \
+  behavior shifts . unclear                 ablate      steer
+  which unit did it                        (control    (multi
+                                            task flat)  layer)
+```
+
+From "read the features, then separately steer the model" to "subtract to localize, contrast to prove, then intervene on the same units you localized" — the core shift is making interpretation and control share one object.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, and well-placed in the trajectory. Text-only model diffing became a live subfield once people wanted to audit what RLHF changed; nobody had run the equivalent for multimodal adaptation, which is arguably a more dramatic intervention on a base model than chat tuning is. The safety angle is the sharpest instance: multimodal jailbreaks work because vision-side pathways bypass text-side refusal machinery, and "which features did vision training add that the safety training never saw" is close to the right question. This is not a manufactured gap.
+
+**Method maturity**: Compositional rather than inventive. Every component exists — SAEs, checkpoint diffing, contrastive activation analysis, ablation, steering. The contribution is the ordering: use the cheap diff as a filter so the expensive causal testing has a small candidate set. That is a good instinct and it generalizes. But it also means the paper's validity rests on the shakiest joint: comparing two independently trained sparse dictionaries. SAE dictionaries are not identifiable up to a fixed basis; two SAEs on the **same* activations will produce different, partially split features. Crosscoders exist precisely to sidestep this. If MMDiff initializes the multimodal SAE from the base SAE, or matches features by decoder cosine similarity with a validated threshold, the diff is defensible; if it does a naive dictionary comparison, some fraction of the "multimodal-only" features are artifacts of retraining noise. I cannot confirm which from the abstract, and this is the first thing I would look for in the paper.
+
+**Experimental integrity**: The shape of the evidence is right — three model families is real breadth, and pairing degradation on the target with a flat control task is the correct design. Two reservations. First, general VQA is a weak specificity control: a lot of VQA is answerable from coarse scene gist, so it can survive damage to spatial or OCR circuits without that proving much. A broader suite (MMBench, a text-only benchmark to check the LM was not dented, an over-refusal check alongside the ASR drop) would carry far more weight. Second, the steering gains are small: +3.6% and +1.8% over a single-layer baseline. Single-layer steering is a soft comparator, and part of the delta may simply be that MMDiff touches more layers rather than that it touches better directions — a multi-layer version of the naive baseline is the missing ablation. The ablation results (-12%, -17%, -24%) are the stronger half of the paper because selective damage is harder to fake than a two-point accuracy gain. Also absent from the abstract: random-feature and matched-non-diff-feature ablation controls, which are what separate "we found the causal features" from "clamping any dozen active features hurts."
+
+**Writing quality**: The abstract is doing marketing work — "three uses" framing suggests breadth was prioritized over depth, and three behaviors across three model families in one paper usually means each cell gets a paragraph. The section that would most elevate the paper is a validity analysis for the diff itself: how features were matched across dictionaries, what the false-positive rate looks like under a null (two SAEs on the same model, different seeds), and how much of the discovered set survives that null. That single section would convert the paper's central move from plausible to established.
+
+**Verdict**: weak accept — genuinely useful pipeline framing with the right bidirectional causal test, held back by a fragile core assumption about cross-SAE comparability and steering gains too small to carry the "control" half of the title.
+
+## Takeaways
+
+- **Diff as a search-space filter, not a result.** The reusable pattern is not the diff itself but its role: use a cheap between-checkpoint delta to shrink the candidate set before expensive causal testing. This transfers to any fine-tuning audit — LoRA adapters, domain post-training, RLHF stages, safety patches. Ask "what changed" first so you only run interventions on the changed part.
+- **Contrast at token granularity.** Sequence-averaged activation statistics hide behaviors that are computed at a few positions. If you have ever gotten a null result from a contrastive-activation analysis, try it per-token before concluding the feature is not there.
+- **Two-sided causal claims.** Ablation that degrades the target **plus* a control task that stays flat *plus* steering that improves the target. Any one of those alone is weak evidence. Cheap to add, and it is what distinguishes this from feature-browsing papers.
+- **Steer at multiple layers.** The single-layer-injection convention in the steering literature looks like a historical accident rather than an optimum. Spreading the intervention across layers is nearly free to try.
+- **Reframe multimodal jailbreaks as feature-level, not prompt-level.** If the vision pathway added features that safety training never constrained, then patching prompts is downstream of the actual problem. That framing is worth borrowing even if you never touch an SAE.
+- **What not to borrow uncritically**: comparing two independently trained SAEs. If you build on this, tie the dictionaries together (shared init, crosscoder, or validated matching) and run a same-model different-seed null before believing any "new feature."
+:::
+
+:::zh
+**论文**: [2608.09928](https://arxiv.org/abs/2608.09928)
+**作者**: Hunar Batra, Lachin Naghashyar, Ashkan Khakzar, Philip Torr, Christian Schroeder de Witt, Constantin Venhoff, Ronald Clark
+**分类**: cs.AI, cs.CL, cs.CV, cs.LG
+
+## 缺口
+
+稀疏自编码器（SAE）已经成了从语言模型残差流里提取可解释方向的默认工具。
+在激活上训练一个 SAE，得到一本特征字典，翻一遍最大激活样例，给每个特征起个名字。
+这套流程能跑通，也已经被搬到多模态模型上——在 VLM 上训个 SAE，就能找到"对图中文字放电的特征""关于左右方位的特征"。
+
+但它有两件事做不到。
+
+第一，它不告诉你哪些特征是**新的**。
+一个 MLLM 基本都是"语言模型 + 视觉编码器 + 适配训练"拼出来的。
+你在 LLaVA 里找到一个空间特征，无法判断是基础语言模型本来就有、只是投影层学会了去寻址它，还是多模态训练真的造出了这个特征。
+如果你的问题是"这次微调到底改了什么、又弄坏了什么"，这个区分就是全部。
+纯文本场景下的 model diffing（用 crosscoder 对比 base 和 chat 模型）问的正是这个问题，但多模态版本几乎没人做。
+
+第二，翻最大激活样例是描述性的，不是因果性的。
+一个在 OCR 相关 token 上亮起来的特征，完全可能只是旁观者。
+而控制这条线的文献走的是另一条路：用单个对比向量在单层做激活引导（CAA、ITI、refusal direction）。
+这很粗——一个方向、一层、手调系数——而且它跟产出特征标签的那套可解释性流程是脱节的。
+
+MMDiff 想用一条流水线同时补这两个洞：先做差以定位，再做对比以确立因果，最后在特征层面干预。
+
+```
+[问题] MLLM 的视觉行为不透明。
+   |    SAE 给出特征但不说哪些是多模态训练造的
+   v    也不能直接当控制旋钮用。
+[假设] 多模态适配把它的改动写进了少数几个
+   |    特征方向里 而且这些方向能被稀疏字典读出来。
+   v
+[方法] MMDiff = SAE(base LM) 与 SAE(MLLM) 做差
+   |          + 逐 token 对比放电分析
+   v          + 对存活特征做消融或引导
+[证据] 消融: 空间 -12% . OCR -17% . 攻击成功率 -24%
+   |     VQA 对照组不变 . 引导相对单层基线 +3.6% / +1.8%
+   v     3 个模型家族
+[结论] 多模态训练新增的特征是稀疏的
+       有因果特异性的 且可直接引导的。
+```
+
+## 增量
+
+**一句话**：以前 MLLM 上的 SAE 只是一个面向"特征浓汤"的浏览器；现在它是一份差异清单加一块配电盘——你能说出这个特征来自多模态训练、那个特征导致了 OCR 行为，以及关掉它会发生什么。
+
+### 核心机制
+
+三个阶段，顺序本身就是全部创意。
+
+第一阶段：用减法做隔离。
+在基础语言模型的残差流激活上训一个 SAE，在多模态模型上再训一个，然后比较两本字典。
+两边都有的特征是继承下来的语言模型机件；只在多模态字典里出现（或者行为发生显著漂移）的特征，才是可归因于多模态训练的候选。
+这一步把搜索空间从几万个特征压到一个可处理的候选池，而且一次干预都还没做。
+
+第二阶段：用对比做因果收窄。
+针对某个目标行为——比如空间关系——构造两组只在"是否需要该行为"上有差别的 prompt，然后在候选池上测逐 token 的放电率。
+这里"逐 token 而非逐序列"很关键：承载 OCR 或空间内容的放电集中在少数 token 位置（图像 patch token、关系词），序列级平均会把它冲淡。
+活下来的是一小组特征：它们恰好在该行为被计算的位置上出现差异性放电。
+
+第三阶段：双向干预。
+把存活特征钳到零，看目标任务是否退化、而对照任务（通用 VQA）是否稳住。
+或者把这些特征方向以正系数加回去——而且是跨多层加，不是在手挑的某一层加——看目标任务是否提升。
+这个双向测试才是把"相关"升级成"因果特异性"的关键：删掉必须伤到目标且不伤对照，加上必须有帮助。
+
+```
+ 图像 + 文本
+      |
+      v
+ +--------------------------+
+ |     残差流激活           |  第 L 层
+ +--------------------------+
+      |                        \
+      | (A) 在 MLLM 激活上训 SAE  (B) 在 base LM 激活上训 SAE
+      v                            v
+   [ D_mm ]                     [ D_base ]
+      \                            /
+       \_______  做差 diff _______/
+                   |
+                   v
+        仅多模态侧存在的候选特征
+                   |
+          逐 token 对比放电
+      prompts_need_task vs prompts_no_task
+                   |
+                   v
+            因果特征集 F*
+             /              \
+       消融 F*              引导 +F*
+     (钳位到零)            (跨层相加)
+            |                    |
+            v                    v
+     目标任务下降          目标任务提升
+     VQA 对照持平          优于单层引导基线
+```
+
+用一个承重的比喻：一位电工接手一栋刚装修过的房子。
+
+SAE 就是**配电盘**。
+墙里的线路是一团相互叠加的电流，无从下手；配电盘的作用就是把它呈现为一组带标签、可单独开合的回路。
+
+然后是装修问题。
+电工手上有装修前的配电盘照片（base-LM SAE）和现在的配电盘（多模态 SAE）。
+两者一对比，就知道施工队新加了哪几路——这就是 diff，也正是他为什么不必把八十路全测一遍。
+
+接着是因果。
+配电盘上的标签是会骗人的。
+所以电工一次只开一台电器，同时在每一路新回路上看电流表——洗碗机拉的是 14 路，不是 12 路，尽管 12 路上写着"厨房"。
+这就是逐 token 对比放电：跑空间类 prompt，看哪些候选回路真的过电、在什么时刻过电。
+
+最后是验证与使用。
+拉下 14 路：洗碗机停了、灯还亮着——这就是带 VQA 对照的选择性消融。
+或者不只在总盘上、而是在线路的多个点位上加大供给——这就是多层引导，也是它为什么能打败"只在单层注入一个向量"，后者相当于电工永远只碰总闸。
+
+### 关键概念
+
+- **稀疏自编码器（SAE）**：模型在某一层的内部状态是一长串数字，每个数字都同时糊着许多互不相关的东西——这叫叠加（superposition）。
+  SAE 被训练成把这个向量重写成从一本大目录里取出的**少数几项**之和：不再是"三千个数字都微微亮着"，而是"41 号、902 号、7715 号特征开着，其余全关"。
+  目录里的条目往往是人能命名的（"这是路牌""这是在比较两个位置"）。
+  麻烦在于：没有任何机制保证两次独立训练的 SAE 会用同样的目录编号、甚至同样的分解方式——而这恰恰是"对比两本字典"这件事的难点所在。
+- **模型做差（model diffing）**：不问"这个模型知道什么"，而问"这一阶段训练改了什么"。
+  你有一个 before 检查点和一个 after 检查点，你要的是用可解释单位表达的差量，而不是原始权重差。
+  本质上是一次状态变更审计。
+  用在这里：训练阶段是多模态适配，差量就是视觉带来的那批新特征。
+- **特征级控制 vs 激活引导**：经典引导先算一个方向（"安全"prompt 的平均激活减去"不安全"的），然后在某一层加上去，配一个缩放旋钮。
+  特征级控制用的是从字典里出来的方向——已经被流程标注过、也被因果检验过的单位——而且可以同时作用于多个方向、多个层。
+  差别相当于"把整辆车横向推一把"和"调整你已经确认负责这件事的那个具体操纵件"。
+
+## 框架转变
+
+```
+之前（主流方法）：                    之后（本文方法）：
+
+  MLLM 激活                          base LM 激活    MLLM 激活
+     |                                    |              |
+     v                                    v              v
+  [ 单个 SAE ]                        [ SAE_base ]   [ SAE_mm ]
+     |                                    \____ 做差 ____/
+     v                                            |
+  翻最大激活样例                                  v
+  写标签                                  多模态训练带来的
+     |                                        候选特征
+     v                                            |
+  (另一条独立轨道)                        逐 token 对比
+  一个对比向量                                    |
+  在某一层注入                                    v
+     |                                      因果特征集
+     v                                        /       \
+  行为发生偏移 但不知道                    消融      引导
+  是哪个单元起的作用                    (对照持平)  (跨层)
+```
+
+一句话：从"先读特征、再另外去引导模型"到"用减法定位、用对比证因果、再对同一批单位做干预"，核心转变是让解释与控制共用同一个对象。
+
+## 专家评审
+
+**选题眼光**：真缺口，位置也对。
+纯文本的 model diffing 之所以变成一个活跃方向，是因为大家想审计 RLHF 改了什么；而多模态适配对基础模型的改动幅度，可以说比 chat 微调更剧烈，却一直没人做对应的审计。
+安全那条线是最锋利的实例：多模态越狱之所以有效，是因为视觉侧通路绕开了文本侧的拒答机件，而"视觉训练新增了哪些安全训练从未见过的特征"非常接近正确的提问方式。
+这不是人造缺口。
+
+**方法成熟度**：是组合，不是发明。
+每个组件都已存在——SAE、检查点做差、对比激活分析、消融、引导。
+贡献在于顺序：用便宜的 diff 当过滤器，让昂贵的因果测试只面对一个小候选集。
+这个直觉是好的，也可以推广。
+但这同时意味着，整篇论文的效力压在最脆的那个关节上：对比两本独立训练的稀疏字典。
+SAE 字典在固定基底下并不可辨识；在**同一批**激活上训两个 SAE，也会得到不同的、部分被切分开的特征。
+crosscoder 的出现正是为了绕过这一点。
+如果 MMDiff 用 base SAE 初始化多模态 SAE，或者用 decoder 余弦相似度配对并验证了阈值，这个 diff 是站得住的；如果只是朴素比较字典，那么一部分"仅多模态特征"就是重训噪声的产物。
+从摘要看不出是哪种，这是我翻开正文第一个要找的东西。
+
+**实验诚意**：证据的形状是对的——三个模型家族是实打实的广度，把"目标任务退化"和"对照任务持平"配对也是正确设计。
+两点保留。
+一是通用 VQA 作为特异性对照偏弱：相当多 VQA 题靠粗略的场景要旨就能答对，所以它可以在空间或 OCR 回路被破坏后依然存活，这并不能证明太多。
+换成更宽的一套（MMBench、加一个纯文本基准确认语言模型本体没被伤到、在 ASR 下降旁边再放一个过度拒答检查）说服力会大得多。
+二是引导增益太小：相对单层基线 +3.6% 和 +1.8%。
+单层引导是个软对手，而这点差值里有多少只是因为 MMDiff 碰了更多层、而不是碰了更好的方向？缺的关键消融就是"朴素基线的多层版本"。
+消融那半（-12%、-17%、-24%）是更强的一半，因为"选择性损伤"比"两个点的准确率提升"更难伪造。
+摘要里同样缺席的是随机特征消融和"数量匹配的非 diff 特征"消融——正是它们把"我们找到了因果特征"和"随便钳掉十几个活跃特征都会掉分"区分开。
+
+**写作功力**：摘要在做营销。
+"支持三种用法"的框架说明作者优先选了广度而非深度，三种行为乘三个模型家族塞进一篇，通常意味着每个格子只能分到一段。
+最能把整篇论文抬升一档的，是给 diff 本身补一节效力分析：字典之间是怎么配对的、在零假设下（同一模型、不同随机种子训两个 SAE）假阳性率多高、发现的特征集在这个零假设下还剩多少。
+只要这一节，论文的核心动作就能从"看起来合理"变成"已被确立"。
+
+**判决**：弱接收 —— 流水线的框架确实有用、双向因果检验做对了，但核心假设（跨 SAE 可比性）不牢，引导增益也小到撑不起标题里的"control"那一半。
+
+## 要点总结
+
+- **把 diff 当搜索空间过滤器，而不是结论本身。**
+  可复用的不是"做差"这个动作，而是它的角色：先用一次便宜的检查点差量把候选集缩小，再上昂贵的因果测试。
+  这能迁移到任何微调审计——LoRA 适配器、领域后训练、RLHF 各阶段、安全补丁。
+  先问"改了什么"，这样你只需要对被改动的部分做干预。
+- **在 token 粒度上做对比。**
+  序列级平均的激活统计会掩盖只在少数位置计算的行为。
+  如果你的对比激活分析拿到过 null 结果，先换成逐 token 再下结论。
+- **因果主张要双面。**
+  消融让目标退化 + 对照任务持平 + 引导让目标提升。
+  三者任取其一都是弱证据。
+  补齐成本很低，而这正是它区别于"特征浏览"类论文的地方。
+- **在多层上做引导。**
+  引导文献里"只在单层注入"的惯例更像历史偶然而非最优解。
+  分散到多层几乎是零成本的尝试。
+- **把多模态越狱重新理解为特征层面的问题，而不是 prompt 层面的。**
+  如果视觉通路带来了安全训练从未约束过的特征，那么修 prompt 就是在下游打补丁。
+  这个视角值得借走，哪怕你永远不碰 SAE。
+- **不该照搬的：** 直接对比两本独立训练的 SAE。
+  如果你要在这上面继续做，请把两本字典绑起来（共享初始化、crosscoder，或经过验证的配对），并且在相信任何"新特征"之前先跑一遍"同模型不同种子"的零假设检验。
+:::
