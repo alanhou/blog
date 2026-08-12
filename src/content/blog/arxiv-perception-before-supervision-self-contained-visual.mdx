@@ -1,0 +1,427 @@
+---
+title:
+  en: "Teaching Itself to Look: How CVPD Turns a Model's Own Blind Spots Into Dense Supervision"
+  zh: "先看清，再学习：CVPD 如何把模型自己的视觉盲点变成密集监督信号"
+description:
+  en: "CVPD finds image regions a multimodal model can read but doesn't use, then distills the zoomed-in view back into the full-image view — no external teacher, no annotations, no reward model."
+  zh: "CVPD 找出那些模型「看得见却用不上」的图像区域，再把放大视图的分布蒸馏回全图视图——不需要外部教师、不需要标注、不需要奖励模型。"
+date: 2026-08-12
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-perception-before-supervision-self-contained-visual.png"
+---
+
+![Concept animation](/arxiv-visuals/perception-before-supervision-self-contained-visual/ConceptScene.gif)
+
+
+:::en
+**Paper**: [2608.09931](https://arxiv.org/abs/2608.09931)
+**Authors**: Shravan Venkatraman, Omkar Thawakar, Ritesh Thawkar, Abdelrahman Shaker, Rao Muhammad Anwer
+**Categories**: cs.CV
+
+## The Gap
+
+Self-improvement for multimodal LLMs has settled into two camps, and both have a supervision problem.
+
+The first camp is reward-based: sample rollouts, score them, reinforce the good ones. Self-rewarding pipelines, RLAIF variants, and the recent wave of R1-style visual RL all live here. The information content of the training signal is brutally thin — one scalar per trajectory, sometimes one bit. If a model writes a 200-token answer and gets back "wrong," it learns almost nothing about *where* it went wrong, let alone that the failure was perceptual rather than logical.
+
+The second camp is distillation, which is much richer — you get a full probability distribution over the vocabulary at every token position, which is thousands of times more informative per sample. But in the visual domain, distillation almost always needs *privileged context* that the student doesn't have. Chain-of-Spot-style methods need ground-truth boxes to know where to crop. Tool-augmented pipelines need SAM, a detector, or an OCR engine. The most common shortcut is just to call GPT-4o and treat its outputs as targets. In every case, the "self" in self-improvement is doing a lot of work it hasn't earned: the actual competence is being imported from outside.
+
+So the gap is specific: **can you get dense, token-level, on-policy visual supervision out of a model with nothing but the model itself?** CVPD's answer hinges on an observation that is obvious once stated — a vision encoder frequently encodes information that the decoder fails to condition on. The information is **present* but *unused*. If you can localize where that happens, you have found a free teacher hiding inside the student.
+
+```
+PROBLEM: self-improvement for MLLMs is supervision-starved
+    |
+    +-- reward-based RL ...... 1 scalar per rollout  == thin signal
+    +-- visual distillation .. dense token targets, but needs
+    |                          GT boxes / SAM / GPT-4o == not self-contained
+    v
+ASSUMPTION: the encoder already resolves more than the decoder uses
+            (information present, but not utilized under full-image
+             conditioning)
+    v
+METHOD: three-gate Counterfactual Criterion locates blind-spot regions
+        zoom(r) shifts AND sharpens the answer distribution
+        while mask(r) leaves full-image behavior unchanged
+    |
+    +-- convert to dense contrastive token-level targets
+    v
+EVIDENCE: Qwen3-VL-8B-Instruct, 12 benchmarks, 6 self-evolving baselines
+          +3.60 OCRBench / +3.38 MMStar fine-grained perception
+          +3.08 MMStar logical reasoning / zero regressions
+          beats baselines that consume GPT-4o supervision
+    v
+CONCLUSION: dense visual self-supervision does not require an external
+            teacher, only a disciplined way to interrogate your own model
+```
+
+## The Increment
+
+**One sentence**: Before this paper, dense token-level visual supervision required something outside the model (annotations, tools, or a stronger teacher); after it, you can manufacture that supervision from a self-detected contradiction between how the model behaves when you zoom into a region versus when you delete it.
+
+### Core Mechanism
+
+The pipeline runs three forward passes over the same question. One on the full image, giving a distribution `p_full`. One on a cropped-and-upscaled region, giving `p_zoom`. One on the image with that same region removed or occluded, giving `p_mask`. All three use the same frozen-in-that-moment weights — there is no second model anywhere in the system.
+
+The three-gate Counterfactual Criterion then asks three questions about a candidate region, and all three must pass. Gate one: does zooming *change* the answer distribution? If `p_zoom` and `p_full` are close, the region is irrelevant to this question and there's nothing to learn. Gate two: does zooming *sharpen* the distribution — lower entropy, more mass on a single answer? This is the filter that separates genuine information gain from mere distribution churn; a crop that makes the model differently confused is worthless as a teacher. Gate three is the clever one, and it runs in the opposite direction: does *removing* the region leave full-image behavior essentially unchanged? If deleting the region tanks the full-image answer, the model was already using it — nothing to fix. Only when zooming helps *and* deleting costs nothing do you have proof of a blind spot: the pixels carry answer-relevant signal, the encoder can resolve it when it fills the frame, and yet under full-image conditioning the decoder is ignoring it.
+
+Regions that clear all three gates get converted into supervision, not into a reward. The zoomed distribution becomes the teacher target. The full-image distribution is the student and receives gradients. And the masked distribution serves as an explicit negative — it is a concrete, sampled instance of "what your output looks like when you're blind to this region," so the objective pulls the student toward the magnified reading while pushing it away from the blind reading. That contrastive framing is what distinguishes CVPD from ordinary crop-based self-distillation. Because responses are resampled from the current policy each round, the whole thing stays on-policy: the blind spots being repaired are the blind spots the model has *right now*, not ones inherited from a static dataset.
+
+```
+  image I + question q
+        |
+        +-------------------+-------------------+
+        |                   |                   |
+   full view           zoom(I, r)          mask(I, r)
+   p_full(y)            p_zoom(y)           p_mask(y)
+        |                   |                   |
+        +--> GATE 1: divergence   D(p_zoom, p_full) > t1
+        |            "the crop changes the answer"
+        |
+        +--> GATE 2: sharpening   H(p_zoom) < H(p_full) - t2
+        |            "and it changes it into confidence,
+        |             not into different confusion"
+        |
+        +--> GATE 3: ablation-blindness  D(p_mask, p_full) < t3
+                     "yet deleting the crop costs nothing,
+                      so the model was never using it"
+                            |
+                   all three pass  ==>  r is a BLIND SPOT
+                            |
+                            v
+      teacher   = p_zoom  (privileged view, same weights, no grad)
+      negative  = p_mask  (what being blind to r looks like)
+      student   = p_full  (receives gradients)
+                            |
+                            v
+      L ~ KL( p_zoom || p_full )  -  lambda * KL( p_mask || p_full )
+          ~~~~~~~~~~~~~~~~~~~~~      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+          pull toward the            push away from the
+          magnified reading          blind reading
+                            |
+                            v
+      update weights, resample responses on-policy, repeat
+```
+
+**The metaphor**: think of a proofreader with a pair of reading glasses sitting on the desk, unused.
+
+The manuscript is the image. The proofreader reading at arm's length is `p_full` — that's the student, the mode we actually want to improve. Putting on the glasses and looking at one paragraph is `zoom(r)` — same brain, same skill, better optics. Covering that paragraph with a sticky note is `mask(r)`.
+
+Now the three checks. First, you compare what she says about the manuscript with the glasses on versus off, for one specific paragraph: if her verdict doesn't change, the glasses are irrelevant there. Second, you check that with the glasses on she becomes *decisive* — "the date is 1987" rather than "hmm, maybe 1987 or 1997." A magnifier that produces a different flavor of hedging hasn't revealed anything. Third, and this is the trick, you cover the paragraph with a sticky note and ask her to review the manuscript again. If she gives the exact same verdict as before, she was never reading that paragraph in the first place. That's the proof of a blind spot, and it's the check that ordinary crop-based methods skip — without it, you waste your training budget on paragraphs she was already reading carefully.
+
+The training step is then: write down verbatim what she said with the glasses on, write down what she said with the sticky note over it, and drill her arm's-length reading until it matches the first transcript and diverges from the second. Nobody else in the room. No answer key. The teacher is the same proofreader, just wearing her glasses — and the "wrong answer" to contrast against is the same proofreader, deliberately blindfolded.
+
+### Key Concepts
+
+- **Blind spot (as defined by counterfactual asymmetry)**: Normally you'd think a "blind spot" means the model can't see something. Here it means something sharper and more useful: the model **can* see it, but doesn't *use* it. The definition is entirely behavioral, built from two opposite perturbations. Blow the region up and the model reads it fine — so the pixels and the encoder are adequate. Delete the region and the model's full-image answer doesn't budge — so the decoder wasn't conditioning on it. The gap between those two facts is the learnable quantity. Concrete example: a chart with a small axis label reading "millions." Crop and upscale it and the model confidently answers "millions." Blank it out in the full image and the model still says "thousands," exactly as before. The label was legible and ignored. That's a blind spot, and closing it is pure gain with no new knowledge required.
+
+- **Dense on-policy self-distillation**: "Dense" means the supervision is a full distribution over next tokens at every position, not a single score at the end — roughly the difference between a tutor marking up every sentence of your essay and a tutor writing "C+" on the cover. "On-policy" means the responses being corrected are sampled from the model as it currently is, so as it improves, the training data automatically shifts to its remaining weaknesses; a fixed distillation corpus would keep drilling errors the model already fixed. "Self" means the teacher distribution comes from the same weights under a different **input view*, which is the whole trick: you can't outrank yourself, but you can out-*perceive* yourself by changing what's in the frame.
+
+- **Sharpening as a pseudo-label filter**: Any self-training scheme faces the question "how do I know this new label isn't garbage?" CVPD's answer is entropy. A crop that genuinely surfaces information should collapse the model's uncertainty — the distribution gets **peakier*, not just *different*. A crop that lands on nothing informative, or that destroys context and confuses the model, will typically shift the distribution while keeping entropy high or raising it. Using an entropy drop as the admission ticket is a cheap, general-purpose way to distinguish "I learned something" from "I got jostled," and it transfers to essentially any self-labeling pipeline.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+  [ GPT-4o teacher ]                    ONE model, THREE views
+  [ GT boxes / SAM ]
+  [ reward: +1 / -1 ]                   [ full ]  [ zoom ]  [ mask ]
+          |                                 |        |         |
+          | supervision                     |        v         v
+          | flows inward                    |    teacher    negative
+          v                                 |        |         |
+    [ base model ]                          +<-------+---------+
+          |                                          |
+          v                                          v
+    improved model                          dense token targets
+                                            built from an internal
+                                            contradiction
+                                                     |
+                                                     v
+                                             improved model
+  the signal originates OUTSIDE           the signal originates INSIDE,
+  the model; quality is capped by         from disagreement between the
+  the external source                     model's own views of one image
+```
+
+From "borrow competence from a stronger observer" to "harvest competence the model already has but fails to route," the core shift is that **the supervision signal is manufactured from an internal inconsistency rather than imported from an external authority.**
+
+## Expert Assessment
+
+A caveat first: I'm working primarily from the abstract here, so my read on the region-proposal mechanism, the exact loss form, and the hyperparameter story is partly inference. Treat those specific criticisms as hypotheses to check against the paper rather than confirmed findings.
+
+**Problem choice**: Real gap, well-chosen, and squarely on the field's trajectory. The reward-signal bottleneck in visual self-improvement is genuinely binding, and the awkward secret of most "self-evolving" visual papers is that they quietly consume GPT-4o or ground-truth localization. Making the self-containment constraint explicit and then meeting it is a legitimate contribution, and it's the kind of constraint that matters practically — anyone training on proprietary images with no annotation budget faces exactly this. I'd push back on the "to the best of our knowledge, the first" framing: zoom-in-and-recheck is a well-trodden idea (visual cropping/search agents, Chain-of-Spot, attention-guided cropping), and self-distillation from a privileged view is not new in the abstract. The novelty is concentrated in gate three and in the contrastive use of the ablated view, which is enough — the "first framework" claim oversells something that doesn't need overselling.
+
+**Method maturity**: Genuinely clever, and the cleverness is localized. Gates one and two are what anyone would write down. Gate three — requiring that **deleting* the region be a no-op — is the non-obvious piece, because it's what turns "this crop is informative" into "this crop is informative *and the model is currently ignoring it*." That distinction is the difference between reinforcing existing behavior and repairing a defect. My concerns are practical. Three forward passes per candidate region, times many candidate regions, times a training corpus, is a serious compute multiplier, and I want to see the cost table next to the accuracy table. How candidate regions get proposed without external tools is the load-bearing implementation detail: attention-map-derived proposals risk circularity (attention already reflects what the model uses, which is in tension with gate three), while a fixed grid is honest but combinatorially expensive. And three gates means three thresholds — if those need per-model tuning, the self-containment claim erodes, since tuning them requires a validation signal from somewhere. The obvious simpler alternative the paper must rule out is two-gate CVPD, or plain zoom-view self-distillation with no gating at all; if the ablation shows gate three contributes only a fraction of a point, the story changes considerably.
+
+**Experimental integrity**: The comparison set is the right one, and beating GPT-4o-supervised baselines with a fully self-contained method is the correct headline. But one backbone is one backbone. Everything reported is on Qwen3-VL-8B-Instruct, and this method's viability depends on a property that could vary a lot across architectures — how large the encode/utilize gap actually is. A model with a stronger native cropping habit or dynamic-resolution tiling might have far fewer qualifying blind spots, and the method would degrade to noise. On the numbers: +3.60 on OCRBench is meaningful (1000 items, so roughly 36 flips, comfortably outside typical run-to-run variance). The MMStar subcategory gains of +3.38 and +3.08 are less comfortable — those splits are a few hundred items each, and a three-point move there is close to seed noise. "Not a single regression across twelve benchmarks" reads as a strength but is also a mild yellow flag: perfectly monotone improvement across a dozen heterogeneous benchmarks usually means several of those deltas are small enough to be arbitrary, and the phrasing invites you to count them as wins. Multiple seeds with variance bands would settle this in one table.
+
+**Writing quality**: The framing is unusually crisp — the abstract states the constraint, the mechanism, and the evidence without padding, which is rarer than it should be. The corner most likely cut is an honest accounting of **every* external ingredient. "Self-contained" needs a paragraph that enumerates where the images came from, where the questions came from (if prompts are drawn from a labeled benchmark's training split, that's a form of curation even when labels go unused), and how thresholds were selected. The section that would most elevate the paper is a compute-and-sensitivity analysis: cost per training sample relative to a reward-based baseline, and how performance degrades as the three thresholds move. Right now a reader has to trust that the gates are robust; showing they are would convert a nice result into a method people actually adopt.
+
+**Verdict**: weak accept — a genuinely elegant supervision signal with a well-motivated third gate, held back by single-backbone evidence and effect sizes on the fine-grained splits that need variance bars before I'd fully believe them.
+
+## Takeaways
+
+The transferable idea is the **two-directional perturbation test**, and it's not confined to vision. To find something a model knows but doesn't use, you need two probes pointing opposite ways: one that **isolates* the candidate evidence (does the model handle it correctly when it's the only thing in view?) and one that *removes* it (does the model's behavior change when it's gone?). Isolation succeeding while removal has no effect is a signature you can hunt for anywhere. Long-context text: find the paragraph that yields the right answer in isolation but whose deletion doesn't change the full-document answer — that's a retrieval blind spot, and now you have a training target rather than just a diagnostic. Same construction works for audio segments, table columns, and individual tool outputs in an agent trace.
+
+Second: **the ablated view is training data, not just an experiment.** Most interpretability work masks an input to **measure* importance and then throws the result away. CVPD keeps the masked forward pass and uses its output distribution as a contrastive negative. That's free — you already paid for the forward pass — and it's a much more specific negative than a random or heuristically corrupted one, because it's literally the model's own failure mode.
+
+Third: **entropy drop as an admission criterion for pseudo-labels.** If a perturbation is supposed to add information, demand that it reduce uncertainty, not merely change the answer. This costs one number to compute and filters out a large class of self-training garbage. Drop it into any bootstrapping pipeline you already run.
+
+Fourth, the framing worth internalizing regardless of whether you use this method: **a privileged view of the same model is a legitimate teacher.** You cannot distill from yourself in the abstract, but you can distill from yourself-under-better-input-conditions. Any easier version of your task that your model already solves — a zoomed crop, a shorter context, a pre-parsed input, a hint-augmented prompt — is a dense teacher for the harder version. Most teams reach for a bigger model here when they don't need to.
+
+One honest caveat on what *not* to steal: don't take the specific thresholds or the assumption that this transfers cheaply. Until there's multi-backbone evidence, treat the size of the encode/utilize gap as something you have to measure on your own model before you budget for the three-forward-pass overhead.
+:::
+
+:::zh
+**论文**: [2608.09931](https://arxiv.org/abs/2608.09931)
+**作者**: Shravan Venkatraman, Omkar Thawakar, Ritesh Thawkar, Abdelrahman Shaker, Rao Muhammad Anwer
+**分类**: cs.CV
+
+## 缺口
+
+多模态大模型的自我提升，目前基本分成两派，而两派都被「监督信号」卡住了。
+
+第一派是奖励驱动：采样、打分、强化好的。
+自奖励流水线、各种 RLAIF 变体，以及最近一波 R1 式视觉 RL 都在这里。
+问题是信号极其稀薄——一条轨迹一个标量，有时只有一个比特。
+模型写了两百个 token 的回答，回来的只有「错」，它几乎学不到错在哪，更学不到这次失败是「没看清」而不是「没想清」。
+
+第二派是蒸馏，信号密度高得多：每个 token 位置上都有一个完整的词表分布，单样本信息量高出好几个数量级。
+但在视觉领域，蒸馏几乎总要依赖学生自己拿不到的**特权上下文**。
+Chain-of-Spot 一类方法需要真值框才知道该裁哪儿。
+工具增强流水线需要 SAM、检测器或 OCR 引擎。
+最省事的做法就是直接调 GPT-4o，把它的输出当目标。
+每一种情况下，「自我提升」里的「自我」都名不副实：真正的能力是从外面进口的。
+
+所以缺口很具体：**能不能只靠模型本身，产出密集的、token 级的、on-policy 的视觉监督信号？**
+CVPD 的答案建立在一个说出来就显然的观察上——视觉编码器经常已经编码了某些信息，而解码器却没有条件化在上面。
+信息**在**，但**没被用**。
+如果你能定位这种情况发生在哪里，就等于在学生体内找到了一个免费的老师。
+
+```
+问题: MLLM 自我提升缺乏足够的监督信号
+    |
+    +-- 奖励式 RL ...... 一条轨迹一个标量  == 信号太稀
+    +-- 视觉蒸馏 ....... token 级密集，但需要
+    |                    真值框 / SAM / GPT-4o == 不自足
+    v
+假设: 编码器分辨出的信息，多于解码器实际使用的信息
+      (信息存在，但在全图条件下未被利用)
+    v
+方法: 三门反事实准则，定位「盲点」区域
+      zoom(r) 使答案分布 既改变 又变尖锐
+      而 mask(r) 对全图行为几乎没有影响
+    |
+    +-- 转化为 token 级密集对比监督
+    v
+证据: Qwen3-VL-8B-Instruct，12 个基准，6 个自演化基线
+      OCRBench +3.60 / MMStar 细粒度感知 +3.38
+      MMStar 逻辑推理 +3.08 / 零退化
+      并且超过了消耗 GPT-4o 监督的基线
+    v
+结论: 密集视觉自监督不需要外部教师，
+      只需要一套有纪律的「自我审问」流程
+```
+
+## 增量
+
+**一句话**：这篇论文之前，密集 token 级视觉监督必须来自模型之外（标注、工具或更强的教师）；之后，你可以从「放大某区域」与「删除同一区域」之间的自检矛盾里，凭空制造出这种监督。
+
+### 核心机制
+
+流程对同一个问题跑三次前向。
+一次看全图，得到 `p_full`。
+一次只看裁剪并放大后的区域，得到 `p_zoom`。
+一次看被遮挡掉该区域的图，得到 `p_mask`。
+三次用的是同一份当下权重——整个系统里没有第二个模型。
+
+三门反事实准则接着对候选区域问三个问题，三个必须全过。
+第一门：放大是否**改变**了答案分布？
+如果 `p_zoom` 和 `p_full` 很接近，这个区域跟当前问题无关，没什么可学的。
+第二门：放大是否让分布**变尖锐**——熵下降、质量集中到某个答案上？
+这一门负责把「真的获得了信息」和「只是分布被搅动了」区分开；一个让模型换一种方式犯迷糊的裁剪，是没有资格当老师的。
+第三门最巧，方向完全相反：**删掉**这个区域后，全图行为是否基本没变？
+如果删掉之后全图答案崩了，说明模型本来就在用它——没什么要修的。
+只有当「放大有帮助」**且**「删除没代价」同时成立，你才拿到了盲点的证据：像素里确实有与答案相关的信号，编码器在它占满画面时能分辨出来，而在全图条件下解码器却在无视它。
+
+通过全部三门的区域，被转化成**监督**，而不是奖励。
+放大视图的分布成为教师目标。
+全图分布是学生，接收梯度。
+被遮挡视图的分布则充当显式负例——它是一个具体采样出来的「当你对这个区域视而不见时，你的输出长什么样」，于是目标函数一边把学生拉向放大后的读数，一边把它推离盲视的读数。
+这个对比框架，是 CVPD 与普通「裁剪自蒸馏」的分界线。
+又因为每一轮都从当前策略重新采样回答，整个过程保持 on-policy：被修补的是模型**此刻**的盲点，而不是从静态数据集里继承下来的旧毛病。
+
+```
+  图像 I + 问题 q
+        |
+        +-------------------+-------------------+
+        |                   |                   |
+     全图视图           zoom(I, r)          mask(I, r)
+     p_full(y)           p_zoom(y)           p_mask(y)
+        |                   |                   |
+        +--> 门 1: 分布偏移   D(p_zoom, p_full) > t1
+        |          "放大改变了答案"
+        |
+        +--> 门 2: 分布尖锐   H(p_zoom) < H(p_full) - t2
+        |          "而且是变成了确信,
+        |           不是变成另一种迷糊"
+        |
+        +--> 门 3: 删除无感   D(p_mask, p_full) < t3
+                   "但删掉它毫无代价,
+                    说明模型从没在用它"
+                            |
+                    三门全过  ==>  r 是一个盲点
+                            |
+                            v
+      教师   = p_zoom  (特权视图, 同一权重, 不回传)
+      负例   = p_mask  (对 r 视而不见时的样子)
+      学生   = p_full  (接收梯度)
+                            |
+                            v
+      L ~ KL( p_zoom || p_full )  -  lambda * KL( p_mask || p_full )
+          ~~~~~~~~~~~~~~~~~~~~~      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+          拉向 放大后的读数           推离 盲视的读数
+                            |
+                            v
+      更新权重, on-policy 重新采样, 循环
+```
+
+**核喻**：想象一位校对员，桌上放着一副老花镜，但她一直没戴。
+
+稿件就是图像。
+她伸直手臂、远距离看稿的状态，是 `p_full`——这是学生，是我们真正想改进的那个模式。
+她戴上眼镜、只盯着某一段看，是 `zoom(r)`：同一个大脑、同一份功力，只是光学条件更好。
+用便利贴把那一段盖住，是 `mask(r)`。
+
+现在是三道检查。
+第一，对同一段文字，比较她戴镜和不戴镜的判断：如果判断没变，眼镜在这里就是多余的。
+第二，确认戴上眼镜后她变得**果断**——是「日期是 1987 年」，而不是「嗯，可能是 1987 也可能是 1997」。
+一个只是换了一种含糊说法的放大镜，什么也没揭示。
+第三，也是最妙的一步：用便利贴盖住这一段，请她重新审一遍整份稿件。
+如果她给出的判断和之前**一字不差**，说明她本来就没在读那一段。
+这才是盲点的证据，也正是普通裁剪类方法跳过的那道检查——没有它，你会把训练预算浪费在她本来就读得很仔细的段落上。
+
+训练一步于是变成：把她戴镜时说的话逐字记下来，把她被贴住时说的话也记下来，然后反复训练她那个「伸直手臂」的读法，让它靠近第一份记录、远离第二份记录。
+房间里没有第二个人。
+没有标准答案。
+教师就是同一位校对员，只是戴上了眼镜；而用来对比的「错误答案」，也是同一位校对员，只是被故意蒙住了眼。
+
+### 关键概念
+
+- **盲点（用反事实的不对称来定义）**：一般人以为「盲点」是模型看不见。
+这里的含义更锋利也更有用：模型**看得见**，但**没在用**。
+定义完全是行为层面的，由两个方向相反的扰动构成。
+把区域放大，模型读得挺准——说明像素和编码器都够用。
+把区域删掉，模型的全图答案纹丝不动——说明解码器没有条件化在它上面。
+这两个事实之间的落差，就是可学习的量。
+具体例子：一张图表上有个很小的坐标轴标签写着「百万」。
+裁剪放大后，模型自信地回答「百万」。
+在全图里把它涂掉，模型仍然说「千」，跟涂掉之前一模一样。
+这个标签清晰可读，却被忽略了。
+这就是盲点，修好它是纯收益，不需要引入任何新知识。
+
+- **密集 on-policy 自蒸馏**：「密集」是说监督信号是每个位置上完整的下一 token 分布，而不是末尾一个分数——大致相当于「导师逐句批注你的文章」与「导师在封面写个 C+」的差别。
+「on-policy」是说被纠正的回答是从模型**当前**状态采样出来的，所以随着模型变强，训练数据会自动漂移到它剩下的弱点上；固定蒸馏语料只会一直在训练模型早就修好的错误。
+「自」是说教师分布来自同一份权重、只是换了**输入视图**，这正是全部诡计所在：你没法在能力上超越自己，但你可以在**感知条件**上超越自己——只要改变画面里装着什么。
+
+- **尖锐化作为伪标签过滤器**：任何自训练方案都要回答「我凭什么相信这个新标签不是垃圾」。
+CVPD 的答案是熵。
+一个真正揭示了信息的裁剪，应该让模型的不确定性坍缩——分布变**更尖**，而不只是变**不一样**。
+一个落在无信息区域、或者破坏了上下文反而把模型搞糊涂的裁剪，通常会让分布偏移，但熵保持很高甚至升高。
+把「熵下降」当作入场券，是一种廉价而通用的手段，用来区分「我学到了东西」和「我只是被晃了一下」，几乎可以搬到任何自标注流水线里。
+
+## 框架转变
+
+```
+之前 (主流方法):                      之后 (本文方法):
+
+  [ GPT-4o 教师 ]                      一个模型, 三个视图
+  [ 真值框 / SAM ]
+  [ 奖励: +1 / -1 ]                    [ 全图 ]  [ 放大 ]  [ 遮挡 ]
+          |                                |        |         |
+          | 监督由外                       |        v         v
+          | 向内流动                       |      教师       负例
+          v                                |        |         |
+     [ 基座模型 ]                          +<-------+---------+
+          |                                         |
+          v                                         v
+       更强的模型                            token 级密集目标
+                                            源于模型内部的
+                                            一个自相矛盾
+                                                    |
+                                                    v
+                                               更强的模型
+
+  信号来自模型 之外                     信号来自模型 之内,
+  上限被外部来源锁死                    来自它对同一张图的
+                                        不同视图之间的分歧
+```
+
+一句话：从「向更强的观察者借能力」到「回收模型已经具备但没接通的能力」，核心转变是**监督信号从外部权威进口，变成由内部不一致就地制造**。
+
+## 专家评审
+
+先说一个前提：我主要依据摘要在读这篇论文，所以关于区域候选生成机制、损失的确切形式、超参数的处理方式，我的判断带有推断成分。
+下面针对这几点的批评，请当作待核对的假设，而不是已确认的结论。
+
+**选题眼光**：真缺口，选得准，正好在这个方向的主干上。
+视觉自我提升里「奖励信号太稀」这个瓶颈是实打实卡着的；而大多数「自演化」视觉论文有个不太体面的秘密——它们悄悄消耗着 GPT-4o 或真值定位。
+把「自足」这个约束明确写出来，然后真的满足它，是一份正当的贡献，而且这个约束在工程上很有意义：任何在私有图像上训练、又没有标注预算的团队，面对的就是这个局面。
+我会对「据我们所知，首个」这种表述提出异议：「放大再复查」是被反复走过的路（视觉裁剪/搜索智能体、Chain-of-Spot、注意力引导裁剪），「从特权视图自蒸馏」抽象来看也不新。
+真正的新意集中在第三道门，以及把遮挡视图当作对比负例这一手——这已经够了；「首个框架」的宣称，是在给一个本来不需要包装的东西过度包装。
+
+**方法成熟度**：确实巧，而且巧劲集中在一点上。
+门一和门二是任何人都会写下来的。
+门三——要求**删除**该区域必须是无操作——才是不显然的那一步，因为它把「这个裁剪有信息」升级成「这个裁剪有信息**而且模型当前正在无视它**」。
+这个区别，就是「强化已有行为」和「修补真实缺陷」之间的区别。
+我的顾虑都在工程侧。
+每个候选区域三次前向，乘以候选区域数量，乘以训练语料规模，是相当可观的算力倍数，我希望看到成本表和精度表并排放在一起。
+在不用外部工具的前提下候选区域怎么产生，是承重的实现细节：用注意力图导出候选有循环论证的风险（注意力本身就反映了模型在用什么，这和门三的逻辑有张力），而固定网格虽然诚实但组合成本高。
+三道门意味着三个阈值——如果这些阈值需要逐模型调，「自足」的宣称就会打折，因为调它们需要某处提供验证信号。
+论文必须排除的更简单替代方案很明显：两门版 CVPD，以及完全不加门控的朴素放大视图自蒸馏。
+如果消融显示门三只贡献零点几分，整个故事的分量就会明显不同。
+
+**实验诚意**：对比对象选得对，用一个完全自足的方法打赢消耗 GPT-4o 监督的基线，是正确的头条。
+但一个骨干就是一个骨干。
+所有结果都在 Qwen3-VL-8B-Instruct 上，而这个方法的可行性依赖一个可能因架构而剧烈变化的性质——「编码了但没用上」的落差到底有多大。
+一个本身就更擅长自主裁剪、或者带动态分辨率切片的模型，合格盲点可能少得多，方法就会退化成噪声。
+数字方面：OCRBench +3.60 是有意义的（1000 题，约 36 题翻转，明显超出常见的跑间波动）。
+MMStar 子类的 +3.38 和 +3.08 就不那么让人安心了——这些切分各只有几百题，三分的变动很接近随机种子噪声。
+「12 个基准零退化」读起来是优势，但也是一个轻微的黄灯：在十几个异质基准上呈现完美单调改进，通常意味着其中好几个差值小到近乎任意，而这种表述会诱导读者把它们全部计为胜利。
+多种子加方差区间，一张表就能把这件事说清。
+
+**写作功力**：框架异常清爽——摘要把约束、机制、证据讲完，没有注水，这比它应该的要罕见。
+最可能偷懒的地方，是对**所有**外部成分的诚实清算。
+「自足」需要一段话逐项列明：图像从哪来，问题从哪来（如果 prompt 取自某个带标注基准的训练集划分，那即使不用标签，也是一种筛选），阈值是怎么选的。
+最能让整篇论文升档的，是一节算力与敏感性分析：相对奖励式基线的单样本训练成本，以及三个阈值移动时性能如何衰减。
+现在读者只能相信这些门是稳健的；把它证明出来，会把一个漂亮的结果变成一个真会被采用的方法。
+
+**判决**：弱接收——监督信号构造得相当优雅，第三道门动机充分；但单骨干证据和细粒度切分上的效应量，需要方差区间才能让我完全相信。
+
+## 要点总结
+
+可迁移的核心是**双向扰动检验**，而它并不局限于视觉。
+要找出「模型知道但没用」的东西，你需要两个方向相反的探针：一个**孤立**候选证据（当它是画面里唯一的东西时，模型处理对了吗？），一个**移除**它（它消失时，模型行为变了吗？）。
+「孤立成功、移除无感」这个签名，在任何地方都可以去猎。
+长上下文文本：找出那一段——单独给它模型能答对，但从整篇文档里删掉它答案却不变——这就是一个检索盲点，而现在你拿到的是训练目标，不只是诊断结论。
+同样的构造对音频片段、表格列、智能体轨迹里的单个工具输出都成立。
+
+第二点：**被遮挡的那次前向是训练数据，不只是一次实验。**
+大多数可解释性工作遮住输入是为了**测量**重要性，测完就丢。
+CVPD 把那次遮挡前向的输出分布留下来，当作对比负例。
+这是免费的——前向的钱你已经付了——而且它比随机或启发式扰动出来的负例具体得多，因为它就是模型自己的失效模式。
+
+第三点：**用熵下降当伪标签的入场标准。**
+如果某个扰动号称增加了信息，就要求它降低不确定性，而不只是改变答案。
+计算代价是一个数，却能滤掉一大类自训练垃圾。
+把它塞进你现有的任何 bootstrapping 流水线里。
+
+第四点，是无论你是否用这个方法都值得内化的框架：**同一模型的特权视图，是合法的教师。**
+抽象地讲你没法从自己身上蒸馏，但你可以从「输入条件更好的自己」身上蒸馏。
+任何你的模型已经能解的、更容易的任务版本——放大的裁剪、更短的上下文、预解析过的输入、带提示的 prompt——都是更难版本的密集教师。
+多数团队在这里会去搬一个更大的模型，其实不必。
+
+关于**不该偷**什么，也说句实话：不要照搬那几个阈值，也不要假设这套东西迁移成本很低。
+在有多骨干证据之前，请把「编码了但没用上」的落差大小当成一件必须在你自己模型上先测量的事，再决定要不要为三次前向的开销买单。
+:::

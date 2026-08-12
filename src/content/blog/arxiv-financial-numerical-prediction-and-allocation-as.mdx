@@ -1,0 +1,420 @@
+---
+title:
+  en: "Numbers as Words: FinATOM Turns Forecasting and Portfolio Allocation into Token Generation"
+  zh: "把数字当词说出来：FinATOM 将收益预测与资产配置变成 token 生成"
+description:
+  en: "FinATOM drops the regression, ranking, and policy heads entirely, making a causal language model emit returns and portfolio weights as constrained tokens — then tunes it with RL on realized Sharpe. Elegant interface, but the Sharpe gains sit inside the noise band."
+  zh: "FinATOM 彻底去掉回归头、排序头和策略头，让因果语言模型以受约束的 token 直接吐出收益和组合权重，再用强化学习优化实现 Sharpe。接口很优雅，但 Sharpe 增益落在噪声区间内。"
+date: 2026-08-12
+tags: ["arxiv", "ai", "cs.cv", "cs.lg"]
+image: "/arxiv-visuals/arxiv-financial-numerical-prediction-and-allocation-as.png"
+---
+:::en
+**Paper**: [2608.09880](https://arxiv.org/abs/2608.09880)
+**Authors**: Xu Ouyang, Moontae Lee
+**Categories**: cs.CV, cs.LG
+
+## The Gap
+
+Almost every financial LLM paper today has the same architecture smell: a language model reads news, filings, and price history, produces a hidden vector, and then hands that vector to a *separate* task-specific head. A linear regression head with MSE loss if you want returns. A learning-to-rank head (RSR, HIST, and descendants) if you want a cross-sectional stock ranking. A softmax policy head trained with PPO/DDPG if you want portfolio weights. The language model becomes a feature extractor, and the object you actually evaluate — a return number, a weight vector — lives outside the model's own output space.
+
+That split has three concrete costs. First, you cannot use the model's own generative machinery (sampling, likelihood, constrained decoding) on the thing you care about. Second, every new task means a new head, a new loss, and a new training recipe, so nothing transfers. Third, and most annoying in practice, RL fine-tuning on a financial objective like Sharpe has to be plumbed through the head, not the tokens, which means all the modern LLM post-training tooling (GRPO, DAPO, and friends) doesn't apply cleanly.
+
+Prior work has nibbled at this. Chronos and Lag-Llama already showed you can quantize a time series into bins and forecast it as next-token prediction. Number-aware embedding schemes like xVal tried to make LMs handle magnitudes. But those are forecasting-only; nobody had asked whether a *decision* — a normalized, long-only, sum-to-one weight vector — can be emitted as tokens and then optimized against a realized risk-adjusted return with standard LLM RL. That is the boundary FinATOM pushes on.
+
+```
+   PROBLEM
+   [ LM produces hidden vector -> external head produces
+     the number you actually evaluate ]
+        |
+        | costs: no constrained decoding on the output,
+        |        no task transfer, RL plumbed through head
+        v
+   ASSUMPTION
+   [ a return, and a weight vector, can be *written down*
+     in a discrete vocabulary without losing what matters ]
+        |
+        v
+   METHOD (FinATOM, head-free)
+        |
+        +--> forecasting: emit volatility-standardized
+        |    return tokens for t+1,t+2,t+3
+        |      trained by: ordinal + ranking loss
+        |      then: 1-epoch token-level policy stage
+        |
+        +--> allocation: emit 5 normalized long-only weights
+             SFT imitates causal mean-variance anchor
+             then: GRPO + DAPO on realized 21-day Sharpe,
+                   constrained to stay near the anchor
+        |
+        v
+   EVIDENCE
+   [ 5-ETF, 2023-2025: gross Sharpe 1.428 > 1.529 ]
+   [ net @ 5bp:              1.394 > 1.494 ]
+   [ multimodal input: 3-period mean Sharpe 1.540 ]
+   [ FinTexTS: 73.52% / 2.68 (SFT) vs 73.72% / 2.69 (RL) ]
+        |
+        v
+   CONCLUSION
+   [ "feasible" -- authors' own word -- not "better" ]
+   [ deltas are real in sign, unproven in significance ]
+```
+
+## The Increment
+
+**One sentence**: Before this paper, an LLM that manages a portfolio needed a policy head bolted onto it; after this paper, there is a working demonstration that the weight vector itself can be a token sequence, which means the entire modern LLM post-training stack (GRPO, DAPO, reward shaping) can be pointed directly at realized Sharpe.
+
+### Core Mechanism
+
+The forecasting side works like this. Raw returns are useless as a token vocabulary — a 2% move in a utility stock and a 2% move in a biotech are different events, and the scale of "typical" returns drifts with the regime. So FinATOM first divides returns by a trailing volatility estimate, producing standardized units where a token means roughly "one sigma up" rather than "two percent up." Those standardized values are discretized into a token vocabulary, and the model emits three of them autoregressively for horizons t+1, t+2, t+3 — so the second-step forecast is conditioned on the first-step forecast, which is exactly the property you want and exactly what a three-output regression head can't give you.
+
+Training the forecaster has two ideas layered on plain next-token prediction. Cross-entropy over bins treats "predicted bin 7, truth bin 8" as exactly as wrong as "predicted bin 7, truth bin 30," which is absurd for numbers, so an **ordinal** loss penalizes distance in bin space. And because most financial value comes from relative ordering rather than absolute levels, a **ranking** supervision term pushes the model to get cross-sectional order right. Then a short one-epoch policy stage at the token level nudges the distribution toward whatever downstream financial reward they define.
+
+The allocation side is where the design gets interesting. The model generates five weights that must be non-negative and sum to one — a constrained decoding problem, not a regression problem. Rather than let RL loose on that (which in finance reliably discovers degenerate all-in-one-asset policies that happened to work in-sample), they do it in two stages: supervised fine-tuning first teaches the model to *imitate* a causal mean-variance optimizer, giving it a sane starting policy; then GRPO — with DAPO's tricks for stabilizing group-relative advantages — optimizes realized 21-day Sharpe, but with an anchor-consistency constraint that keeps the policy from wandering far from the mean-variance solution. The RL stage is deliberately a perturbation, not a replacement.
+
+```
+  INPUT
+  [ price history + text (news/filings) + optional chart images ]
+        |
+        v
+  +---------------------------------------------+
+  |        causal LM  (no task heads)           |
+  +---------------------------------------------+
+        |                              |
+        v                              v
+  FORECAST BRANCH               ALLOCATION BRANCH
+        |                              |
+  r / vol_hat                    constrained decode
+  (standardize)                  w1..w5 as tokens
+        |                        w_i >= 0, sum w_i = 1
+  discretize to bins                   |
+        |                              |
+  emit z_(t+1)                   stage 1: SFT to imitate
+        v                                 causal mean-variance
+  emit z_(t+2) | z_(t+1)                   anchor
+        v                              |
+  emit z_(t+3) | z_(t+1),z_(t+2)  stage 2: GRPO + DAPO
+        |                              reward = realized
+  losses:                              21-day Sharpe
+   + cross-entropy                     penalty = drift from
+   + ordinal (bin distance)                      anchor
+   + ranking (cross-section)           |
+   + 1 epoch token policy              v
+        |                        rebalance decision
+        v
+  z * vol_hat = return forecast
+```
+
+Here is the metaphor that makes it stick: **FinATOM is a musician transcribing to sheet music instead of handing you an oscilloscope trace.**
+
+An external regression head is the oscilloscope — a continuous voltage readout, precise but living in its own instrument, unreadable by the orchestra. Sheet music is a discrete vocabulary: there are only so many notes on the staff. Volatility standardization is the *key signature* — you write the melody relative to the key so the same phrase transposes across instruments and eras; without it, a note means something different every month. The bins are the notes. The ordinal loss encodes that a semitone off sounds nearly right while an octave off is a mistake — standard cross-entropy is tone-deaf here, treating every wrong note as equally wrong. The ranking loss says what actually matters is the *contour* of the melody, whether this note is higher than the last, not its absolute frequency in hertz. Autoregressive three-step emission is playing the phrase forward: note two is chosen knowing note one was played.
+
+The allocation model writes chords instead of a melody, and the constraint "weights sum to one" is the *bar line* — whatever you write, the durations must exactly fill one measure. SFT is learning to play the standard arrangement (mean-variance) from the score. GRPO is a jazz musician improvising around that arrangement, with the reward being how the room actually responded (realized Sharpe), and anchor consistency is the bandleader's rule: you may ornament, but stay in the chord progression. That constraint is why the improvisation improves the performance modestly rather than derailing it — and also why the gains are small.
+
+### Key Concepts
+
+- **Head-free interface**: Normally a model's "answer" is produced by a final layer purpose-built for the answer's shape — one number out for regression, a softmax over assets for allocation. Head-free means the answer is written in the same alphabet the model uses for everything else: tokens. Think of the difference between a calculator with a numeric display and a person writing "seven point three" on paper. The calculator is more precise; the writing is more composable, because you can put it in a sentence, constrain it grammatically, sample ten variants and compare, and grade the whole sentence with a reward model. FinATOM's bet is that composability is worth more than the precision you give up to binning.
+
+- **Volatility standardization**: Suppose you want one vocabulary of "move sizes" that works for a sleepy bond ETF and a jumpy tech ETF, in calm 2017 and violent March 2020. Absolute percentages fail: 1% is a huge day for the bond and noise for the tech name. So you divide each return by a recent estimate of that asset's own typical move size. Now "+1.0" means "a one-sigma up day **for this thing, right now*." The model learns one universal grammar of surprise, and you multiply the volatility estimate back in at the end to recover a percentage. This is the single most load-bearing preprocessing decision in the paper — without it, the token vocabulary is incoherent across assets and regimes.
+
+- **Anchor-consistency-constrained GRPO**: GRPO grades a batch of sampled outputs against each other — generate eight candidate weight vectors, see which produced better realized Sharpe, push toward the winners. On its own, in finance, this is a machine for finding lucky bets: with a few years of data, "100% in NVDA-heavy tech" wins the group tournament for reasons that will not repeat. The anchor constraint is a leash tied to a defensible classical solution (mean-variance): the reward can pull the policy, but a penalty term grows as it drifts from the anchor. The honest way to read the paper's headline numbers is therefore "mean-variance, mildly and intelligently perturbed," which also explains why the transaction-cost drag is tiny (1.529 gross to 1.494 net at 5bp implies low turnover — the policy isn't thrashing).
+
+## Framework Shift
+
+```
+ Before (mainstream financial LLM):     After (FinATOM):
+
+ [ text + prices ]                      [ text + prices + charts ]
+        |                                       |
+        v                                       v
+ +----------------+                     +----------------+
+ |  language model|                     | language model |
+ +----------------+                     +----------------+
+        |                                       |
+   hidden vector h                       constrained decoding
+        |                                       |
+   +----+----+----+                             v
+   v    v    v    v                     "0.31 0.12 0.05 0.28 0.24"
+ [reg][rank][pol] heads                        (tokens)
+   |    |    |                                  |
+  MSE  BPR  PPO                          reward = realized
+   |    |    |                            21-day Sharpe
+   v    v    v                            via GRPO / DAPO
+ 3 tasks, 3 losses,                              |
+ 3 codebases, no transfer                        v
+                                          one interface,
+ RL must be plumbed                       one loss family,
+ through the head                         RL acts on tokens
+```
+
+One sentence: from *the model predicts features and a head predicts the answer* to *the model writes the answer in its own alphabet*, the core shift is making the evaluated financial object a first-class citizen of the model's output space, so that generic LLM post-training can optimize it directly.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, and well-placed on the field's trajectory. The head-free / "everything is tokens" unification has already swept vision-language (Chameleon, unified autoregressive models) and time series (Chronos), and finance is the obvious next domain because its evaluated objects — returns, ranks, weights — are exactly the things people bolt heads on for. The specific contribution I'd credit as novel is not tokenized **forecasting* (Chronos got there) but tokenized *allocation under simplex constraints, optimized with GRPO on realized Sharpe*. That combination I have not seen done cleanly, and it opens a door: if a portfolio decision is a token sequence, then every reward-shaping trick from RLHF is suddenly available to quant researchers.
+
+**Method maturity**: Mostly clever, with one place where the cleverness is doing suspicious work. The genuinely good calls are volatility standardization (makes the vocabulary transferable), ordinal + ranking losses (the right fix for the tone-deafness of cross-entropy over ordered bins), and the SFT-to-anchor-then-constrained-RL curriculum, which is exactly the discipline financial RL usually lacks. The suspicious part is that the anchor constraint is load-bearing in both directions: it prevents the failure mode **and* caps the upside, so the paper can never really distinguish "our RL found signal" from "our RL added a small amount of noise-shaped drift to Markowitz that happened to help in this window." A simpler baseline is also conspicuously underexplored: quantile regression heads on the same features would give you distributional forecasts without any tokenization, and I'd want to see that head-to-head before accepting that head-free is worth the discretization loss.
+
+**Experimental integrity**: This is where I'd push back hardest, and to their credit the authors partly pre-empt it by asking for "broader tests across assets, regimes, and random seeds" in the abstract itself. The problem is arithmetic. The standard error of a Sharpe estimate is roughly sqrt((1 + S²/2)/T) in years; with S ≈ 1.5 and T ≈ 3 years, that is about 0.7. The headline improvement is 0.10. The gain is **seven times smaller than the noise floor of the metric it's measured in*. Five ETFs over 2023–2025 is one regime — a strong equity bull with a bond selloff — and "clearest advantage in 2025" on a single year is essentially an anecdote. On FinTexTS, SFT gets 73.52%/2.68 and the policy stage gets 73.72%/2.69; that 0.20pp difference is a rounding artifact, and reporting it as if the RL stage helped is the kind of thing reviewers should call out. Two further gaps: the abstract never reports the *anchor's own* Sharpe, so we cannot tell whether the SFT model matched, beat, or merely approximated the mean-variance optimizer it imitated — which is the single most important number in the paper. And a Sharpe of 2.68 on FinTexTS should trigger immediate look-ahead-bias questions about how the text data is timestamped relative to the returns being predicted. The cs.CV listing with only a passing mention of "multimodal allocation input" also suggests the chart-image modality is thin — and it's the component credited with the best mean Sharpe (1.540), so it deserves far more than a clause.
+
+**Writing quality**: The abstract is unusually honest about its own limits, which I respect and which is rarer than it should be. But honesty in the abstract doesn't substitute for statistics in the results section. If I could force one rewrite it would be the evaluation: add seed variance, add block-bootstrap or Ledoit–Wolf confidence intervals on the Sharpe differences, report the anchor baseline explicitly, extend to a pre-2023 period that includes 2022's drawdown, and demote the FinTexTS RL-vs-SFT comparison to "indistinguishable." That single section, done properly, moves this from a feasibility note to a paper people cite. The other soft spot is the tokenization ablation: how many bins, how much information is lost, does performance degrade gracefully as the vocabulary coarsens? That's the question a reader most wants answered and the abstract doesn't hint that it's addressed.
+
+**Verdict**: **borderline / weak accept** — the interface contribution is genuinely useful and likely to be built on, but the empirical claims are currently indistinguishable from noise and the framing leans on differences the data cannot support.
+
+## Takeaways
+
+Things worth stealing, in rough order of transferability:
+
+**Volatility standardization before discretization** is the generalizable trick, and it isn't about finance. Any time you tokenize a continuous quantity that varies in scale across entities or over time — sensor readings across device types, latencies across services, click rates across regions — normalize by a local scale estimate first so a token means the same thing everywhere, then multiply the scale back at decode. Skipping this is why naive time-series tokenization often underperforms.
+
+**Ordinal loss over ordered bins** should be a reflex, not an insight. If your vocabulary has a natural order, plain cross-entropy is throwing away the geometry of your own label space. Cheap to add, and it shows up anywhere you've quantized a regression target into classes.
+
+**SFT-to-a-classical-anchor, then constrained RL** is the right template for any domain where RL on a noisy reward will happily find degenerate solutions. Imitate a defensible non-learned baseline first so the initial policy is sane; then let RL improve it with a penalty for drifting from that baseline. You get bounded downside and interpretable behavior, at the cost of bounded upside. Applies well beyond portfolios — resource allocation, bidding, control problems with a known decent heuristic.
+
+**Constraints as decoding rules rather than architecture.** Needing outputs to be non-negative and sum to one usually means a softmax head. Doing it via constrained decoding instead means the constraint is enforceable at inference on a model you didn't design for the task, and you keep sampling and likelihood. Worth remembering the next time you're tempted to add a head.
+
+**A calibration habit, not from the paper but for reading papers like it**: memorize sqrt((1 + S²/2)/T) as the rough standard error of a Sharpe ratio. It takes ten seconds and it tells you whether a backtest improvement is a result or a coincidence. In this paper, it says coincidence — which doesn't invalidate the architecture, but does mean the right claim is "this works at all," which is what the authors, to their credit, actually wrote.
+:::
+
+:::zh
+**论文**: [2608.09880](https://arxiv.org/abs/2608.09880)
+**作者**: Xu Ouyang, Moontae Lee
+**分类**: cs.CV, cs.LG
+
+## 缺口
+
+今天几乎所有金融 LLM 论文都有同一种架构气味：语言模型读新闻、财报和价格序列，产出一个隐向量，然后把这个向量交给一个*另外的*任务专用头。
+
+要预测收益，就接一个 MSE 回归头。
+要做横截面选股，就接一个 learning-to-rank 头（RSR、HIST 及其后代）。
+要做组合权重，就接一个 softmax 策略头，用 PPO/DDPG 训。
+语言模型退化成特征提取器，而你真正评估的那个东西——一个收益数字、一个权重向量——住在模型自己的输出空间之外。
+
+这种切割有三个具体代价。
+第一，你没法把模型自己的生成机器（采样、似然、受约束解码）用在你真正关心的对象上。
+第二，每来一个新任务就要新头、新损失、新训练配方，什么都迁移不了。
+第三，也是实践中最烦的：想用 Sharpe 这类金融目标做 RL 微调，必须绕过头来接管道，而不是直接作用在 token 上，于是现代 LLM 后训练的整套工具（GRPO、DAPO 等）都用不上。
+
+已有工作只碰到了边。
+Chronos 和 Lag-Llama 已经证明可以把时间序列量化成 bin，当作下一 token 预测来做。
+xVal 这类数值感知嵌入试图让 LM 处理量级。
+但那些都只是预测。没人问过：一个*决策*——归一化的、只做多的、和为一的权重向量——能不能作为 token 吐出来，然后用标准 LLM RL 去优化实现风险调整收益。
+
+这就是 FinATOM 顶的那道边界。
+
+```
+   问题
+   [ LM 产出隐向量 -> 外部头产出你真正评估的数字 ]
+        |
+        | 代价: 无法对输出做受约束解码
+        |       任务间不迁移
+        |       RL 只能绕过头来接
+        v
+   假设
+   [ 一个收益值、一个权重向量, 可以用离散词表
+     "写下来" 而不丢掉要紧的东西 ]
+        |
+        v
+   方法 (FinATOM, 无头)
+        |
+        +--> 预测: 吐出波动率标准化的收益 token
+        |    覆盖 t+1, t+2, t+3
+        |      训练: 序数损失 + 排序损失
+        |      再加: 1 个 epoch 的 token 级策略阶段
+        |
+        +--> 配置: 吐出 5 个归一化只做多权重
+             SFT 模仿因果均值-方差锚
+             再用 GRPO + DAPO 优化实现 21 日 Sharpe
+             并约束不得远离锚
+        |
+        v
+   证据
+   [ 5 只 ETF, 2023-2025: 毛 Sharpe 1.428 > 1.529 ]
+   [ 5bp 交易成本后:        1.394 > 1.494 ]
+   [ 多模态输入: 三期均值 Sharpe 1.540 ]
+   [ FinTexTS: 73.52% / 2.68 (SFT) vs 73.72% / 2.69 (RL) ]
+        |
+        v
+   结论
+   [ 作者自己用的词是 "可行", 不是 "更好" ]
+   [ 增量方向为正, 显著性未证 ]
+```
+
+## 增量
+
+**一句话**：在这篇论文之前，让 LLM 管组合必须外挂一个策略头；在这之后，世界上多了一个可运行的证明——权重向量本身可以是一段 token 序列，于是整套现代 LLM 后训练技术（GRPO、DAPO、奖励塑形）可以直接瞄准实现 Sharpe。
+
+### 核心机制
+
+先说预测那一半。
+原始收益率不能直接当 token 词表：公用事业股涨 2% 和生物科技股涨 2% 是两件不同的事，而"典型收益"的尺度本身会随市场状态漂移。
+所以 FinATOM 先把收益除以一个滚动波动率估计，得到标准化单位——一个 token 的含义变成"往上一个 sigma"，而不是"往上两个百分点"。
+这些标准化值被离散成 token 词表，模型自回归地吐出三个，对应 t+1、t+2、t+3。
+第二步的预测是以第一步为条件的，这正是你想要的性质，也正是三输出回归头给不了你的东西。
+
+预测器的训练在朴素下一 token 预测之上叠了两个想法。
+在 bin 上做交叉熵，会认为"预测第 7 格、真值第 8 格"和"预测第 7 格、真值第 30 格"错得一样多——对数字来说这荒谬，所以**序数损失**惩罚 bin 空间里的距离。
+又因为金融价值大部分来自相对排序而非绝对水平，**排序监督**项推动模型把横截面顺序做对。
+最后一个短短一个 epoch 的 token 级策略阶段，把分布往下游金融奖励的方向轻推一下。
+
+配置那一半才是设计上有意思的地方。
+模型要生成五个非负且和为一的权重——这是受约束解码问题，不是回归问题。
+他们没有直接放 RL 去干（在金融里这几乎必然会发现"全押某一个样本内碰巧涨了的资产"这类退化策略），而是分两段：先用监督微调教模型*模仿*一个因果均值-方差优化器，给它一个理智的起点；再用 GRPO（配上 DAPO 稳定组内相对优势的技巧）去优化实现的 21 日 Sharpe，同时加一个锚一致性约束，不许策略跑得离均值-方差解太远。
+RL 阶段是被刻意设计成"扰动"而非"替代"的。
+
+```
+  输入
+  [ 价格序列 + 文本(新闻/财报) + 可选图表图像 ]
+        |
+        v
+  +---------------------------------------------+
+  |         因果语言模型  (无任务头)             |
+  +---------------------------------------------+
+        |                              |
+        v                              v
+  预测分支                        配置分支
+        |                              |
+  r / vol_hat                    受约束解码
+  (标准化)                       w1..w5 作为 token
+        |                        w_i >= 0, sum w_i = 1
+  离散成 bin                            |
+        |                              |
+  吐出 z_(t+1)                   阶段一: SFT 模仿
+        v                                因果均值-方差锚
+  吐出 z_(t+2) | z_(t+1)                |
+        v                              |
+  吐出 z_(t+3) | z_(t+1),z_(t+2)  阶段二: GRPO + DAPO
+        |                          奖励 = 实现 21 日 Sharpe
+  损失:                            惩罚 = 偏离锚的程度
+   + 交叉熵                              |
+   + 序数 (bin 距离)                     v
+   + 排序 (横截面)                  调仓决策
+   + 1 epoch token 策略
+        |
+        v
+  z * vol_hat = 收益预测
+```
+
+现在说那个能承重的核喻：**FinATOM 是把演奏记成五线谱，而不是递给你一张示波器波形图。**
+
+外挂回归头就是示波器——连续电压读数，精确，但活在它自己的仪器里，整个乐队读不了。
+五线谱是离散词表：谱表上就那么些音符。
+波动率标准化是**调号**——你把旋律相对于调来写，同一段乐句就能在不同乐器、不同年代之间转调；没有它，同一个音符每个月的含义都不一样。
+bin 就是音符。
+序数损失编码了"差半音听着几乎对，差八度是错"这件事——普通交叉熵在这里是音痴，认为所有唱错的音都错得一样多。
+排序损失说，真正要紧的是旋律的**轮廓**，是这个音比上个音高还是低，而不是它绝对多少赫兹。
+三步自回归就是把乐句往前弹：选第二个音时，已经知道第一个音弹了什么。
+
+配置模型写的是和弦而不是旋律，而"权重和为一"这个约束就是**小节线**——你怎么写都行，但时值必须刚好填满一个小节。
+SFT 是照谱学会标准编曲（均值-方差）。
+GRPO 是爵士乐手围着这个编曲即兴，奖励是台下实际的反应（实现 Sharpe），锚一致性是乐队领班的规矩：可以加花，但不许跑出和弦进行。
+正是这个约束，让即兴只是温和地改善了演出而没有把它带崩——也正是它，让增益只能这么小。
+
+### 关键概念
+
+- **无头接口 (head-free)**：通常模型的"答案"由一个为答案形状定制的最后一层产出——回归吐一个数，配置吐资产上的 softmax。无头意味着答案用模型平时说话的同一套字母表写出来：token。
+想想计算器的数码显示屏和一个人在纸上写"七点三"的区别。
+计算器更精确；手写更可组合，因为你能把它放进句子里、用语法约束它、采样十个变体做比较、用奖励模型给整句打分。
+FinATOM 赌的是：可组合性的价值，超过分箱损失掉的那点精度。
+
+- **波动率标准化**：假设你想要一套"涨跌幅度"词表，既能描述一只昏睡的债券 ETF，也能描述一只暴躁的科技 ETF，既适用于平静的 2017 年，也适用于血腥的 2020 年 3 月。
+绝对百分比会失败：1% 对债券是大日子，对科技股是噪声。
+于是把每个收益除以该资产自己近期的典型波动幅度。
+现在"+1.0"意思是"*对这个东西、在此刻*来说，往上一个 sigma 的一天"。
+模型学到的是一套通用的"意外程度"语法，最后再把波动率乘回去还原成百分比。
+这是全文最承重的预处理决定——没有它，token 词表在不同资产和不同市场状态间根本不自洽。
+
+- **带锚一致性约束的 GRPO**：GRPO 的做法是让一批采样输出互相打分——生成八个候选权重向量，看哪个实现 Sharpe 更好，然后往赢家方向推。
+在金融里单独用它，就是一台"寻找幸运赌注"的机器：只有几年数据时，"全仓押重科技"会赢下这场组内锦标赛，而原因不会重演。
+锚约束是一根系在可辩护的经典解（均值-方差）上的绳：奖励可以拉动策略，但偏离锚越远，惩罚项越大。
+所以读这些头条数字最诚实的方式是"均值-方差，被温和且聪明地扰动了一下"——这也解释了为什么交易成本拖累这么小（5bp 下毛 1.529 到净 1.494），说明策略换手率很低，没在瞎折腾。
+
+## 框架转变
+
+```
+ 之前 (主流金融 LLM):                之后 (FinATOM):
+
+ [ 文本 + 价格 ]                     [ 文本 + 价格 + 图表 ]
+        |                                    |
+        v                                    v
+ +----------------+                  +----------------+
+ |   语言模型      |                  |   语言模型      |
+ +----------------+                  +----------------+
+        |                                    |
+   隐向量 h                            受约束解码
+        |                                    |
+   +----+----+----+                          v
+   v    v    v    v                  "0.31 0.12 0.05 0.28 0.24"
+ [回归][排序][策略] 头                      (token)
+   |    |    |                               |
+  MSE  BPR  PPO                       奖励 = 实现 21 日
+   |    |    |                              Sharpe
+   v    v    v                        用 GRPO / DAPO
+ 3 个任务, 3 套损失,                          |
+ 3 份代码, 零迁移                             v
+                                      一个接口,
+ RL 只能绕过头                          一族损失,
+ 来接管道                              RL 直接作用于 token
+```
+
+一句话：从*模型预测特征、头预测答案*，到*模型用自己的字母表把答案写出来*，核心转变是让被评估的金融对象成为模型输出空间的一等公民，从而让通用 LLM 后训练能直接优化它。
+
+## 专家评审
+
+**选题眼光**：真缺口，而且在该领域轨迹上位置很正。
+"一切皆 token"的无头统一已经扫过了视觉-语言（Chameleon 等统一自回归模型）和时间序列（Chronos），金融是显而易见的下一站，因为它被评估的对象——收益、排名、权重——恰恰就是大家最爱外挂头的东西。
+我认为真正新的贡献不是 token 化*预测*（Chronos 已经做了），而是 token 化*单纯形约束下的配置，并用 GRPO 针对实现 Sharpe 优化*。
+这个组合我没见过做得干净的，而它打开了一扇门：如果组合决策是 token 序列，那 RLHF 里所有奖励塑形技巧突然对量化研究员开放了。
+
+**方法成熟度**：多数地方是巧劲，但有一处巧劲在干可疑的活。
+真正好的判断有三个：波动率标准化（让词表可迁移）、序数+排序损失（对"有序 bin 上交叉熵是音痴"这件事的正确修补）、以及"先 SFT 对齐锚、再受约束 RL"的课程设计，这恰恰是金融 RL 通常最缺的纪律。
+可疑之处在于，锚约束在两个方向上都承重：它既阻止了失败模式，也封住了上限，所以这篇论文永远无法区分"我们的 RL 找到了信号"和"我们的 RL 给 Markowitz 加了一点噪声形状的漂移，而这段窗口里碰巧有用"。
+另外一个明显被绕开的更简单基线：在同样特征上做分位数回归头，不需要任何 token 化就能给出分布式预测。
+在接受"无头值得付分箱损失"之前，我想看到这个正面对比。
+
+**实验诚意**：这里我要最用力地顶回去，不过要给作者记一功——他们在摘要里自己就先说了需要"跨资产、跨市场状态、跨随机种子的更广泛测试"。
+问题在算术。
+Sharpe 估计的标准误大致是 sqrt((1 + S²/2)/T)（T 以年计）；S 约 1.5、T 约 3 年时，这个值约 0.7。
+而头条改进是 0.10。
+增益比它所用度量的噪声地板还小七倍。
+五只 ETF、2023-2025 是一个市场状态——强势股票牛市加债券抛售——而"2025 年优势最明显"落在单一年份上，基本上是个轶事。
+在 FinTexTS 上，SFT 拿 73.52%/2.68，策略阶段拿 73.72%/2.69；这 0.20 个百分点的差别是舍入噪声，把它当成"RL 阶段有帮助"来报告，是审稿人应该点出来的那类问题。
+还有两个洞：摘要从头到尾没报*锚自己*的 Sharpe，所以我们无法判断 SFT 模型是追平、超过还是只是近似了它模仿的那个均值-方差优化器——而这是全文最重要的一个数字。
+另外，FinTexTS 上 2.68 的 Sharpe 应该立刻触发"文本数据相对于被预测收益是怎么打时间戳的"这类前视偏差质询。
+分类里挂了 cs.CV，却只用一个从句提"多模态配置输入"，这也暗示图表图像模态很薄——而它偏偏是被记功为最佳均值 Sharpe（1.540）的那个组件，远不该只配一个从句。
+
+**写作功力**：摘要对自身局限异常诚实，这一点我尊重，而且比它该有的频率要罕见得多。
+但摘要里的诚实替代不了结果章里的统计。
+如果只能强制重写一节，我选评估：加种子方差，对 Sharpe 差值加 block bootstrap 或 Ledoit–Wolf 置信区间，明确报告锚基线，把测试期往前扩到包含 2022 年回撤，并把 FinTexTS 上 RL 与 SFT 的比较降级为"不可区分"。
+只要这一节做扎实，这篇就从可行性小记变成会被引用的论文。
+另一个软肋是 token 化的消融：多少个 bin？丢了多少信息？词表变粗时性能退化是否平缓？
+这是读者最想知道的问题，而摘要里看不出它被处理过。
+
+**判决**：**临界 / 弱接收** —— 接口层面的贡献确实有用、大概率会被后人接着做，但目前的实证结论与噪声不可区分，而叙述又倚靠了数据支撑不起的差异。
+
+## 要点总结
+
+按可迁移程度排，值得偷走的东西：
+
+**先做波动率标准化再离散化** 是最通用的那招，而且跟金融无关。
+任何时候你要 token 化一个在不同实体间、不同时间上尺度会变的连续量——不同设备型号的传感器读数、不同服务的延迟、不同地区的点击率——先按局部尺度估计归一化，让一个 token 在任何地方含义相同，解码时再把尺度乘回去。
+省掉这一步，正是朴素时间序列 token 化经常表现不佳的原因。
+
+**有序 bin 上的序数损失** 应该成为条件反射，而不是洞见。
+如果你的词表有自然顺序，纯交叉熵就是在丢弃你自己标签空间的几何结构。
+加起来很便宜，凡是把回归目标量化成类别的场合都用得上。
+
+**先 SFT 对齐一个经典锚，再做受约束 RL** 是任何"RL 在噪声奖励上会欣然找到退化解"的领域的正确模板。
+先模仿一个可辩护的非学习基线，让初始策略是理智的；再让 RL 改进它，并对偏离基线施加惩罚。
+你得到有界的下行和可解释的行为，代价是有界的上行。
+适用范围远超组合管理——资源分配、竞价、以及任何已有不错启发式的控制问题。
+
+**把约束做成解码规则而不是架构**。
+需要输出非负且和为一，通常意味着一个 softmax 头。
+改用受约束解码，意味着这个约束可以在推理时施加到一个并非为该任务设计的模型上，同时你还保留了采样和似然。
+下次手痒想加个头的时候，值得想起这一点。
+
+**一个校准习惯**（不来自本文，而是用来读这类论文的）：把 sqrt((1 + S²/2)/T) 背下来，当作 Sharpe 比率标准误的粗估。
+花十秒钟，它就告诉你一个回测改进是结果还是巧合。
+在这篇论文里，它说的是巧合——这不否定架构，但意味着正确的说法是"这条路走得通"，而这，也正是作者本人诚实写下的那句话。
+:::

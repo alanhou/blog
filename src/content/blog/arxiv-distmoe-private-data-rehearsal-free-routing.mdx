@@ -1,0 +1,409 @@
+---
+title:
+  en: "DistMoE: Stitching Private Experts Into One MLLM Without Sharing Any Data"
+  zh: "DistMoE：不共享数据，把各家私有专家拼成一个多模态大模型"
+description:
+  en: "A mixture-of-experts recipe for distributed visual instruction tuning: each client trains its own private FFN expert locally, and a public-data-anchored composition stage with an isotropic regularizer makes those independently-trained experts mergeable without ever replaying other clients' data."
+  zh: "面向分布式视觉指令微调的 MoE 方案：每个客户端本地训练自己的私有 FFN 专家，再用「以公共数据为锚」的组合阶段配合等向性正则，让这些各自独立训练出来的专家能被拼装，且无需回放其他客户端的数据。"
+date: 2026-08-12
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-distmoe-private-data-rehearsal-free-routing.png"
+---
+:::en
+**Paper**: [2608.09907](https://arxiv.org/abs/2608.09907)
+**Authors**: Mainak Singha, Niccolò Biondi, Elisa Ricci, Subhankar Roy
+**Categories**: cs.CV
+
+## The Gap
+
+The standard recipe for adapting a multimodal LLM to a new visual-language domain is: collect the instruction data, pool it with everything else, and run joint instruction tuning (the LLaVA lineage, and every domain-specialized variant built on it — medical VQA, remote sensing, charts and documents, GUI agents). That recipe silently assumes one organization holds all the data at once.
+
+Three families of prior work try to relax that assumption, and each one gives something up:
+
+- **Federated averaging of weights** (FedAvg-style, including LoRA-federated variants): clients train locally, the server averages parameters. Averaging independently-trained nonlinear modules degrades sharply when client distributions differ; you get one blurred model, and you lose the ability to say "this capability came from client 3, revoke it."
+- **Adapter/LoRA banks with post-hoc merging** (task arithmetic, TIES, model soups): keeps modules separate, but merging assumes the modules live in a compatible coordinate system with comparable magnitudes. Independently trained modules typically do not.
+- **MoE upcycling of a dense FFN** (MoE-LLaVA and relatives): works well, but the standard training loop assumes you can see all domains at once when learning the router. Routers are exactly the component that needs cross-domain contrast to calibrate.
+
+So the specific boundary is: *we know how to build a multi-domain MoE when data is centralized, and we know how to train locally when it is not, but we do not have a way to compose independently trained per-client experts without replaying other clients' data.* The blocker the paper names is concrete and mechanical — privately trained FFN experts drift to different output scales and magnitudes, so a router trained on one client's activations cannot mix them sanely.
+
+```
+[P] Adapting an MLLM to many visual-language domains
+    presumes centralized joint training over all data
+              |
+              v
+[Constraint] Clients are private / permission-limited:
+    no cross-client data movement, no cross-client replay
+              |
+              v
+[A] Domain knowledge is largely FFN-local, so it can be
+    parked in per-client experts .. IF their output
+    scales/magnitudes are made comparable
+              |
+              v
+[M] DistMoE
+    stage 1: freeze public FFN, train private FFN per client
+    stage 2: on (local data + PUBLIC data), train only
+             router + tiny private projection adapter,
+             with an isotropic regularization loss
+              |
+              v
+[E] Diverse VL benchmarks: composed model competitive with
+    joint training; experts reusable / pluggable; token-wise
+    routing works with no domain label at test time
+              |
+              v
+[C] Public data is a good enough shared anchor to replace
+    cross-client rehearsal for expert composition
+```
+
+## The Increment
+
+**One sentence**: Before, combining independently trained per-client experts required either weight averaging (which blurs) or a joint calibration pass over pooled data (which is exactly what privacy forbids); after, you calibrate each expert against **public* data plus a frozen public FFN, and the experts become mixable by a shared router without any client ever seeing another client's samples.
+
+### Core Mechanism
+
+The architecture is a per-layer two-slot MoE inside the language decoder. Every decoder layer keeps its original pretrained FFN — call it the **public expert** — and gains a **private FFN expert** owned by one client. In the first stage, each client trains only its own private FFN (plus whatever projector/visual glue the setup needs) on its local instruction data, with the public FFN frozen. This part is unremarkable and embarrassingly parallel: N clients, N private FFNs, zero communication. It is also where the problem is created. Each private FFN converges to whatever output statistics its own local loss preferred; one client's expert may emit activations an order of magnitude larger than another's, and the residual stream has no idea how to reconcile them.
+
+The interesting stage is the second one, **public-anchored expert composition**. Here the private FFNs are frozen and only two lightweight things get trained: the per-layer **routers** and a small **private projection adapter** sitting on each private expert's output. Crucially, the training mixture is **local client data plus public data* — never another client's data. Public data is the shared coordinate system: because every client's composition step sees the same public distribution passing through the same frozen public FFN, the adapters are all being pulled toward a common reference frame rather than toward each other. That is what makes the composition **rehearsal-free across clients**: the usual fix for merging drift is to replay a buffer of other domains, and here public data plays that role without any privacy cost.
+
+The regularizer is what turns "same reference frame" into "same scale." An **isotropic regularization loss** pushes the private expert's (post-adapter) representation toward having comparable energy in all directions instead of a few dominant, high-magnitude ones. Once each expert's output has roughly whitened, comparable geometry, the router's mixing weights mean the same thing across experts, and a weighted sum of public and private outputs stays inside the distribution the frozen decoder expects. At inference, routing is **token-wise and label-free**: each token's hidden state hits the router, which decides how much public generalist and how much private specialist to draw on. A chart-reading token can pull from the chart client's expert while a generic language token stays mostly public — with no one telling the model which domain the input came from.
+
+```
+                 h  (token hidden state, decoder layer L)
+                 |
+      +----------+----------+-----------------+
+      |          |          |                 |
+      v          v          v                 v
+ [ Router R ] [Public   [Private FFN c1]  [Private FFN cN]
+  (stage-2      FFN ]     (frozen after     (frozen after
+   trained)    (frozen)    stage 1)          stage 1)
+      |          |          |                 |
+      |          |          v                 v
+      |          |    [Proj Adapter 1]  [Proj Adapter N]
+      |          |     (stage-2, tiny)   (stage-2, tiny)
+      |          |          |                 |
+      |          |          +-- isotropic reg |
+      |          |              on outputs  --+
+      |          |          |                 |
+      |          v          v                 v
+      +---> w_0 * y_pub + w_1 * y_1 + ... + w_N * y_N
+                          |
+                          v
+                    h' (back to residual stream)
+
+  stage 1 (per client, no comms):  train private FFN only
+  stage 2 (per client, no comms):  train R + Adapter only,
+           data = local client data + PUBLIC data,
+           loss = task loss + isotropic regularization
+```
+
+**The load-bearing metaphor: a remote recording session with no rehearsal.**
+
+Think of an album made by musicians who never meet. The **public FFN** is the backing track and click track — fixed, shipped to everyone, never re-recorded. Each **client** is a session musician in their own home studio recording one stem: the cellist in Berlin, the steel guitarist in Nashville. Stage 1 is everyone recording their part alone against the click. It works, and it needs no coordination.
+
+Then you try to mix. The problem is exactly what every remote-collab producer hits: the stems come back at wildly different levels, with different room tone and different frequency emphasis. Sum them naively and the cello buries the guitar. This is the scale-and-magnitude drift.
+
+Stage 2 is mastering-by-reference, done independently per stem. You do *not* send the cellist the guitarist's stem (that is the cross-client rehearsal you cannot afford). Instead every musician masters against the **same reference track** — the public data. The **projection adapter** is the gain-and-EQ plugin on the channel strip: cheap, doesn't touch the performance itself, just makes the stem sit correctly against the reference. The **isotropic regularization** is loudness and spectral normalization: flatten the freak peaks so no stem hogs the mix and so a fader position means the same thing on every channel. The **router** is the mixing engineer riding the faders — but riding them per bar rather than per song (token-wise, not sequence-wise), and doing it **by ear* rather than from a cue sheet (no domain labels). Because every stem was mastered to the same reference, the engineer's fader moves compose sensibly even though the musicians never played together.
+
+The metaphor also predicts the failure mode, which is a good sign it's the right one: if the reference track sounds nothing like the final song — public data far from a client's domain — then mastering to it won't make the stems sit together.
+
+### Key Concepts
+
+- **Mixture-of-Experts routing inside an FFN**: A transformer layer has an attention block and then a feedforward block that is just "expand, nonlinearity, contract" — this is where most of the layer's parameters and, empirically, most of its stored factual/domain knowledge live. MoE replaces that single block with several parallel blocks plus a tiny classifier (the router) that reads each token's vector and decides which blocks to use for **that token*. Concretely: for the token "ECG" the router might send 70% of the weight to the medical expert; for the token "the" it sends everything to the general expert. Two things worth internalizing: the decision is per token, not per sentence, and the router is a learned function of the hidden state, so it needs to have *seen contrasting inputs* to learn any contrast. That last point is precisely why distributed training breaks routers.
+
+- **Representation drift in scale and magnitude**: Suppose two people are each told to write a number on a slip of paper indicating "how much I recommend this restaurant," with no scale given. One writes 7 (out of 10), the other writes 850 (some personal scale). Both slips are informative; averaging them is nonsense. Neural modules trained independently do the same thing — nothing in a local loss pins down the **norm* of the module's output, only that it be useful to the rest of the local network. Since MoE combines experts by weighted sum into a residual stream, mismatched norms mean the loudest expert wins regardless of relevance. Fixing this requires a shared calibration signal, which is the whole ballgame here.
+
+- **Isotropic regularization**: "Isotropic" means "the same in all directions." Take the cloud of output vectors a module produces over many inputs and look at its shape. A drifted module produces a cigar: enormous variance along one or two directions, almost none elsewhere. An isotropic module produces a ball. Practically this is done by penalizing the spread of the representation's singular values / off-diagonal covariance — a soft whitening. Why care? A ball-shaped output distribution has a well-defined characteristic magnitude, so scaling it by a router weight of 0.3 does something predictable; a cigar-shaped one does not, and it also wastes capacity because most of the output space is unused. It's the neural-network version of normalizing every recording to the same LUFS before mixing.
+
+- **Rehearsal-free (in the cross-client sense)**: In continual learning, "rehearsal" means keeping a buffer of old data to replay so the model doesn't forget. The natural fix for merging drifted experts is exactly that — replay a slice of every domain during calibration. Here that is forbidden, so the paper substitutes public data as a **proxy* rehearsal set. The claim is not that no data is replayed; it's that no *client* data crosses a boundary. Worth keeping straight, because it determines what the privacy guarantee actually is (a data-locality guarantee, not a formal one).
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+  client A data                          [ Public FFN ]  frozen, shared
+  client B data  --> POOL --+                 ^  anchor
+  client C data             |                 |
+                            v            +----+-------------------+
+                    [ joint tuning ]     |    |         |         |
+                            |          [PrivA][PrivB][PrivC]  .. (frozen)
+                            v            |     |         |
+                     one dense model     [ad] [ad]     [ad]  <- trained on
+                     (no attribution,     \    |        /       local + PUBLIC
+                      no removal)          \   |       /        w/ isotropic reg
+                                            v  v      v
+   ..or FedAvg:                             [ Router ] <- trained the same way
+     w_A, w_B, w_C -> mean(w)                    |
+              |                                  v
+              v                        per-token mix, no domain label,
+      averaged weights: drift          experts pluggable / removable
+      collapses into blur
+```
+
+From pooling data to pooling *modules*: the core shift is replacing a shared training set with a shared **reference distribution**, so calibration — not data — becomes the thing that gets centralized.
+
+## Expert Assessment
+
+A caveat on scope: I am working from the abstract and the framing here, not a line-by-line read of the tables. Treat the experimental section below as "what I would check and where the pressure points are," not as a verified audit.
+
+**Problem choice**: Real gap, and well-positioned. The trajectory is unmistakable — MoE upcycling of MLLMs became standard in 2024, modular adapter banks and merging became standard shortly after, and federated MLLM tuning has been the obvious next box to fill. The specific framing (composition without cross-client rehearsal) is sharper than the generic "federated multimodal tuning" papers because it names a mechanical failure — magnitude drift — rather than gesturing at "heterogeneity." The modularity story also has genuine practical pull: per-client attribution and removal is a compliance feature, not just an ablation. Mild deduction because "clients" here is really "domains with a wall between them," and the paper is closer to modular domain-incremental learning than to federated learning proper; some readers will feel the privacy framing is doing motivational work the method doesn't cash out.
+
+**Method maturity**: Clever, but the cleverness is in the assembly, not the parts. Public expert plus private expert per layer is upcycling; the projection adapter is a bottleneck adapter; isotropic/whitening regularizers have a decade of history in representation learning and have already been used for merging and for anti-collapse. The load-bearing idea is the **choice of anchor* — using public data plus the frozen public FFN as the common coordinate system — and that idea is good and cheap. Two things nag. First, simpler baselines hover uncomfortably close: per-expert output RMS normalization, or fitting a scalar gain per expert on public data, might recover much of the isotropic loss's benefit; I'd want that ablation explicitly, and I'd want it against a strong merging baseline (TIES / task arithmetic with rescaling) rather than plain averaging. Second, cost scaling: a private FFN per client per layer is a lot of parameters. With ten clients you are shipping something like a 10x-FFN model, and the abstract's "lightweight" refers to the stage-2 adapters, not to the expert bank. Whether top-k routing keeps *inference* cost flat while memory blows up is the question a deployment reader will ask first.
+
+**Experimental integrity**: The construction is the thing to scrutinize. Distributed-tuning papers get to choose their client split, and the difficulty of the whole problem is set by that choice — five visually and linguistically disjoint domains is a real test; five slices of the same instruction corpus is not. "Competitive performance" in the abstract is honest phrasing and I read it as slightly-below centralized joint training, which is the expected and acceptable outcome; if any table shows the distributed method **beating* joint training, that needs a mechanism, not a victory lap. The other pressure points: (a) how much public data does stage 2 consume, and does performance degrade gracefully as that shrinks — because if it needs a lot of public data close to each client's domain, the anchor assumption is load-bearing in a way that limits applicability; (b) does the router actually specialize, or does it collapse to near-uniform mixing (routing entropy per domain would settle this in one figure); (c) scaling in client count, since drift and router confusion should both worsen with N, and papers in this area frequently stop at three or four clients.
+
+**Writing quality**: The abstract is well-constructed — it names the failure mode instead of hiding behind "heterogeneity," which is rarer than it should be. The likely corner-cut is the justification of the isotropic loss: papers reach for whitening because it empirically works, and the gap between "different scales and magnitudes" and "therefore penalize anisotropy" needs an argument, ideally a measurement showing the drift is anisotropic rather than just a scalar mismatch. If I could have one section rewritten, it would be that: a short diagnostic — spectra of private expert outputs before and after composition, and routing weight distributions across clients — would convert the method from plausible engineering into an explained phenomenon, and it would preempt the "why not just normalize the norms?" reviewer.
+
+**Verdict**: weak accept — a genuinely useful and well-scoped assembly of known parts around one good idea (public data as the merging anchor), whose acceptance should hinge on whether the ablations separate "isotropic regularization" from "any output normalization" and whether the client splits are hard enough to be interesting.
+
+## Takeaways
+
+Things here that transfer beyond this paper:
+
+- **Use a public reference distribution as your merging coordinate system.** This is the reusable trick. Any time you have independently trained modules that must later be combined — LoRA marketplaces, per-tenant adapters, per-team fine-tunes — you can make them compatible by having each one calibrated against a shared public batch through a shared frozen trunk, without ever moving private data. It's an alternative to both weight averaging and joint retraining, and it costs one extra cheap stage.
+- **Separate "learn the knowledge" from "learn how to be combined."** Stage 1 trains capacity; stage 2 trains only interfaces (router plus adapter) with capacity frozen. Structuring modular systems this way means adding a new participant never touches existing experts and never requires their data. That's a systems pattern, not a vision pattern.
+- **Anisotropy is a merge blocker, and it is measurable.** Before you debug a bad model merge with hyperparameters, look at the singular value spectrum of each module's outputs on a common probe set. A cigar-shaped output cloud tells you the modules aren't speaking the same language and no mixing weight will fix it. Cheap diagnostic, widely applicable.
+- **Token-level routing removes the need for a domain classifier.** If you have been maintaining a router that first classifies the input's domain and then dispatches to a specialist, note that per-token mixing inside the FFN subsumes that, and handles inputs that straddle domains (a medical chart in a slide deck) rather than forcing a single choice.
+- **What not to take on faith**: "rehearsal-free" means no **client* data is replayed — public data still is. If your setting has no public data resembling your clients' domains (genuinely idiosyncratic internal corpora), the anchor disappears and the method's central assumption goes with it.
+:::
+
+:::zh
+**论文**: [2608.09907](https://arxiv.org/abs/2608.09907)
+**作者**: Mainak Singha, Niccolò Biondi, Elisa Ricci, Subhankar Roy
+**分类**: cs.CV
+
+## 缺口
+
+把多模态大模型适配到新的视觉语言领域，标准做法就一条：把指令数据收集起来，和其他数据混在一起，做联合指令微调。
+
+LLaVA 那一脉，以及在它之上做的所有领域特化版本——医学 VQA、遥感、图表文档、GUI agent——都是这个套路。
+
+这个套路悄悄地假设了：有一个组织能同时拿到所有数据。
+
+想放松这个假设的前人工作大致三类，每类都付出了代价：
+
+- **权重平均式联邦学习**（FedAvg 及其 LoRA 变体）：客户端本地训，服务端把参数平均一下。问题是，把独立训练出来的非线性模块做平均，一旦客户端分布差异大，效果掉得很厉害；最后你得到一个被抹平的模型，而且再也说不出「这个能力来自客户端 3，现在要把它撤掉」。
+- **Adapter/LoRA 仓库 + 事后合并**（task arithmetic、TIES、model soup）：模块是分开的，但合并的前提是这些模块处在一个兼容的坐标系里、量级可比。独立训练出来的模块通常不满足这一点。
+- **把 dense FFN 升级成 MoE**（MoE-LLaVA 一类）：效果好，但标准训练流程假设学 router 的时候能同时看到所有领域。而 router 恰恰是最需要跨领域对比才能校准的组件。
+
+所以具体的边界是：**数据集中时我们知道怎么造多领域 MoE，数据不集中时我们知道怎么本地训，但我们没有办法在不回放其他客户端数据的前提下，把各自独立训出来的专家组合起来。**
+
+这篇论文点出的障碍很具体也很机械：私有训练出来的 FFN 专家会漂移到不同的输出尺度和量级上，于是在某一个客户端激活值上训出来的 router，没法合理地把它们混起来。
+
+```
+[P] 把 MLLM 适配到多个视觉语言领域
+    默认可以在全部数据上做集中式联合训练
+              |
+              v
+[约束] 客户端是私有的 / 受权限限制:
+    数据不能跨客户端流动, 也不能跨客户端回放
+              |
+              v
+[A] 领域知识主要落在 FFN 里, 所以可以寄存在
+    每个客户端各自的专家里 .. 前提是它们的
+    输出尺度/量级被弄成可比的
+              |
+              v
+[M] DistMoE
+    阶段一: 冻结公共 FFN, 每客户端训自己的私有 FFN
+    阶段二: 在 (本地数据 + 公共数据) 上, 只训
+            router + 极小的私有投影 adapter,
+            外加一个等向性正则损失
+              |
+              v
+[E] 多个视觉语言 benchmark: 组合后的模型与联合训练
+    可比; 专家可复用可插拔; 推理时不给领域标签也能
+    做 token 级路由
+              |
+              v
+[C] 公共数据足以充当共享的锚点, 从而替代
+    「跨客户端回放」这件做不到的事
+```
+
+## 增量
+
+**一句话**：以前要把各自独立训练的客户端专家合起来，只有两条路——权重平均（会糊）或者在汇总数据上再做一次联合校准（而这正是隐私不允许的）；这篇论文之后，你可以拿**公共数据**加上冻结的公共 FFN 去逐个校准每个专家，让它们被同一个 router 混合，而任何客户端都不需要看到别人的样本。
+
+### 核心机制
+
+架构是在语言解码器每一层放一个「双槽 MoE」。
+
+每层保留原来预训练的 FFN，称为**公共专家**；再加一个属于某个客户端的**私有 FFN 专家**。
+
+第一阶段，每个客户端在自己的本地指令数据上只训自己的私有 FFN（以及需要的 projector 之类的粘合层），公共 FFN 冻结。
+
+这一段没什么稀奇，而且是天然并行的：N 个客户端，N 个私有 FFN，零通信。
+
+但问题也正是在这里被制造出来的：每个私有 FFN 收敛到的输出统计量，完全由它自己的本地 loss 决定；一个客户端的专家输出可能比另一个大一个数量级，而残差流根本不知道该怎么调和它们。
+
+有意思的是第二阶段，**以公共数据为锚的专家组合**（public-anchored expert composition）。
+
+这里私有 FFN 被冻结，只训两个轻量的东西：每层的 **router**，以及挂在每个私有专家输出上的一个小**私有投影 adapter**。
+
+关键在于训练混合数据是「本地客户端数据 + 公共数据」——绝不包含别的客户端的数据。
+
+公共数据就是那个共享坐标系：因为每个客户端的组合阶段都看同一个公共分布、都经过同一个冻结的公共 FFN，所有 adapter 是被拉向一个共同参照系，而不是互相对齐。
+
+这就是「跨客户端 rehearsal-free」的含义：合并漂移的常规解药是回放其他领域的数据缓冲区，这里公共数据顶替了这个角色，且不付隐私代价。
+
+正则项负责把「同一个参照系」变成「同一个尺度」。
+
+**等向性正则损失**（isotropic regularization）推动私有专家（过了 adapter 之后）的表征在各个方向上能量大致相当，而不是被少数几个高量级的主方向霸占。
+
+一旦每个专家的输出几何被大致白化、彼此可比，router 给出的混合权重在不同专家之间就是同一个意思，公共输出与私有输出的加权和也仍然落在冻结解码器所预期的分布里。
+
+推理时，路由是 **token 级且不需要标签的**：每个 token 的隐状态送进 router，由它决定这一步取多少「公共通才」、取多少「私有专家」。
+
+读图表的 token 可以去调用图表客户端的专家，而普通语言 token 基本留在公共侧——没有人告诉模型输入来自哪个领域。
+
+```
+                 h  (第 L 层某个 token 的隐状态)
+                 |
+      +----------+----------+-----------------+
+      |          |          |                 |
+      v          v          v                 v
+ [ Router R ] [公共 FFN] [私有 FFN c1]    [私有 FFN cN]
+  (阶段二训)    (冻结)    (阶段一后冻结)    (阶段一后冻结)
+      |          |          |                 |
+      |          |          v                 v
+      |          |    [投影 Adapter 1]  [投影 Adapter N]
+      |          |     (阶段二, 极小)     (阶段二, 极小)
+      |          |          |                 |
+      |          |          +-- 输出上加      |
+      |          |              等向性正则  --+
+      |          |          |                 |
+      |          v          v                 v
+      +---> w_0 * y_pub + w_1 * y_1 + ... + w_N * y_N
+                          |
+                          v
+                     h' (回到残差流)
+
+  阶段一 (各客户端, 无通信): 只训私有 FFN
+  阶段二 (各客户端, 无通信): 只训 R + Adapter,
+           数据 = 本地数据 + 公共数据,
+           损失 = 任务损失 + 等向性正则
+```
+
+**承重核喻：一场没有排练的远程录音。**
+
+想象一张由从未见面的乐手合作完成的专辑。
+
+**公共 FFN** 就是发给所有人的伴奏轨和节拍器——固定不变，永不重录。
+
+每个**客户端**是一位在自家录音棚里录一条分轨（stem）的乐手：柏林的大提琴手、纳什维尔的钢棒吉他手。
+
+阶段一就是每个人对着节拍器独自录自己那条。这行得通，而且不需要任何协调。
+
+然后你要混音。问题正是每个搞远程合作的制作人都会撞上的：交回来的分轨电平天差地别，房间声不同、频段侧重也不同。
+
+直接相加，大提琴会把吉他埋掉。这就是尺度与量级的漂移。
+
+阶段二是**对着参考轨做母带**，而且是每条分轨各自独立做。
+
+你**不会**把吉他手的分轨发给大提琴手（那就是你负担不起的跨客户端排练）。
+
+取而代之，每个乐手都对着**同一条参考轨**——也就是公共数据——去调整。
+
+**投影 adapter** 就是通道条上的增益与 EQ 插件：便宜、不动演奏本身，只是让这条分轨相对参考轨坐得住。
+
+**等向性正则**是响度与频谱归一化：把那些畸高的峰压平，让没有哪条分轨独占整个混音，也让推子位置在每条通道上意思一致。
+
+**Router** 是那位推推子的混音师——但他是**逐小节**推而不是逐首歌推（token 级而非序列级），而且是**凭耳朵**推而不是照着提示单（不需要领域标签）。
+
+因为所有分轨都对着同一条参考轨做过母带，混音师的推子动作就能合理地叠加，即便这些乐手从未一起演奏过。
+
+这个比喻还能预测失效模式，这是它靠得住的信号：如果参考轨和最终成品的声音风格毫不相干——公共数据离某个客户端的领域很远——那么对着它做母带也不会让分轨坐得住。
+
+### 关键概念
+
+- **FFN 内部的 MoE 路由**：Transformer 一层是注意力块加上一个前馈块，前馈块就是「升维、非线性、降维」，这里装着这一层大部分参数，经验上也装着大部分领域与事实知识。MoE 把这一个块换成若干并行的块，再加一个小分类器（router）读每个 token 的向量，决定**这个 token** 用哪些块。具体点说：遇到 token「心电图」，router 可能把 70% 权重给医学专家；遇到「的」，就全给通用专家。两点值得记牢：决策是 token 级的，不是句子级的；router 是隐状态的一个可学函数，所以它必须**见过有对比的输入**才能学出对比。而这恰恰就是分布式训练把 router 搞坏的原因。
+
+- **表征的尺度与量级漂移**：设想让两个人各自在纸条上写一个数，表示「我多推荐这家餐厅」，但不给量纲。一个写 7（满分 10），另一个写 850（他自己的尺度）。两张纸条都有信息量，但把它们平均就是胡闹。独立训练的神经模块干的是同一件事——本地 loss 对模块输出的**范数**没有任何约束，只要求它对本地网络其余部分有用。而 MoE 是把专家加权求和进残差流的，范数不匹配就意味着「最大声的专家赢」，跟它相关不相关无关。要修就必须有一个共享的校准信号，这就是本文的全部戏眼。
+
+- **等向性正则**：「等向」就是「各方向都一样」。把一个模块在大量输入上产生的输出向量看成一团点云，看它的形状。漂移过的模块产生的是雪茄形：一两个方向上方差极大，其他方向几乎没有。等向的模块产生的是球形。做法上通常是惩罚表征奇异值的离散程度、或者协方差的非对角项——一种软白化。为什么在意？球形的输出分布有一个明确的特征量级，于是用 router 权重 0.3 去缩放它，效果是可预期的；雪茄形则不然，而且它还浪费容量，因为大部分输出空间根本没被用到。这就是神经网络版的「混音前把每条录音归一化到同一个 LUFS」。
+
+- **Rehearsal-free（在跨客户端这个意义上）**：在持续学习里，rehearsal 指保留一份旧数据缓冲区回放，以免遗忘。修复漂移专家合并问题最自然的办法恰恰就是它——校准时回放每个领域的一小片。这里这条路被禁了，所以论文用公共数据充当**代理**回放集。它主张的不是「没有回放任何数据」，而是「没有任何**客户端**数据越界」。这个区分要拎清楚，因为它决定了隐私保证的性质：这是数据本地性保证，不是形式化的隐私保证。
+
+## 框架转变
+
+```
+之前 (主流方法):                     之后 (本文方法):
+
+  客户端 A 数据                        [ 公共 FFN ]  冻结, 共享
+  客户端 B 数据 --> 汇总 --+                ^  锚点
+  客户端 C 数据            |                |
+                           v           +----+-------------------+
+                    [ 联合微调 ]       |    |         |         |
+                           |          [私有A][私有B][私有C] .. (冻结)
+                           v            |     |         |
+                   一个 dense 模型      [ad]  [ad]     [ad] <- 在本地 +
+                   (无法归因,                  \  |    /       公共数据上训
+                    无法移除)                   \ |   /        + 等向性正则
+                                                 v v  v
+   ..或者 FedAvg:                             [ Router ] <- 同样方式训
+     w_A, w_B, w_C -> 取平均                       |
+              |                                    v
+              v                          token 级混合, 不需领域标签,
+      平均后的权重: 漂移导致                专家可插拔 / 可移除
+      结果被抹成一团
+```
+
+一句话：从**汇总数据**到**汇总模块**，核心转变是——用共享的**参照分布**取代共享的训练集，于是被集中的东西变成了「校准」而不是「数据」。
+
+## 专家评审
+
+先声明范围：我依据的是摘要与它的问题框架，不是逐行读过表格。下面关于实验的部分，请当成「我会去查什么、压力点在哪里」，而不是一次已完成的核查。
+
+**选题眼光**：真缺口，位置也找得准。
+
+轨迹很清楚——MLLM 的 MoE upcycling 在 2024 年成了标配，模块化 adapter 仓库与模型合并紧随其后，联邦 MLLM 微调是明摆着的下一格。
+
+「无需跨客户端回放的专家组合」这个提法，比一堆泛泛而谈的「联邦多模态微调」要锐利，因为它点的是一个机械性的失效原因——量级漂移——而不是含糊地挥手说「异构性」。
+
+模块化这条线也有真实的实用拉力：按客户端归因和移除是合规特性，不只是消融实验的花样。
+
+小扣分在于，这里的「客户端」实质是「彼此之间有墙的领域」，方法更接近模块化的领域增量学习，而不是真正意义上的联邦学习；有些读者会觉得隐私这套说辞承担了方法本身并未兑现的动机功能。
+
+**方法成熟度**：巧劲，但巧在组装，不在零件。
+
+每层公共专家加私有专家是 upcycling；投影 adapter 是瓶颈 adapter；等向性/白化正则在表征学习里有十来年历史，在模型合并和防坍缩里也早被用过。
+
+真正承重的是**锚点的选择**——用公共数据加冻结的公共 FFN 当共同坐标系——这个想法好，而且便宜。
+
+两点让我不放心。
+
+第一，更简单的基线贴得太近：给每个专家输出做 RMS 归一化，或者在公共数据上只拟合一个标量增益，可能就能拿回等向性损失的大半收益；我要看这个消融被明确做出来，而且合并基线要是强的（带 rescaling 的 TIES / task arithmetic），不能只跟朴素平均比。
+
+第二，代价的扩展性：每客户端每层一个私有 FFN，参数量很可观。
+
+十个客户端你就在发一个「十倍 FFN」的模型，而摘要里的「轻量」指的是阶段二的 adapter，不是这个专家库。
+
+top-k 路由能否让**推理**开销保持平坦而只让显存爆掉，是任何做部署的读者第一个会问的问题。
+
+**实验诚意**：要盯的是实验的构造方式。
+
+分布式微调类论文可以自己选客户端划分，而整个问题的难度就是由这个选择决定的：五个在视觉与语言上都不相交的领域是真考验；把同一个指令语料切成五份就不是。
+
+摘要里的「competitive performance」是诚实的措辞，我读作「略低于集中式联合训练」，这是预期之内也可以接受的结果；反过来，如果哪张表显示分布式方法**打败**了联合训练，那需要给出机制，而不是当成战果庆祝。
+
+其他压力点：（a）阶段二消耗多少公共数据，公共数据变少时性能是否优雅退化——因为如果它需要大量、且贴近各客户端领域的公共数据，那锚点假设的承重程度就限制了适用范围；（b）router 是真的分化了，还是坍缩成近似均匀混合（按领域画路由熵，一张图就能定案）；（c）客户端数量上的扩展性，漂移和 router 混淆都应该随 N 恶化，而这类论文常常停在三四个客户端。
+
+**写作功力**：摘要写得不错——它把失效模式点了名，而不是躲在「异构性」后面，这比应有的频率要罕见。
+
+大概率偷懒的地方是等向性损失的论证：白化被拿来用，多半是因为经验上有效，而从「尺度和量级不同」推到「所以要惩罚各向异性」之间是有缺口的，最好要有一个测量，表明漂移确实是各向异性的，而不只是一个标量错配。
+
+如果我只能要求重写一节，就是这一节：一个简短的诊断——组合前后私有专家输出的谱、以及跨客户端的路由权重分布——就能把方法从「看起来合理的工程」升级为「被解释清楚的现象」，同时也提前挡掉那个「那为什么不直接归一化范数？」的审稿人。
+
+**判决**：**弱接收** —— 围绕一个好想法（公共数据当合并锚点）做出的、确实有用且范围清晰的已知零件组装；能否接收应取决于消融是否把「等向性正则」与「任意输出归一化」区分开来，以及客户端划分是否难到值得一做。
+
+## 要点总结
+
+这篇里能带走、且能迁移出去的东西：
+
+- **拿一个公共参照分布当你的合并坐标系。** 这是可复用的核心招法。任何时候你有一批独立训练、日后要组合的模块——LoRA 市场、按租户的 adapter、各团队各自的微调——你都可以让每个模块隔着同一个冻结主干、对着同一批公共数据做校准，从而变得互相兼容，而私有数据一步都不用动。它是权重平均与联合重训之外的第三条路，代价只是多一个便宜的阶段。
+- **把「学知识」和「学怎么被组合」拆开。** 阶段一训容量，阶段二在容量冻结的前提下只训接口（router 加 adapter）。按这个方式组织模块化系统，意味着接入一个新参与者永远不需要动已有专家，也永远不需要它们的数据。这是系统模式，不是视觉领域的模式。
+- **各向异性是合并的拦路虎，而且它是可测的。** 在你用超参去调一个失败的模型合并之前，先在一批共同探针数据上看每个模块输出的奇异值谱。雪茄形的输出点云告诉你这些模块说的不是同一种语言，任何混合权重都救不了。诊断很便宜，适用面很广。
+- **Token 级路由让领域分类器变得没必要。** 如果你一直在维护一个「先判输入属于哪个领域、再分发给专家」的 router，注意 FFN 内部的逐 token 混合把这件事整个吸收了，而且能处理跨领域的输入（幻灯片里的一张医学图表），而不是被迫二选一。
+- **不该照单全收的部分**：「rehearsal-free」意思是没有回放**客户端**数据——公共数据还是回放了。如果你的场景里根本不存在与客户端领域相似的公共数据（真正独特的内部语料），锚点就没了，方法的核心假设也跟着一起没了。
+:::
