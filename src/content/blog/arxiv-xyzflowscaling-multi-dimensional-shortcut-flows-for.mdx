@@ -1,0 +1,370 @@
+---
+title:
+  en: "XYZFlow: When More Context Beats Fewer Steps"
+  zh: "XYZFlow：与其减少步数，不如增加上下文"
+description:
+  en: "XYZFlow argues that few-step generation fails because the jump target is ambiguous, not because the model is too small — and fixes it by conditioning on denoising history and on neighboring patches' trajectories instead of distilling a teacher."
+  zh: "XYZFlow 认为少步生成之所以糊，不是模型容量不够，而是大步跳跃的目标本身有歧义；解法不是蒸馏教师，而是把去噪历史和邻近 patch 的整条轨迹都喂给模型。"
+date: 2026-08-13
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-xyzflowscaling-multi-dimensional-shortcut-flows-for.png"
+---
+
+![Concept animation](/arxiv-visuals/xyzflowscaling-multi-dimensional-shortcut-flows-for/ConceptScene.gif)
+
+
+:::en
+**Paper**: [2608.12276](https://arxiv.org/abs/2608.12276)
+**Authors**: Jinxiu Liu, Xuanming Liu, Kangfu Mei, Yandong Wen, Weiyang Liu
+**Categories**: cs.CV
+
+## The Gap
+
+The fast-sampling literature has mostly converged on one recipe: train a good slow model, then compress it. Progressive distillation, consistency models and LCM, DMD, rectified-flow reflow — all of them need a teacher, and all of them inherit the teacher's failure modes plus a distillation gap on top. Shortcut models broke that dependency by training a single network conditioned on both time `t` and step size `d`, with a self-consistency constraint that one jump of size `2d` should equal two jumps of size `d`. No teacher, few steps, one training run.
+
+But shortcut models hit a wall that is easy to state and hard to fix. When you ask a network to jump a long distance along a probability path, the state you are jumping from is compatible with many different endpoints. The regression target is therefore an *average* over plausible endpoints, and averaging images gives you exactly what everyone observes: soft edges, washed texture, mode collapse toward the mean. The usual response is to make the model bigger or take a couple more steps.
+
+XYZFlow's bet is that this is a **conditioning** problem, not a capacity problem. The path is ambiguous because the model is told too little about it: it sees only the current noisy state, Markov-style, and nothing about where it came from or what its neighbors decided. Add the right conditioning and the path becomes identifiable — which the paper frames as **autoregressive modeling being implicit flow straightening*.
+
+```
+[PROBLEM] high fidelity needs 50+ steps; few-step methods
+          distill a teacher and inherit its ceiling
+     |
+     v
+[WHY IT BREAKS] one big jump from (x_t, t, d) is compatible
+                with many endpoints  ==>  target is an
+                average  ==>  blur / lost detail
+     |
+     v
+[ASSUMPTION] ambiguity comes from missing context, not from
+             missing parameters.  richer conditioning
+             == more identifiable path == straighter flow
+     |
+     +-------------------+--------------------+
+     v                   v                    v
+[base axis: d]     [Y: temporal]         [X: spatial]
+ shortcut self-     non-Markovian         Next Shortcut
+ consistency        conditioning on       Prediction: patch
+ (d + d == 2d)      the whole denoise     n conditioned on
+                    history               traces of patch <n
+     |                   |                    |
+     +-------------------+--------------------+
+                         v
+[EVIDENCE] 7.2x - 8.5x speedup over the teacher with
+           competitive FID; NSP dominates both
+           param-scaling and step-scaling on the
+           quality-vs-latency curve
+                         |
+                         v
+[CONCLUSION] scale the conditioning axes, not the step count
+             or the parameter count
+```
+
+## The Increment
+
+**One sentence**: Before, making generation fast meant squeezing a teacher into fewer steps and eating the quality loss; after, it means keeping few steps but feeding the sampler far more context — its own denoising history and its neighbors' trajectories — so that each big jump is well-determined in the first place.
+
+### Core Mechanism
+
+Start from the shortcut-model backbone: a velocity network `v_theta` takes `(x_t, t, d)` and predicts a jump, trained with a flow-matching loss plus the self-consistency loss that ties one `2d` step to two `d` steps. XYZFlow keeps that skeleton and widens the conditioning bundle along two orthogonal axes.
+
+**Temporal scaling (Y)** makes sampling non-Markovian. In a standard sampler each step throws away everything except the current latent. Here the previously visited states are cached and fed back in as additional conditioning, so at step `t` the network sees `x_t` **and* the trail `x_1, x`_{1-d}`, ..., x_{t+d}`. That trail encodes the heading and curvature of the trajectory so far, which is precisely the information that disambiguates where the path is going. Note the cost profile: this is nearly free at inference because those states already exist — you are reusing computation you had thrown away.
+
+**Spatial scaling (X)** is the more aggressive move, called **Next Shortcut Prediction**. Instead of denoising the whole image jointly, patches are generated in sequence, and each new patch is conditioned on the **denoising trajectories* of the patches that came before it — not merely their finished pixels. That distinction is the whole point. Handing over the final clean patch is ordinary patch-wise autoregression; handing over the entire shortcut trace tells the new patch how its neighbor got there, at every noise level, which lets it align its own path from the very first jump rather than only agreeing at the end. Together with the step-size axis inherited from shortcut models, that gives the three conditioning dimensions the name gestures at (the paper's abstract only names two, so read the third as the shortcut `d` axis).
+
+```
+  conditioning bundle fed to v_theta at each jump:
+  +-------------------------------------------------------+
+  |  x_t     current noisy latent            (base)       |
+  |  t       time                            (base)       |
+  |  d       shortcut step size              (Z axis)     |
+  |  H       own visited states x_1 ... x_(t+d)   (Y axis)|
+  |  S       full denoise traces of earlier patches (X)   |
+  +-------------------------------------------------------+
+                      |
+                      v
+                [ transformer ]
+                      |
+                      v
+        v_theta  ==>  x_(t-d) = x_t - d * v_theta
+                      |
+        losses: flow matching  +  self-consistency
+                (one 2d jump == two chained d jumps)
+
+  Next Shortcut Prediction, patch order p1 -> p4:
+
+    p1 : [t, d, x_t, H1              ]  ==> trace T1
+    p2 : [t, d, x_t, H2, T1          ]  ==> trace T2
+    p3 : [t, d, x_t, H3, T1, T2      ]  ==> trace T3
+    p4 : [t, d, x_t, H4, T1, T2, T3  ]  ==> trace T4
+
+    what crosses the arrow is the *trace*, not the pixels
+```
+
+**The metaphor: a convoy driving with dead reckoning.** Each patch is a car; the clean image is the destination; the velocity network is the driver's judgment; the step size `d` is how far you dare drive between glances at the map.
+
+A vanilla few-step sampler is an amnesiac driver: at each glance they know only their current GPS coordinate, nothing about the road they just came down. From a single point, a hundred destinations are plausible, so if you ask them to drive a long stretch blind they aim at the average of all of them and end up in a field. Temporal scaling hands that driver a breadcrumb trail of every point they have passed. Now they can read off their heading and how the road is curving, and a long blind stretch becomes a safe extrapolation instead of a guess — which is why bigger steps stop hurting.
+
+Spatial scaling turns one car into a convoy on radio. The lead car drives first, and rather than just parking and texting back its final address, it broadcasts its whole route: every turn, at every stage. The second car starts driving already knowing the shape of the road ahead, so it doesn't have to rediscover it and doesn't drift out of formation. That is Next Shortcut Prediction, and it explains both the win and the cost: formation is tight (coherent, detailed images) but the cars leave one after another, so the convoy is inherently serial.
+
+### Key Concepts
+
+- **Trajectory ambiguity (and why averaging blurs)**: Imagine a very noisy patch of gray fuzz. Consistent with it are a cat's ear, a leaf, a shirt collar. A network trained by least squares to name the clean answer in one shot cannot pick; the loss is minimized by outputting the pixel-wise mean of all three, which looks like nothing in particular — soft, smudgy, mid-gray. Many small steps avoid this because each step only has to resolve a sliver of ambiguity, letting the choice be made gradually. XYZFlow's move is to kill the ambiguity with side information instead of with extra steps: if you also know the trail that led here and what the neighboring region turned out to be, "cat's ear" becomes the only sensible continuation, and one big step is safe.
+
+- **Shortcut model / self-consistency**: A normal flow model learns the instantaneous direction at each point, valid only for infinitesimal steps. A shortcut model takes step size as an **input*, so one network represents a family of samplers from 128 steps down to 1. The trick that makes it trainable without a teacher: for any state, taking two steps of size `d` and one step of size `2d` must land in the same place. That constraint propagates knowledge from cheap-and-accurate small steps up to expensive-and-crude big steps inside a single training run — a bootstrap, not a distillation.
+
+- **Autoregression as implicit flow straightening**: "Straightening" a flow means making noise-to-data paths closer to straight lines, since straight lines can be traversed in one step exactly. Reflow does this by retraining on the model's own noise-data pairs. The paper's reframing: conditioning on more context does the same thing for free, because a path only looks curved and wiggly when you are uncertain which path you are on. Pin down the context and the **effective* path — the conditional expectation the network has to regress — becomes much straighter. Autoregression is thus a straightening device that happens to be spelled as a factorization.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+ [ teacher, 50 steps ]                 [ one model, no teacher ]
+          |                                      |
+      distill / reflow                cond = (x_t, t, d, H, S)
+          |                                      |
+          v                                      v
+ [ student: x_t --> x_0 ]              x_t -o--o--o-> x_0
+   memoryless single map                    ^  ^  ^
+   whole image at once                      |  |  |   (Y)
+                                       own history fed back
+   many endpoints fit                       + (X) sideways:
+   -> averaged target                  p1 trace -> p2 -> p3
+   -> soft, low detail
+                                       path is identifiable,
+   quality ceiling <= teacher          so big jumps are exact
+   axis of improvement:                axis of improvement:
+     fewer steps, more params            more conditioning dims
+```
+
+From step-compression to context-expansion, the core shift is treating few-step generation as an *identifiability* problem solved by conditioning, rather than a *compression* problem solved by distillation.
+
+## Expert Assessment
+
+Caveat up front: I am reading from the abstract, so my read on the numbers is provisional — the specific FID values, datasets, and latency methodology are where this paper will live or die, and they are not in front of me.
+
+**Problem choice**: Genuine, and well-diagnosed. Teacher dependence is the real structural weakness of the distillation family, and the averaging pathology of large-jump regression is the correct explanation for why teacher-free few-step models look soft. It is also a crowded neighborhood: MAR/Fluid-style continuous autoregression, "next-X prediction" variants, rolling diffusion, and AR-diffusion hybrids have all been circling the "autoregression complements diffusion" idea. The framing of autoregression as implicit straightening is the freshest thing here, and it is a framing rather than a theorem.
+
+**Method maturity**: Mostly clever, partly brute force. Temporal scaling is elegant and nearly free — it generalizes self-conditioning from one previous prediction to the full history, and the cached states are already sitting in memory. Spatial scaling is where I get uneasy, because sequential patch decoding reintroduces exactly the serial latency that few-step sampling exists to remove. The paper's own claim that NSP beats step-reduction on the quality-latency curve is a bet that KV-cached patch passes are cheaper than extra full-image passes; plausible at low patch counts, fragile as resolution grows. Two simpler things deserve explicit comparison: MeanFlow, which attacks the same ambiguity by parameterizing average velocity within one network and no history at all, and plain self-conditioning, a one-line trick that captures a chunk of the temporal axis. Also unaddressed in the abstract: non-Markovian conditioning at inference means the model consumes its own past states, so exposure bias and error compounding are live risks that need a teacher-forcing or noise-augmentation story.
+
+**Experimental integrity**: The headline "7.2-8.5x teacher speedup" is a soft metric — it is measured against the authors' own teacher, so it moves with how slow that teacher was configured to be, and "competitive FID" is doing real work in that sentence. What I would want: absolute wall-clock at matched FID against LCM/DMD/shortcut/MeanFlow, iso-FLOPs and iso-parameter comparisons for the NSP-vs-model-scaling claim, and the same claim at 512px, where sequential patch decode should degrade. Scaling comparisons are notoriously sensitive to how much tuning each arm received, so that headline claim is the one I would probe hardest.
+
+**Writing quality**: "Identifiable" and "expressivity" are doing heavy lifting with no formal backing visible; even a toy two-mode example with a closed-form conditional expectation would convert the central intuition from rhetoric into an argument. The branding is also a tell — a name promising three dimensions while the abstract names two suggests the third axis is thin. The section I would rewrite is the latency accounting: make the serial cost of NSP explicit and quantified, because a skeptical reader's first instinct is that patch-wise autoregression is trading the win right back.
+
+**Verdict**: weak accept — the reframing is genuinely useful and the temporal axis is a cheap, transferable win, but the central quality-latency claim rests on comparisons that are easy to tilt and that I cannot check from the abstract.
+
+## Takeaways
+
+- **Stop throwing away your denoising history.** If you already run a multi-step DiT sampler, the previous latents are free context. Feeding them back as extra tokens is a small architectural change with a plausible quality-per-step payoff, and it subsumes self-conditioning as a special case.
+- **Pass trajectories between autoregressive units, not outputs.** This is the transferable idea. In video, hand the next frame the previous frames' per-noise-level traces instead of just the finished frames; likewise for 3D tiles, long audio, or tiled super-resolution. Sharing **how* a neighbor was produced aligns paths from the first step rather than patching up disagreement at the end.
+- **A new diagnostic reflex**: when a few-step student comes out blurry, ask whether the target is ambiguous before assuming the model is too small. Averaged-target blur and under-capacity blur look similar and have completely different fixes; conditioning is usually the cheaper one to try.
+- **Bootstrap instead of distill.** The self-consistency trick (one `2d` step equals two `d` steps) is a general pattern for transferring competence from a cheap accurate regime to an expensive crude one inside a single model — applicable well beyond image flows.
+- **Report the curve, not the point.** Comparing quality-vs-latency curves rather than FID at a fixed step count is the right evaluation posture, and it is what makes the paper's most interesting claim legible in the first place. Just hold others to the same standard you hold yourself.
+:::
+
+:::zh
+**论文**: [2608.12276](https://arxiv.org/abs/2608.12276)
+**作者**: Jinxiu Liu, Xuanming Liu, Kangfu Mei, Yandong Wen, Weiyang Liu
+**分类**: cs.CV
+
+## 缺口
+
+加速采样这条线，多年来基本收敛到同一个套路：先训一个慢而好的模型，再把它压缩。
+渐进式蒸馏、consistency model 与 LCM、DMD、rectified flow 的 reflow，全都需要一个教师，也全都在继承教师缺陷之外再叠一层蒸馏损失。
+
+Shortcut model 打破了这种依赖：用一个网络同时以时间 `t` 和步长 `d` 为条件，再加一条自一致性约束——走一个 `2d` 的大步，必须等于连走两个 `d` 的小步。
+不要教师，步数少，一次训练搞定。
+
+但 shortcut model 撞上了一堵好描述、难拆的墙。
+当你让网络沿概率路径一次跳很远时，出发点这个状态与很多个不同的终点都相容。
+于是回归目标其实是这些可能终点的**平均**，而图像取平均的结果所有人都见过：边缘发软、纹理被冲淡、往均值塌缩。
+惯常反应是把模型做大，或者多走一两步。
+
+XYZFlow 押的是另一个判断：这是**条件信息**问题，不是容量问题。
+路径之所以有歧义，是因为模型被告知得太少——它只看到当前那个带噪状态（马尔可夫式），既不知道自己从哪儿来，也不知道邻居做了什么决定。
+把该给的上下文补上，路径就变得可辨识（identifiable）。
+论文把这件事总结成一句话：**自回归就是隐式的流直化**。
+
+```
+[问题] 高保真要 50+ 步；少步方法靠蒸馏教师,
+       天花板被教师锁死
+     |
+     v
+[为何失效] 从 (x_t, t, d) 一次跳很远, 与多个终点
+           都相容 ==> 目标退化为平均 ==> 糊
+     |
+     v
+[假设] 歧义来自缺上下文, 不是缺参数.
+       更丰富的条件 == 路径更可辨识 == 流更直
+     |
+     +-------------------+--------------------+
+     v                   v                    v
+ [基础轴: d]        [Y: 时间维]           [X: 空间维]
+  shortcut 自一致    非马尔可夫: 以整条     Next Shortcut
+  (d + d == 2d)      去噪历史为条件         Prediction:
+                                           第 n 个 patch
+                                           看前面 patch
+                                           的完整轨迹
+     |                   |                    |
+     +-------------------+--------------------+
+                         v
+[证据] 相对教师 7.2x - 8.5x 加速, FID 有竞争力;
+       NSP 在质量-延迟曲线上同时打败
+       "加参数" 和 "加步数"
+                         |
+                         v
+[结论] 该扩的是条件维度, 不是步数, 也不是参数量
+```
+
+## 增量
+
+**一句话**：以前"变快"意味着把教师塞进更少的步数里、并接受掉点；这篇之后，"变快"意味着步数照旧很少，但给采样器喂进多得多的上下文——它自己的去噪历史，加上邻居的完整轨迹——让每一次大跳跃从一开始就是确定的。
+
+### 核心机制
+
+骨架仍是 shortcut model：速度网络 `v_theta` 吃 `(x_t, t, d)`，输出一次跳跃，训练目标是 flow matching 损失加上把一个 `2d` 步与两个 `d` 步绑在一起的自一致性损失。
+XYZFlow 保留这个骨架，只是把"条件包"沿两个正交方向加宽。
+
+**时间维扩展（Y）** 让采样变成非马尔可夫的。
+标准采样器每一步都把除当前 latent 之外的一切扔掉。
+这里则把走过的状态缓存起来一并喂回去，于是在第 `t` 步网络看到的是 `x_t` **加上**这条足迹 `x_1, x_(1-d), ..., x_(t+d)`。
+这条足迹编码了轨迹到此刻的朝向与弯曲程度，而这恰恰就是判定"接下来该往哪走"所缺的信息。
+注意它的成本结构：推理时几乎免费，因为这些状态本来就存在——你只是把原先扔掉的计算重新利用起来。
+
+**空间维扩展（X）** 是更激进的一步，叫 **Next Shortcut Prediction**。
+不再整张图联合去噪，而是按顺序生成 patch，每个新 patch 以前面那些 patch 的**去噪轨迹**为条件——不只是它们最终的干净像素。
+这个区别就是全部要点。
+只把最终干净 patch 递过去，那是普通的 patch 级自回归；把整条 shortcut 轨迹递过去，等于告诉新 patch 邻居是"怎么"走到那儿的、在每个噪声层级上长什么样，于是它能从第一次跳跃起就与邻居对齐，而不是只在终点勉强达成一致。
+加上从 shortcut model 继承的步长轴，就凑成了名字里暗示的三个条件维度（摘要只点名了两个，第三个可以理解为 shortcut 的 `d` 轴）。
+
+```
+  每次跳跃喂给 v_theta 的条件包:
+  +-------------------------------------------------------+
+  |  x_t   当前带噪 latent                  (基础)        |
+  |  t     时间                             (基础)        |
+  |  d     shortcut 步长                    (Z 轴)        |
+  |  H     自己走过的状态 x_1 ... x_(t+d)   (Y 轴)        |
+  |  S     已解码 patch 的完整去噪轨迹      (X 轴)        |
+  +-------------------------------------------------------+
+                      |
+                      v
+                [ transformer ]
+                      |
+                      v
+        v_theta  ==>  x_(t-d) = x_t - d * v_theta
+                      |
+        损失: flow matching + 自一致性
+              (一个 2d 步 == 串起来的两个 d 步)
+
+  Next Shortcut Prediction, patch 顺序 p1 -> p4:
+
+    p1 : [t, d, x_t, H1              ]  ==> 轨迹 T1
+    p2 : [t, d, x_t, H2, T1          ]  ==> 轨迹 T2
+    p3 : [t, d, x_t, H3, T1, T2      ]  ==> 轨迹 T3
+    p4 : [t, d, x_t, H4, T1, T2, T3  ]  ==> 轨迹 T4
+
+    箭头上传的是 *轨迹*, 不是像素
+```
+
+**核喻：一支靠推算航位行驶的车队。**
+每个 patch 是一辆车；干净图像是目的地；速度网络是司机的判断力；步长 `d` 是你敢在两次看地图之间开多远。
+
+普通的少步采样器，是个失忆司机：每次抬头只知道自己当前的 GPS 坐标，对刚开过的那条路一无所知。
+从孤零零一个点出发，上百个目的地都说得通；你让他闷头开一大段，他只能瞄准所有目的地的平均方向，最后开进田里。
+时间维扩展就是把他走过每一个点的面包屑轨迹递给他。
+现在他能读出自己的朝向、以及路是怎么弯的，那一大段闷头路就从"猜"变成了"外推"——这也正是为什么步子变大后不再掉质量。
+
+空间维扩展把一辆车变成一支带电台的车队。
+头车先开，但它不是停好车再发个最终地址给你，而是全程广播自己的路线：每个拐弯、每个阶段。
+第二辆车出发时已经知道前方路的形状，不必自己重新摸索，也不会偏离队形。
+这就是 Next Shortcut Prediction，它同时解释了收益和代价：队形很紧（图像连贯、细节保住），但车是一辆接一辆出发的，车队天生是串行的。
+
+### 关键概念
+
+- **轨迹歧义（以及为什么"取平均"会糊）**：想象一块噪声很重的灰色毛絮。
+  与它相容的可能是猫耳朵、一片叶子、一个衬衫领子。
+  一个用最小二乘训练、要求一次说出干净答案的网络无法做选择；让损失最小的输出是这三者的逐像素均值，而那看起来什么都不是——软、脏、中灰。
+  多走小步之所以能避开这点，是因为每一步只需消解一小片歧义，选择可以慢慢做出。
+  XYZFlow 的动作是用旁路信息而不是用额外步数去消灭歧义：如果你同时知道走到这里的那条足迹、以及邻近区域最后长成了什么，那"猫耳朵"就成了唯一合理的续写，一大步也就安全了。
+
+- **Shortcut model 与自一致性**：普通 flow 模型学的是每个点上的瞬时方向，只对无穷小步长成立。
+  Shortcut model 把步长当成**输入**，于是一个网络就代表了从 128 步到 1 步的一整族采样器。
+  让它能在没有教师的情况下训起来的关键技巧是：对任意状态，走两个 `d` 步和走一个 `2d` 步必须落到同一处。
+  这条约束把"便宜且准"的小步知识，在一次训练之内向上传播给"昂贵且粗"的大步——这是自举，不是蒸馏。
+
+- **自回归即隐式流直化**：把流"直化"是指让噪声到数据的路径更接近直线，因为直线可以一步走完且无误差。
+  Reflow 的做法是用模型自己产生的噪声-数据配对重训。
+  这篇的重述是：加更多上下文能免费达到同样效果，因为路径之所以看起来弯弯绕绕，是因为你不确定自己在哪条路上。
+  把上下文钉死，网络实际要回归的那个**条件期望**路径就会变得直得多。
+  于是自回归是一种直化手段，只是恰好写成了因式分解的形式。
+
+## 框架转变
+
+```
+之前 (主流方法):                    之后 (本文方法):
+
+ [ 教师, 50 步 ]                     [ 单模型, 无教师 ]
+          |                                   |
+      蒸馏 / reflow             条件 = (x_t, t, d, H, S)
+          |                                   |
+          v                                   v
+ [ 学生: x_t --> x_0 ]              x_t -o--o--o-> x_0
+   无记忆的单次映射                       ^  ^  ^
+   整张图一起处理                         |  |  |   (Y)
+                                    自己的历史回喂
+   多个终点都相容                         + (X) 横向:
+   -> 目标被平均                    p1 轨迹 -> p2 -> p3
+   -> 软, 细节丢失
+                                    路径可辨识,
+   质量上限 <= 教师                  所以大跳也准
+   改进的坐标轴:                     改进的坐标轴:
+     更少步数 / 更多参数               更多条件维度
+```
+
+一句话：从"压缩步数"到"扩张上下文"，核心转变是把少步生成当成靠**条件信息**解决的**可辨识性**问题，而不是靠蒸馏解决的**压缩**问题。
+
+## 专家评审
+
+先说前提：我只读到摘要，所以对数字的判断是暂定的——具体的 FID、数据集、延迟测量方式才是这篇论文的生死线，而这些我现在看不到。
+
+**选题眼光**：真缺口，且诊断得准。
+教师依赖确实是蒸馏一派的结构性弱点，而"大跳跃回归被平均掉"也确实是无教师少步模型发软的正确解释。
+但这块地方很挤：MAR/Fluid 式连续自回归、各种 next-X prediction、rolling diffusion、AR-diffusion 混合体，都在绕着"自回归与扩散互补"这个想法转。
+这里最新鲜的是"自回归即隐式直化"这个框架——注意它是个框架，不是定理。
+
+**方法成熟度**：巧劲为主，也掺了点蛮力。
+时间维那一招优雅且几乎免费——它把 self-conditioning 从"一个前次预测"推广到"完整历史"，而那些缓存状态本来就在显存里躺着。
+空间维是我不安的地方：串行 patch 解码把少步采样本来要消灭的串行延迟又请回来了。
+论文自己那句"NSP 在质量-延迟曲线上打败减步数"，本质是在赌"带 KV cache 的 patch pass 比多做一次全图 pass 更便宜"；patch 数少时说得通，分辨率一升就脆。
+另外有两个更简单的对手必须被明确比较：MeanFlow——它用平均速度参数化在单网络内攻击同一个歧义问题，完全不需要历史；以及朴素的 self-conditioning——一行代码就吃到时间维的一部分收益。
+摘要里还没交代的一点：推理时非马尔可夫条件意味着模型要吃自己过去的状态，于是 exposure bias 与误差累积是实打实的风险，需要 teacher forcing 或加噪增强之类的说法来兜。
+
+**实验诚意**：标题数字 "7.2x - 8.5x 教师加速" 是个软指标——它是相对作者自己那个教师测的，教师配得越慢它就越好看；而 "FID 有竞争力" 这句话里，"有竞争力" 承担了很重的活。
+我想看到的是：在 FID 对齐的条件下与 LCM / DMD / shortcut / MeanFlow 比绝对墙钟时间；为 "NSP 优于放大模型" 这一条给出等 FLOPs 和等参数的对照；以及同一条结论在 512px 上复现——按理说串行 patch 解码在那里会明显吃亏。
+"我方法优于 scaling" 这类比较对两边各自调参预算极其敏感，这是我会最用力戳的一处。
+
+**写作功力**："可辨识性"和"表达力"两个词承担了很重的论证，却看不到形式化支撑；哪怕给一个双峰的玩具例子、把条件期望写成闭式，也能把核心直觉从修辞变成论证。
+命名本身也是个信号——名字承诺三个维度，摘要只点名两个，说明第三条轴写得薄。
+真要重写，我会重写延迟核算那一节：把 NSP 的串行成本摆明并量化，因为怀疑者的第一反应就是"patch 自回归是不是把省下的又赔回去了"。
+
+**判决**：弱接收 —— 重述框架确实有用、时间维那一招便宜又可迁移，但最核心的质量-延迟结论建立在很容易被倾斜的对比上，而我从摘要无从核验。
+
+## 要点总结
+
+- **别再扔掉你的去噪历史。**
+  如果你已经在跑多步 DiT 采样，那些历史 latent 就是免费的上下文。
+  把它们当额外 token 喂回去是很小的架构改动，却有望换来每步质量的提升，而且它把 self-conditioning 收作特例。
+- **在自回归单元之间传轨迹，而不是传输出。**
+  这是最值得偷的一条。
+  视频里，把前几帧"各噪声层级的完整轨迹"交给下一帧，而不只是交成品帧；3D 分块、长音频、分块超分同理。
+  共享"邻居是怎么被生成的"能让路径从第一步就对齐，而不是到终点再补分歧。
+- **一个新的诊断反射**：当少步学生糊掉时，先问目标是否有歧义，再假设模型太小。
+  "目标被平均"造成的糊和"容量不够"造成的糊长得很像，但修法完全不同，而补条件通常是更便宜的那一种尝试。
+- **用自举替代蒸馏。**
+  自一致性技巧（一个 `2d` 步 == 两个 `d` 步）是一种通用范式：在单个模型内部，把"便宜且准"那一档的能力迁移给"昂贵且粗"那一档。
+  它的适用范围远不止图像流。
+- **报曲线，别报单点。**
+  比"质量-延迟曲线"而不是"固定步数下的 FID"，是正确的评测姿态，也正是这篇最有意思的结论得以被读懂的前提。
+  只要记得用同一把尺子量别人和量自己。
+:::

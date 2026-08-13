@@ -1,0 +1,377 @@
+---
+title:
+  en: "Feeling the Curvature Blindfolded: Curvature-Aware Zeroth-Order Test-Time Adaptation"
+  zh: "蒙着眼摸出曲率：面向端侧测试时自适应的曲率感知零阶优化"
+description:
+  en: "CAZO reuses the two probes that zeroth-order optimization already pays for to estimate a diagonal Hessian, then reshapes its sampling distribution around the loss landscape's few live directions — backprop-free test-time adaptation at inference-level memory."
+  zh: "CAZO 把零阶优化本来就要付的两次前向探测二次利用，估出对角 Hessian，再据此重塑采样分布，把探测预算集中到损失曲面真正“活着”的少数方向上——推理级显存下的无反向传播测试时自适应。"
+date: 2026-08-13
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-curvature-aware-zeroth-order-optimization-for.png"
+---
+
+![Concept animation](/arxiv-visuals/curvature-aware-zeroth-order-optimization-for/ConceptScene.gif)
+
+
+:::en
+**Paper**: [2608.12279](https://arxiv.org/abs/2608.12279)
+**Authors**: Junming Zhang, Shuyu Yin, Peilin Liu, Rendong Ying, Fei Wen
+**Categories**: cs.CV
+
+## The Gap
+
+Test-time adaptation is by now a crowded field, and almost all of it assumes backpropagation. TENT minimizes prediction entropy through the BatchNorm affine parameters; EATA adds sample filtering and a Fisher anchor; SAR swaps in sharpness-aware updates so it survives tiny or imbalanced batches; CoTTA and MEMO go further with augmentation-consistency and teacher-student machinery. Every one of them needs a backward pass, which means keeping the activation cache alive across the whole depth of the network. On a phone or an embedded NPU, that cache — not the weights — is what blows the memory budget. Many deployment stacks do not even ship a training runtime.
+
+The BP-free branch is much thinner. FOA (forward-only adaptation) attacks the problem with CMA-ES over prompt tokens plus an activation-shifting trick, and MeZO showed in the LLM world that a two-forward-pass SPSA estimator can fine-tune at inference-level memory. Both inherit the curse of zeroth-order optimization: you are estimating a gradient from scalar loss differences along random directions, and the variance of that estimate grows with the number of parameters you are probing. In practice ZO-based adaptation is slower, noisier, and usually a couple of accuracy points behind its BP-based cousins — which is exactly why people keep paying for backprop.
+
+The paper's wedge is an empirical claim: during test-time adaptation, the loss Hessian over the adapted parameters is persistently low-rank. Only a handful of directions carry real curvature; the rest of the space is nearly flat. If that is true, isotropic probing is wasteful almost by construction — most of every random direction you sample lands in a subspace where the loss barely responds. So reshape the sampling distribution to match the curvature, and you get variance reduction for free.
+
+```
+[Problem] on-device TTA: BP requires activation cache + training runtime
+     |
+     v
+[BP-free option] ZO / SPSA: forward passes only, inference-level memory
+     |
+     v
+[Blocker] isotropic random probes: gradient-estimate variance scales
+     |     with the probed dimension; ZO-TTA lags BP-TTA
+     v
+[Observation] during TTA the loss Hessian stays LOW-RANK and stable
+     |         (a few directions hold nearly all the curvature)
+     v
+[Method] CAZO: sliding-average diagonal Hessian, harvested from the
+     |   same two probes, defines an anisotropic sampling covariance
+     v
+[Evidence] cross-domain image benchmarks: beats prior TTA methods while
+     |   holding memory near forward-only cost; ablations vs isotropic ZO
+     v
+[Conclusion] the bottleneck in ZO-TTA was probe *shape*, not probe *count*
+```
+
+## The Increment
+
+**One sentence**: Before, backprop-free test-time adaptation meant accepting isotropic random search and its accuracy tax; after, the two forward probes you were already paying for also tell you where the loss curves, and you spend your probing budget only there.
+
+### Core Mechanism
+
+Start with the setup. The pretrained backbone is frozen — no gradients, no activation cache, no optimizer state for the bulk of the model. Only a small adapter (a low-dimensional set of trainable parameters inserted into the network) is optimized. This matters twice over: it is what keeps memory at inference level, and it shrinks the dimension that ZO variance depends on. Then, per test batch, an unsupervised objective in the entropy-minimization family gives a scalar loss.
+
+Now the estimator. Classic SPSA draws a random direction `z`, evaluates the loss at `theta + eps*z` and `theta - eps*z`, and uses the *difference* of those two numbers as a directional derivative. The observation CAZO exploits is that the *sum* of the same two numbers, minus twice the loss at the center, is a finite-difference estimate of curvature along `z` — the second-order information was sitting in the probes all along, discarded. So for roughly the cost of one extra center evaluation (which you effectively need for inference anyway), each step yields both a gradient estimate and a curvature reading.
+
+A single curvature reading is far too noisy to steer anything, so CAZO keeps a sliding average — an exponential-moving-average buffer over the diagonal Hessian, one scalar per adapter parameter, in the same spirit as Adam's second-moment estimate. That buffer becomes the covariance matrix for the next step's perturbation sampling: instead of `z ~ N(0, I)`, you draw `z ~ N(0, Sigma)` with `Sigma` a damped function of the accumulated diagonal curvature. Perturbation energy is reallocated across coordinates according to how much the loss actually reacts to each one, and the resulting update behaves like a preconditioned (quasi-Newton-flavored) step rather than plain random search. The whole loop is forward-only; the only new state is one extra vector the size of the adapter.
+
+```
+   unlabeled test batch x
+        |
+        v
+  +--------------------------------+
+  | frozen backbone (ViT)          |   no backward graph
+  |   + small adapter theta        |   theta is the only trainable set
+  +--------------------------------+
+        |
+        |  draw z ~ N(0, Sigma_t)      Sigma_t comes from curvature memory
+        v
+   forward-only probes
+     L0 = L(theta)
+     Lp = L(theta + eps*z)
+     Lm = L(theta - eps*z)
+        |
+        +--- (Lp - Lm) / (2*eps) --------> g_hat = scalar * z   [slope]
+        |
+        +--- (Lp + Lm - 2*L0) / eps^2 ---> h_hat                [curvature]
+        |                                    |
+        |                                    v
+        |                        EMA:  H_t = b*H_(t-1) + (1-b)*h_hat
+        |                                    |
+        |                                    v
+        |                        Sigma_(t+1) = f(H_t)   damped + normalized
+        |                                    |
+        v                                    |
+  theta <- theta - lr * g_hat                |
+        |                                    |
+        +<-----------------------------------+
+             (curvature shapes the next probe)
+```
+
+**The metaphor**: you are restoring a vintage radio in a dark room. The chassis has hundreds of screws welded shut (the frozen backbone) and about a dozen trim pots you can still turn (the adapter). You cannot see the circuit; all you have is your ear on the speaker — a single scalar reading of "how good does this sound" (the loss from one forward pass).
+
+Standard practice is jiggle-testing: nudge every pot slightly clockwise, listen; nudge every pot slightly counter-clockwise, listen. Whichever direction sounded better, move that way a hair. That is SPSA, and it works, slowly, because most of your jiggling goes into pots that do nothing — the dead ones (the flat, near-null directions of the Hessian).
+
+CAZO's trick is that you were already gathering a second piece of information and throwing it away. If both the clockwise and counter-clockwise nudge made things *worse*, that pot cluster is sitting in a sharp notch — high curvature. If neither nudge changed anything, it is dead. The difference between the two listens tells you which way to turn; the *sum* tells you how touchy the knob is. So you keep a grease-pencil notebook on the chassis, updating a touchiness score per pot after every trial rather than trusting one noisy listen (the EMA). Then you stop jiggling everything equally: you give the touchy pots small, careful nudges and the sluggish ones larger sweeps, sizing each nudge from the notebook. Same number of listens per trial, far more information per listen. Remove the notebook and you are back to blind uniform jiggling; that is precisely the paper's ablation.
+
+### Key Concepts
+
+- **Zeroth-order gradient estimation (SPSA)**: Imagine you want the slope of a hillside but you are only allowed to stand somewhere and read an altimeter — no map, no compass, no derivative. Pick a random direction, take a small step that way and read the altitude, step the same distance the other way and read again. The altitude difference divided by the step length is how fast the ground rises **along that particular direction*. Multiply that number back onto the direction vector and you have a crude, unbiased-in-expectation stand-in for the gradient. Two altimeter readings, no calculus, no backward pass — and no need to store anything about how you got here, which is the entire memory argument.
+
+- **Low-rank Hessian / effective rank**: The Hessian is the table of "how does the slope itself change" for every pair of parameters. Its eigenvalues say how sharply the loss bends along different directions. "Low-rank" means almost all eigenvalues are near zero: the loss surface is a narrow canyon embedded in an enormous flat plain. Concretely, you may have 100,000 adapter parameters, but the loss only meaningfully responds to motion inside a few hundred directions' worth of space. This is why ZO methods work at all on huge models — the theory says the query cost tracks this effective rank, not the raw parameter count. CAZO's contribution is checking that this structure **persists throughout adaptation* rather than being a fleeting property at initialization, which is what licenses reusing a slowly-updated curvature estimate across steps.
+
+- **Anisotropic perturbation sampling**: If isotropic sampling is throwing darts at a spherical cloud around your current position, anisotropic sampling stretches that cloud into an ellipse. The covariance matrix `Sigma` is the shape of the ellipse. Wide along a coordinate means "probe that parameter aggressively"; narrow means "barely touch it." Because the SPSA estimator's expectation becomes `Sigma` times the true gradient, choosing `Sigma` from curvature is mathematically the same move as preconditioning in first-order optimization — it is Adam's per-coordinate step-size rescaling, except implemented in the **sampling distribution* rather than in the update rule, because in the ZO world the sampling distribution is where your compute budget actually gets spent.
+
+## Framework Shift
+
+```
+Before (mainstream TTA)             After (CAZO)
+-------------------------           -----------------------
+   forward                            forward x3, no graph
+     |  store activations              probes read out BOTH
+     |  at every layer                 slope and curvature
+     v                                       |
+   backward pass                             v
+     |  memory ~ O(depth * act)      +--------------------+
+     v                               | curvature notebook |
+   update BN / LN params             |  EMA diag Hessian  |
+                                     +--------------------+
+                                             |
+  BP-free variant (FOA / MeZO):              v
+     probe cloud is a sphere         probe cloud is an ellipse
+        . . . . .                       .
+       . . . . . .                     . . .
+      . . . . . . .                   . . . . . .
+     equal effort in every           effort concentrated in the
+     direction, most of it            few directions that bend
+     into dead subspace
+```
+
+From "estimate the gradient with more probes" to "estimate the gradient with better-shaped probes," the core shift is treating the sampling distribution — not the update rule — as the object worth optimizing, and paying for it with second-order information that forward-only probing already produces as a byproduct.
+
+## Expert Assessment
+
+Caveat up front: I am working from the abstract plus the surrounding literature, not the full text. Anything below about the numbers is a description of what to check, not a verified verdict.
+
+**Problem choice**: Real gap, correctly located. On-device TTA is one of the few TTA settings with an actual deployment story, and the memory wall there is the activation cache, not the parameters — which is exactly what forward-only methods dissolve. The framing is honest about not being first: FOA already claimed BP-free TTA, so the increment is "ZO-TTA that is no longer a compromise" rather than a new problem. That is the right kind of follow-up paper. The one thing the abstract dodges is latency: ZO buys memory with queries, and three forward passes per step times many steps is a real wall-clock cost on the very devices being targeted. A paper that sells "on-device" and reports only memory has left its weakest axis unmeasured.
+
+**Method maturity**: Clever, but genuinely derivative in a good way. Hessian-aware ZO (the ZO-HessAware line), ZO-AdaMM, and Sophia-style diagonal curvature estimators all exist; the transplant into TTA plus the empirical low-rank-persistence observation is the new content. The sharp part — the part I would keep — is noticing that SPSA's two probes already encode curvature in their **sum* while only their *difference* is normally used. That is nearly free second-order information and it is the kind of observation that should have existed years ago.
+
+The overlooked simpler baselines worry me. ZO-Adam gets diagonal preconditioning from the second moment of the ZO gradient estimates themselves, no explicit Hessian machinery. Subspace ZO methods (LOZO, SubZero, sparse MeZO) exploit the same low-rank structure by restricting perturbations to a learned or random low-dimensional subspace, which is arguably a more direct answer to "the Hessian is low-rank" than a *diagonal* approximation — a diagonal Hessian cannot represent a rotated low-rank subspace at all, which is a slight tension between the paper's motivating observation and its chosen mechanism. If those comparisons are missing or relegated to an appendix, that is the first thing a reviewer should demand.
+
+**Experimental integrity**: The claim to interrogate is "significantly outperforms existing TTA methods." Beating other ZO/BP-free methods is plausible and expected. Beating BP-based SAR/EATA with a strictly noisier gradient estimator is surprising, and when that happens the usual explanation is a confound: a better adapter parameterization, a different tuned learning rate, more effective steps per batch, or ZO noise acting as accidental regularization against entropy-minimization collapse. The decisive ablation is CAZO versus isotropic ZO **with the identical adapter, objective, and query budget* — that isolates the actual contribution. Two more things to verify: whether the reported memory includes the extra EMA curvature buffer (small, but it should be counted), and whether the "persistent low-rank Hessian" claim rests on a defensible spectral measurement (Hutchinson or Lanczos estimates on real ViT-scale adapters) rather than a toy-scale proxy plotted once.
+
+**Writing quality**: Judging from the abstract's structure, the observation-to-method link is the load-bearing joint and probably the underserved one. "We observed low-rank Hessians, therefore we use a diagonal Hessian" needs an explicit bridge — why a diagonal approximation suffices when the structure being exploited is a subspace property, and what the damping/normalization of `Sigma` actually is, since inverting near-zero curvature is where this family of methods dies in practice. Rewriting that section with the variance bound stated explicitly, plus a sensitivity study over the damping constant, would raise the whole paper a tier. Also missing from the pitch: queries-per-step and end-to-end latency on real hardware.
+
+**Verdict**: weak accept — a well-chosen, deployment-relevant problem with one genuinely sharp free-lunch observation, held back by a mechanism that is a known technique transplanted and by an accuracy claim over BP baselines that needs unusually careful ablation to believe.
+
+## Takeaways
+
+- **Symmetric finite differences are two-for-one.** Any time you evaluate `f(x+eps**z)` and `f(x-eps*z)`, the difference gives you first-order information and the sum gives you second-order information along the same direction. If your pipeline already does symmetric probing — evolutionary search, ZO fine-tuning, gradient-free hyperparameter tuning, black-box adversarial attacks — you are likely discarding curvature you already paid for. This transfers immediately and has nothing to do with TTA.
+- **In derivative-free optimization, the sampling distribution **is* the optimizer.** First-order methods precondition in the update rule; ZO methods should precondition in the covariance, because that is where the query budget is spent. Reframing "how do I improve my update" as "how do I reshape my proposal distribution" is a portable move across CMA-ES, ZO, RL exploration noise, and Bayesian-optimization acquisition design.
+- **Verify that a structural property persists before you amortize over it.** The whole design rests on the low-rank Hessian being stable across adaptation steps, which is what makes a slow EMA legitimate. Whenever you plan to reuse an expensive estimate across iterations, the persistence check is the experiment that decides whether your method is sound or lucky — and it is cheap to run.
+- **Shrink the parameter set before you fight the variance.** Adapter-only optimization does double duty here: it removes the activation cache and it cuts the dimension that ZO variance scales with. If you are considering gradient-free fine-tuning, the parameterization choice will dominate the estimator choice.
+- **A memory-only efficiency claim is half a claim.** If you are evaluating this or anything like it for deployment, measure queries and wall-clock latency yourself; forward-only methods systematically trade the axis they do not report.
+:::
+
+:::zh
+**论文**: [2608.12279](https://arxiv.org/abs/2608.12279)
+**作者**: Junming Zhang, Shuyu Yin, Peilin Liu, Rendong Ying, Fei Wen
+**分类**: cs.CV
+
+## 缺口
+
+测试时自适应（TTA）现在已经很卷了，但几乎所有方法都默认有反向传播可用。
+TENT 通过 BatchNorm 的仿射参数最小化预测熵；EATA 加了样本筛选和 Fisher 锚定；SAR 换成锐度感知更新，从而在小批量、类别不均衡时不崩；CoTTA、MEMO 再往上叠增强一致性和师生结构。
+它们全都需要一次反向传播，也就意味着必须把整个网络深度上的激活缓存留在显存里。
+在手机或嵌入式 NPU 上，真正撑爆预算的正是这份激活缓存，而不是权重本身。
+很多部署栈甚至根本没有训练运行时。
+
+无反向传播这一支要薄得多。
+FOA 用 CMA-ES 优化 prompt token，再配一个激活偏移的技巧；MeZO 在大模型领域证明了两次前向的 SPSA 估计器可以在推理级显存下完成微调。
+但两者都继承了零阶优化的原罪：你是靠随机方向上的标量损失差来估梯度的，而这个估计的方差随被探测参数量增长。
+实践中，ZO 自适应更慢、更抖，精度通常还落后 BP 版本一两个点——这正是大家宁愿继续为反向传播付费的原因。
+
+这篇论文的切入点是一个经验性判断：在 TTA 过程中，被适配参数上的损失 Hessian 持续保持低秩。
+只有少数方向承载真实曲率，其余空间近乎平坦。
+如果这成立，那么各向同性探测在结构上就是浪费——你采到的随机方向，大部分能量都落进了损失几乎不响应的子空间。
+于是把采样分布重塑成与曲率匹配的形状，方差就白降了。
+
+```
+[问题] 端侧 TTA：BP 需要激活缓存 + 训练运行时
+     |
+     v
+[无 BP 方案] ZO / SPSA：只做前向，显存等同推理
+     |
+     v
+[卡点] 各向同性随机探测：梯度估计方差随探测维度上升
+     |    ZO-TTA 精度落后 BP-TTA
+     v
+[观察] TTA 全程损失 Hessian 保持低秩且稳定
+     |   (极少数方向占据几乎全部曲率)
+     v
+[方法] CAZO：从同一组探测里滑动平均出对角 Hessian，
+     |   用它构造各向异性采样协方差
+     v
+[证据] 跨域图像基准：优于既有 TTA 方法，显存贴近纯前向成本；
+     |   并与各向同性 ZO 做消融
+     v
+[结论] ZO-TTA 的瓶颈是探测的“形状”，不是探测的“次数”
+```
+
+## 增量
+
+**一句话**: 以前做无反向传播的测试时自适应，就得接受各向同性随机搜索和它带来的精度税；现在，你本来就要付的那两次前向探测顺带告诉你损失往哪弯，于是探测预算只花在那几个方向上。
+
+### 核心机制
+
+先看设定。
+预训练骨干整体冻结——不算梯度、不存激活、模型主体没有优化器状态。
+只优化一小组插入网络的适配器参数。
+这件事有双重意义：它把显存压到推理级别，同时缩小了 ZO 方差所依赖的那个维度。
+每来一个测试批次，用熵最小化那一族的无监督目标算出一个标量损失。
+
+再看估计器。
+经典 SPSA 采一个随机方向 `z`，在 `theta + eps*z` 与 `theta - eps*z` 处各算一次损失，用两个数的**差**当作方向导数。
+CAZO 抓住的点是：这两个数的**和**减去中心点损失的两倍，正好是沿 `z` 方向的曲率有限差分估计——二阶信息一直就躺在探测结果里，只是被扔掉了。
+于是，只要多付一次中心点评估（而这一次本来就是推理要做的），每步就同时拿到梯度估计和曲率读数。
+
+单次曲率读数噪声太大，指导不了任何决策，所以 CAZO 维护一个滑动平均：对角 Hessian 的指数移动平均缓冲区，每个适配器参数一个标量，精神上等同于 Adam 的二阶矩。
+这个缓冲区随后成为下一步扰动采样的协方差矩阵：不再是 `z ~ N(0, I)`，而是 `z ~ N(0, Sigma)`，其中 `Sigma` 是累积对角曲率经过阻尼处理后的函数。
+扰动能量按照“损失对每个坐标到底反应多大”重新分配，得到的更新因此表现得像一次预条件化（带准牛顿味道）的步进，而不是纯随机搜索。
+整个循环只有前向；新增状态只有一个与适配器等长的向量。
+
+```
+   无标签测试批次 x
+        |
+        v
+  +--------------------------------+
+  | 冻结骨干 (ViT)                 |   无反向计算图
+  |   + 小适配器 theta             |   theta 是唯一可训练集合
+  +--------------------------------+
+        |
+        |  采样 z ~ N(0, Sigma_t)      Sigma_t 来自曲率记忆
+        v
+   仅前向探测
+     L0 = L(theta)
+     Lp = L(theta + eps*z)
+     Lm = L(theta - eps*z)
+        |
+        +--- (Lp - Lm) / (2*eps) --------> g_hat = 标量 * z   [斜率]
+        |
+        +--- (Lp + Lm - 2*L0) / eps^2 ---> h_hat              [曲率]
+        |                                    |
+        |                                    v
+        |                        EMA:  H_t = b*H_(t-1) + (1-b)*h_hat
+        |                                    |
+        |                                    v
+        |                        Sigma_(t+1) = f(H_t)   阻尼 + 归一化
+        |                                    |
+        v                                    |
+  theta <- theta - lr * g_hat                |
+        |                                    |
+        +<-----------------------------------+
+             (曲率塑形下一次探测)
+```
+
+**核喻**：你在一间暗房里修一台老式收音机。
+机箱上几百颗螺丝已经焊死（冻结的骨干），还能转的微调电位器大约一打（适配器）。
+你看不见电路，唯一的反馈是耳朵贴着喇叭听到的一个标量：“这声音有多好”（一次前向得到的损失）。
+
+常规做法是抖动试错：把所有电位器都稍微顺时针拧一点，听；再都稍微逆时针拧一点，听。
+哪边好听就朝那边挪一丝。
+这就是 SPSA，能work，但很慢，因为你大部分抖动都花在了根本不起作用的旋钮上——那些死掉的旋钮，对应 Hessian 里平坦的近零空间方向。
+
+CAZO 的巧劲在于：其实你早就顺手采到了第二条信息，只是扔了。
+如果顺时针和逆时针都让声音**变差**，说明这簇旋钮正卡在一个尖锐的凹口里——高曲率。
+如果两边拧都毫无变化，那它是死的。
+两次试听的**差**告诉你该往哪边转，**和**告诉你这旋钮有多敏感。
+于是你在机箱上用蜡笔记一本小册子，每次试完就更新一遍每个旋钮的“敏感度分数”，而不是听信某一次带噪的试听（这就是 EMA）。
+接下来你不再平均用力抖了：敏感的旋钮小心地小幅微调，迟钝的旋钮大幅扫过，每次幅度都照着小册子来。
+每轮试听次数不变，但每次试听的信息量大得多。
+把小册子拿掉，你就回到了盲目均匀抖动——这恰好就是论文的消融实验。
+
+### 关键概念
+
+- **零阶梯度估计（SPSA）**: 想象你要测一个山坡的坡度，但你只能站在某处读一个高度计——没有地图、没有指南针、没有导数。
+随便挑一个方向，往那边走一小步读高度，再往反方向走同样距离读一次。
+高度差除以步长，就是沿**那个特定方向**地面上升的速度。
+把这个数乘回方向向量，你就得到了一个粗糙的、期望意义上可用的梯度替身。
+两次高度读数，不需要微积分，不需要反向传播——也不需要记住你是怎么走到这里的，这就是整个显存论证的全部。
+
+- **低秩 Hessian / 有效秩**: Hessian 是“斜率本身如何变化”的那张表，覆盖每一对参数。
+它的特征值告诉你损失沿不同方向弯得多急。
+“低秩”意味着几乎所有特征值都接近零：损失曲面是一条嵌在巨大平原里的窄峡谷。
+具体点说，你可能有十万个适配器参数，但损失只对其中几百个方向张成的空间里的移动有实质反应。
+这也解释了为什么 ZO 在超大模型上居然能work——理论说查询代价跟的是这个有效秩，而不是原始参数量。
+CAZO 的贡献是去核实这个结构在**整个自适应过程中持续存在**，而不是初始化时的一闪而过；正是这一点才让“把慢速更新的曲率估计跨步复用”变得合法。
+
+- **各向异性扰动采样**: 如果各向同性采样是朝当前位置周围的球形云投飞镖，各向异性采样就是把这团云拉成椭球。
+协方差矩阵 `Sigma` 就是椭球的形状。
+某个坐标方向拉得宽，意思是“大胆探测这个参数”；窄，意思是“几乎别碰它”。
+由于 SPSA 估计器的期望变成了 `Sigma` 乘真实梯度，用曲率来选 `Sigma` 在数学上等同于一阶优化里的预条件化——就是 Adam 那套逐坐标步长缩放，只不过实现在**采样分布**里而非更新规则里，因为在 ZO 的世界，采样分布才是算力真正被花掉的地方。
+
+## 框架转变
+
+```
+之前（主流 TTA）                    之后（CAZO）
+-------------------------           -----------------------
+   前向                               前向 x3，无计算图
+     |  逐层存激活                     探测同时读出
+     |                                斜率与曲率
+     v                                       |
+   反向传播                                  v
+     |  显存 ~ O(深度 * 激活)        +--------------------+
+     v                               |   曲率小册子       |
+   更新 BN / LN 参数                 |  EMA 对角 Hessian  |
+                                     +--------------------+
+                                             |
+  无 BP 变体 (FOA / MeZO)：                  v
+     探测云是个球                    探测云是个椭球
+        . . . . .                       .
+       . . . . . .                     . . .
+      . . . . . . .                   . . . . . .
+     每个方向平均用力，              力气集中在真正会弯的
+     大部分掉进死空间                那几个方向上
+```
+
+一句话：从“用更多探测去估梯度”到“用形状更好的探测去估梯度”，核心转变是把**采样分布**（而不是更新规则）当成值得优化的对象，并且用纯前向探测本来就会顺带产生的二阶信息来支付这笔开销。
+
+## 专家评审
+
+先声明：我只看了摘要加上相关文献背景，没有全文。
+下面关于数字的部分是“该查什么”的清单，不是已核实的结论。
+
+**选题眼光**: 真缺口，且位置找得准。
+端侧 TTA 是少数几个有真实部署故事的 TTA 场景，而那里的显存墙是激活缓存而非参数量——这恰好是纯前向方法能消解掉的东西。
+论文的定位也算诚实：FOA 已经占了“无 BP TTA”的头位，所以本文的增量是“ZO-TTA 不再是妥协方案”，而不是开辟新问题。
+这是正确的跟进型工作。
+摘要唯一躲开的是延迟：ZO 是用查询次数换显存的，每步三次前向再乘上很多步，在它所瞄准的那类设备上就是实打实的墙钟成本。
+一篇主打“on-device”却只报显存的论文，把自己最弱的那根轴留在了未测状态。
+
+**方法成熟度**: 有巧劲，但也确实是好意义上的“移植”。
+Hessian 感知 ZO（ZO-HessAware 那一支）、ZO-AdaMM、Sophia 式的对角曲率估计器都已存在；新内容是把它搬进 TTA，加上低秩持续性的经验观察。
+真正锋利、我会留下的那一点，是注意到 SPSA 的两次探测其实把曲率编码在它们的**和**里，而通常只有**差**被用掉。
+那几乎是免费的二阶信息，属于本该几年前就有人发现的那类观察。
+
+被忽略的更简单基线让我有些担心。
+ZO-Adam 直接用 ZO 梯度估计自身的二阶矩就能拿到对角预条件，完全不需要显式的 Hessian 机制。
+子空间 ZO 方法（LOZO、SubZero、sparse MeZO）通过把扰动限制在学到的或随机的低维子空间里来利用同一个低秩结构，这对于“Hessian 是低秩的”这个动机来说，可以说是比**对角**近似更直接的回答——毕竟对角 Hessian 根本无法表示一个被旋转过的低秩子空间，这在论文的动机与所选机制之间留下了一点张力。
+如果这些对比缺失或者被塞进附录，审稿人第一件该要的就是它。
+
+**实验诚意**: 需要盘问的是“显著优于既有 TTA 方法”这句话。
+打赢其他 ZO / 无 BP 方法是合理且可预期的。
+用一个方差严格更大的梯度估计器打赢基于 BP 的 SAR / EATA 就令人意外了，而这种情况出现时，常见解释是混淆变量：更好的适配器参数化、被单独调过的学习率、每批次更多有效步数，或者 ZO 噪声无意间成了对抗熵最小化崩塌的正则化。
+决定性的消融是：**在完全相同的适配器、目标函数和查询预算下**，CAZO 对各向同性 ZO——这才能隔离出真正的贡献。
+另外两件要核实的事：报告的显存是否计入了那个额外的 EMA 曲率缓冲（虽小，但该算）；以及“Hessian 持续低秩”这个论断是否建立在站得住脚的谱测量上（在真实 ViT 规模适配器上用 Hutchinson 或 Lanczos 估计），而不是一张画在玩具规模上的示意图。
+
+**写作功力**: 从摘要结构推测，“观察到方法”的那个衔接是承重接头，也很可能是被敷衍的一环。
+“我们观察到 Hessian 低秩，所以我们用对角 Hessian”需要一座明确的桥：为什么当被利用的结构是子空间性质时，对角近似仍然够用；以及 `Sigma` 的阻尼与归一化到底怎么做——因为“对接近零的曲率求倒数”正是这一族方法在实践中翻车的地方。
+把那一节重写，明确写出方差界，再补一个对阻尼常数的敏感性研究，能让整篇论文升一个档次。
+另外 pitch 里缺的还有：每步查询数，以及真实硬件上的端到端延迟。
+
+**判决**: 弱接收 —— 选题贴合部署、有一个真正锋利的“免费午餐”观察，但机制是已知技术的移植，且对 BP 基线的精度优势需要格外扎实的消融才可信。
+
+## 要点总结
+
+- **对称有限差分是买一送一。**
+只要你算了 `f(x+eps*z)` 和 `f(x-eps*z)`，差给你一阶信息，和给你同方向的二阶信息。
+如果你的流程本来就在做对称探测——进化搜索、ZO 微调、无梯度超参调优、黑盒对抗攻击——你很可能正在丢掉已经付过钱的曲率。
+这条可以立刻迁移，与 TTA 毫无关系。
+- **在无导数优化里，采样分布**就是**优化器。**
+一阶方法在更新规则里做预条件；ZO 方法应该在协方差里做，因为查询预算是花在那儿的。
+把“怎么改进我的更新”重构成“怎么重塑我的提议分布”，这个动作在 CMA-ES、ZO、RL 探索噪声、贝叶斯优化的采集函数设计之间都是通用的。
+- **在摊销一个结构性质之前，先验证它是否持续。**
+整个设计都压在“低秩 Hessian 在自适应各步之间保持稳定”上，这才让慢速 EMA 合法。
+任何时候你打算把一个昂贵的估计跨迭代复用，持续性检验就是决定你的方法是站得住还是运气好的那个实验——而它跑起来很便宜。
+- **先缩参数集，再去打方差。**
+只训适配器在这里一举两得：既拿掉了激活缓存，又砍掉了 ZO 方差所依赖的维度。
+如果你在考虑无梯度微调，参数化的选择会压倒估计器的选择。
+- **只报显存的效率主张只是半个主张。**
+如果你要评估这类方法用于部署，请自己测查询数和墙钟延迟；纯前向方法系统性地在它们不报告的那根轴上做交易。
+:::

@@ -1,0 +1,385 @@
+---
+title:
+  en: "Turning One Bit of 'Stop!' Into a Dense Cost Signal"
+  zh: "把一声「停！」摊成一条稠密的代价信号"
+description:
+  en: "Safe offline RL wants a cost label on every step, but real supervisors only press stop once. RCI treats this as temporal credit assignment and redistributes the single bit across the trajectory — provably lossless for the CMDP, and much easier to optimize."
+  zh: "安全离线 RL 想要每一步的代价标注，但真实的监督者只会按一次停止键。RCI 把这当作时序信用分配问题，把那一个比特摊回整条轨迹——对 CMDP 而言可证无损，而且优化起来舒服得多。"
+date: 2026-08-13
+tags: ["arxiv", "ai", "cs.lg", "cs.ai"]
+image: "/arxiv-visuals/arxiv-redistribution-based-cost-inference-improves-sparse.png"
+---
+:::en
+**Paper**: [2608.12306](https://arxiv.org/abs/2608.12306)
+**Authors**: Ebenezer Gelo, Geraud Nangue Tasse, Steven James, Benjamin Rosman
+**Categories**: cs.LG, cs.AI
+
+## The Gap
+
+Nearly every safe offline RL method you can name — CPQ, COptiDICE, constrained versions of BCQ/IQL, Constrained Decision Transformer — is built on top of a CMDP where the dataset ships with a per-step cost `c(s,a)`. That assumption is load-bearing: the cost critic `Q_c` is trained by TD on those per-step labels, and the Lagrangian multiplier is tuned against the resulting cost return estimate.
+
+The assumption is also fiction in most deployments. What a human supervisor actually produces is *stop-feedback*: they watch the robot or the car, and at the moment something goes wrong they hit the button. One bit, one timestamp, for a trajectory that might be 200 steps long. No attribution to the lane change eight seconds earlier that made the collision unavoidable.
+
+Two existing workarounds, both unsatisfying. **Use the sparse cost as-is**: now `Q_c` has to bootstrap a single nonzero target backwards across the whole episode, which is the classic long-horizon credit assignment pathology — high variance, slow propagation, and a critic that is badly conditioned exactly where you need it to be sharp. **Train a classifier** to label unsafe states: but your only positive labels sit at the violation step, so every precursor state gets labeled safe, and the classifier learns "unsafe = already crashed," which is useless for avoidance and sensitive to how much unsafe data the dataset happens to contain.
+
+```
+[PROBLEM] supervisor emits one bit per trajectory
+   z = 1 stamped at the FIRST unsafe transition
+        |
+        v
+[STATE OF ART] safe offline RL assumes dense c(s a)
+   CPQ / COptiDICE / CDT / Lagrangian variants
+        |
+        +--> workaround A: keep the sparse spike
+        |      .. Q_c bootstraps one bit over T steps
+        |      .. near-zero TD targets = ill conditioned
+        |
+        +--> workaround B: unsafe-state classifier
+        |      .. positives only at the crash step
+        |      .. precursors labeled safe = false negatives
+        |      .. biased by dataset composition
+        |
+        v
+[ASSUMPTION] the CMDP constraint only ever reads the
+   cost RETURN of a trajectory. not its shape in time
+        |
+        v
+[METHOD] RCI = return decomposition on the cost signal
+   then any off-the-shelf constrained offline solver
+        |
+        v
+[EVIDENCE] highway driving + robotic manipulation
+   violation rate well below sparse and classifier
+   baselines. holds under mixed data and noisy labels
+        |
+        v
+[CONCLUSION] redistribution is lossless (same feasible
+   set. same optimal Lagrangian) yet better conditioned
+```
+
+## The Increment
+
+**One sentence**: Before, "we only have trajectory-level safety labels" meant you either accepted a crippled cost critic or hand-rolled a heuristic cost function; after, it is a **credit assignment* problem with a principled fix — redistribute the trajectory's cost return across its steps, and the CMDP does not notice the difference while the optimizer notices a lot.
+
+### Core Mechanism
+
+RCI is two stages bolted together, and the bolt is what makes it work. Stage one takes each trajectory `tau = (s_0, a_0, ..., s_T)` with its binary stop-feedback `z`, and runs a sequence model over it that emits a per-step cost `c^_t`. The model is trained under a return-equivalence constraint: `sum_t c^_t` must equal `z`. So for a safe trajectory every step gets zero, and for an unsafe trajectory the model has one unit of blame to distribute — it must decide how much belongs to the final swerve versus the tailgating that preceded it. This is exactly the RUDDER / return-decomposition setup, transplanted from reward to cost.
+
+Stage two is deliberately boring: the redistributed costs are written back into the dataset as if a human had annotated every step, and you run whatever constrained offline RL algorithm you already trust — Lagrangian actor-critic with a reward critic `Q_r`, a cost critic `Q_c` now trained on dense targets, and dual ascent on the multiplier.
+
+The theoretical claim is the glue. Because the CMDP constraint is `J_C(pi) <= b` and `J_C` is an expectation of *sums* of costs, any redistribution that preserves the per-trajectory sum leaves `J_C(pi)` unchanged for **every** policy. Hence: identical feasible set, identical Lagrangian saddle point, identical optimal policy. Nothing is gained in information and nothing is lost — what changes is purely the conditioning of the learning problem. The paper is honest that this is where the win lives: same problem, vastly shorter credit-assignment chains for `Q_c`.
+
+```
+   offline dataset D
+   +-------------------------------------+
+   | tau = (s0 a0 s1 a1 ... sT)   z in \{0,1\} |
+   +-------------------------------------+
+                  |
+                  v
+   [ STAGE 1 . return decomposition on cost ]
+   sequence model g( tau ) -> c^_0 c^_1 ... c^_T
+        hard/soft constraint: sum_t c^_t == z
+        loss = return prediction + redistribution reg
+                  |
+                  v
+   +-------------------------------------+
+   | D+ = \{ (s a s' r c^) \} dense per step |
+   +-------------------------------------+
+                  |
+                  v
+   [ STAGE 2 . constrained offline RL ]
+       Q_r  <-- TD on r
+       Q_c  <-- TD on c^      (dense. local. stable)
+       lambda <-- dual ascent on ( J_C - b )
+       pi  = argmax  Q_r - lambda * Q_c
+                  |
+                  v
+            safe policy pi*
+```
+
+**The metaphor**: this is an insurance adjuster apportioning fault after a crash.
+
+The police report is the stop-feedback: "collision at 14:32." One bit, one timestamp, legally sufficient and practically useless for prevention. The **redistribution network is the adjuster** who pulls the dashcam footage and writes a liability breakdown: 40% the unsignalled lane change eight seconds out, 30% the following distance, 20% the speed, 10% the final swerve. The **return-equivalence constraint is the accounting rule** that the percentages must sum to exactly one crash — the adjuster reapportions blame but cannot invent or destroy liability, which is why the insurer's total payout (the CMDP constraint value) is untouched no matter how they slice it. The **cost critic is the actuary** setting premiums per driving behaviour: given only "crash at 14:32" it has to reverse-engineer which habits are dangerous from thousands of reports; given the apportionment it reads the answer off the page. And the **Lagrangian policy update is the driving school**, adjusting habits in proportion to the premium.
+
+The metaphor also predicts the failure mode. If the adjuster is wrong — blames the swerve instead of the lane change — the payout total is still correct, the books still balance, and the actuary confidently prices the wrong behaviour. Return-equivalence guarantees the accounting, not the attribution.
+
+### Key Concepts
+
+- **Stop-feedback**: Imagine supervising a warehouse robot with one big red button. You do not fill in a spreadsheet rating every joint command; you watch, and when the arm is about to hit the shelf you slam the button. What the logs record is: this episode ended badly, at step 137. That is stop-feedback — binary, trajectory-level, timestamped at the **first* violation and silent about everything before it. It is the cheapest safety annotation a human can produce, which is why it is what you actually get.
+
+- **Return-equivalent redistribution**: Two cost functions are return-equivalent if, for every trajectory, they sum to the same number. Picture a bag with one marble in it at the end of a row of 200 cups. Redistribution grinds that marble into dust and sprinkles it across the cups. Weigh the whole row: identical. But now every cup has something in it, so a machine that can only sense one cup at a time can still tell you where the mass is concentrated. The CMDP is the scale that weighs the whole row — it cannot tell the difference. The TD learner is the one-cup-at-a-time sensor — it cares enormously.
+
+- **Why a "lossless" transform helps at all**: This trips people up. If no information is added, why does anything improve? Because TD learning does not consume information, it consumes **gradients*. A cost critic facing a single terminal spike must chain 137 bootstrapped updates to move value into the state that actually mattered, and each link in that chain injects bias and variance. Dense targets replace the chain with direct regression. Same statistical content, radically different optimization landscape — the same reason reward shaping helps even when it provably preserves the optimal policy.
+
+## Framework Shift
+
+```
+Before (mainstream):                  After (RCI):
+
+cost signal along tau                 cost signal along tau
+0 0 0 0 0 0 0 0 0 1                   . . : : + + * # # #
+^                 ^                   ^               ^
+t=0           violation               t=0         violation
+
+        |                                     |
+        v                                     v
+Q_c must bootstrap one                Q_c regresses on a
+bit backwards T steps                 dense local target
+        |                                     |
+        v                                     v
+high variance. slow.                  well conditioned.
+ill conditioned                       short credit paths
+        |                                     |
+   or bolt on a                        and by construction
+   classifier that                     sum == original
+   calls precursors safe                cost return
+        |                                     |
+        v                                     v
+[ cost model is the             ]     [ cost model is the       ]
+[ bottleneck. you fight it      ]     [ preprocessing step.     ]
+[ inside the RL loop            ]     [ RL loop stays unchanged ]
+```
+
+**One sentence**: From "sparse cost is a data limitation you must design your RL algorithm around" to "sparse cost is a temporal credit assignment problem you solve **before* the RL algorithm sees the data" — the core shift is relocating the difficulty out of the constrained optimizer and into a supervised preprocessing stage where it is much better behaved.
+
+## Expert Assessment
+
+*Caveat up front: I am working from the abstract, so the numbers and ablations below are what I would go looking for, not what I have verified.*
+
+**Problem choice**: Real gap, and a slightly embarrassing one for the field. The safe-offline-RL literature has spent several years optimizing against benchmark suites that hand you per-step costs, and almost nobody asked where those costs come from. Anyone who has actually collected safety data knows they come from a button. The framing — stop-feedback as the realistic annotation protocol — is the most valuable contribution here, arguably more than the method. It sits at the point in the field's trajectory where benchmark-driven progress starts to be checked against deployment reality.
+
+**Method maturity**: Clever recombination rather than new machinery. Return decomposition is well-trodden (RUDDER, IRCR, randomized return decomposition), and the move is to notice that the cost channel of a CMDP is exactly where it should have been applied all along. The theory is a sanity check, not an engine: "sum-preserving relabeling preserves the constraint" is nearly immediate once stated, and I would be suspicious of a paper that dressed it up as deep. Two simpler approaches deserve to be in the running: uniform smearing of the cost over the trajectory (IRCR-style, essentially free, and historically a brutally strong baseline), and a fixed exponential backward decay from the violation step, which encodes "blame recent actions more" with zero learned parameters. If the learned decomposer does not clearly beat both, most of the paper's value collapses to the framing.
+
+**Experimental integrity**: The domain choice is sensible — highway driving gives you long causal chains before a collision, manipulation gives you contact-driven violations — and the robustness axes (heterogeneous dataset composition, label noise) are exactly the right stress tests, which suggests the authors know where the weak point is. Things I would scrutinize: whether the reported baselines include uniform redistribution rather than only "sparse" and "classifier"; whether violation rate is reported alongside return, since driving the cost critic to be conservative buys safety by doing nothing; and how the constraint threshold `b` is even interpreted when trajectory cost is binary, since `b` becomes a violation **probability* and the Lagrangian is quite sensitive to it. Also worth checking whether the discount factor is handled honestly — return-equivalence holds for undiscounted sums, and with `gamma < 1` moving cost mass earlier in time strictly increases the discounted cost return. That is not fatal (it makes the method more conservative, which is arguably fine for safety) but if the paper claims exact losslessness under discounting, something is being swept away.
+
+**Writing quality**: The likely corner-cut, judging by the abstract's balance, is the decomposition stage itself — "converts sparse stop-feedback into dense per-step costs via return decomposition" is doing a lot of work in one clause, and the identifiability question (many redistributions are return-equivalent; which one does the training objective actually select, and why is it the causally sensible one?) is where a reader's trust is won or lost. Rewriting that into an explicit account of the inductive biases, plus a qualitative figure showing **where* on a highway trajectory the model places blame, would elevate the whole paper from "sensible pipeline" to "we understand what our model learned."
+
+**Verdict**: weak accept — the reframing of sparse safety feedback as credit assignment is genuinely useful and the pipeline is clean, but the theory is a formality and the empirical case stands or falls on ablations against trivial redistribution baselines that the abstract does not mention.
+
+## Takeaways
+
+- **The transferable trick**: any constraint that only reads a **sum* over a trajectory is indifferent to how you distribute that sum in time. That licenses free relabeling — not just for safety cost, but for budget constraints, energy consumption, fairness metrics accumulated over an episode, anything expressible as a return. If your critic is struggling with a sparse constrained signal, redistribution is a legal move and you do not need to prove anything new.
+- **Put the hard part in supervised land**: the structural lesson is to move an ill-conditioned subproblem out of the RL loop and into a preprocessing stage where you have full trajectories, offline compute, and stable losses. The RL algorithm downstream stays untouched, which means this composes with whatever constrained solver you have already tuned.
+- **Design for the annotation you can actually get**: "one binary label at the first violation" is a better model of human safety supervision than per-step cost, and worth adopting as a default assumption in your own problem formulations. Benchmarks that hand you dense costs are quietly measuring the wrong thing.
+- **Cheap baseline to steal immediately**: before training any decomposer, try uniform or exponentially-decayed smearing of the trajectory cost backwards from the violation. It takes an afternoon, requires no new model, and in the reward-decomposition literature it has repeatedly matched learned approaches. If it works, you are done; if it does not, you now have a meaningful baseline for the learned version.
+:::
+
+:::zh
+**论文**: [2608.12306](https://arxiv.org/abs/2608.12306)
+**作者**: Ebenezer Gelo, Geraud Nangue Tasse, Steven James, Benjamin Rosman
+**分类**: cs.LG, cs.AI
+
+## 缺口
+
+你能想到的几乎所有安全离线 RL 方法——CPQ、COptiDICE、BCQ/IQL 的约束版本、Constrained Decision Transformer——都建立在一个前提上：数据集自带每一步的代价标注 `c(s,a)`。
+
+这个前提是承重墙。代价评论家 `Q_c` 靠这些逐步标签做 TD 训练，拉格朗日乘子靠由此估出的代价回报来调。
+
+而在真实部署里，这个前提是编出来的。
+
+人类监督者实际产出的是**停止反馈**：他盯着机器人或车，出事那一刻按下按钮。
+
+一条可能两百步长的轨迹，只换来一个比特和一个时间戳。
+
+八秒前那次让碰撞变得不可避免的变道，没有任何归因。
+
+现有的两条绕路都不令人满意。
+
+**直接用稀疏代价**：`Q_c` 得把唯一一个非零目标沿整条 episode 往回 bootstrap，这是长时程信用分配的经典病症——方差大、传播慢，而且评论家恰好在你最需要它锋利的地方最钝。
+
+**训一个分类器**判断状态是否不安全：可你的正样本只在违规那一步，所有前兆状态都被标成安全，分类器学到的是「不安全 = 已经撞了」——这对避险毫无用处，而且严重受数据集里不安全样本比例的影响。
+
+```
+[PROBLEM] 监督者每条轨迹只给一个比特
+   z = 1 打在第一个不安全 transition 上
+        |
+        v
+[STATE OF ART] 安全离线 RL 假设稠密 c(s a)
+   CPQ / COptiDICE / CDT / 各类拉格朗日变体
+        |
+        +--> 绕路 A: 硬用稀疏尖峰
+        |      .. Q_c 要把一个比特回传 T 步
+        |      .. TD 目标近乎全零 = 条件数极差
+        |
+        +--> 绕路 B: 不安全状态分类器
+        |      .. 正样本只在撞车那一步
+        |      .. 前兆状态被标成安全 = 假阴性
+        |      .. 结果被数据集构成绑架
+        |
+        v
+[ASSUMPTION] CMDP 约束只读轨迹的代价 RETURN
+   它从来不看代价在时间上的形状
+        |
+        v
+[METHOD] RCI = 对代价信号做 return decomposition
+   然后接任意现成的约束离线求解器
+        |
+        v
+[EVIDENCE] 高速驾驶 + 机器人操作
+   违规率显著低于 sparse 与 classifier 基线
+   在混合数据与噪声标签下依然稳
+        |
+        v
+[CONCLUSION] 重分配是无损的(可行集不变 最优
+   拉格朗日不变) 但优化条件好得多
+```
+
+## 增量
+
+**一句话**：以前「我们只有轨迹级安全标签」意味着你要么忍受一个残废的代价评论家，要么手搓启发式代价函数；现在它变成一个**信用分配**问题，有了原则性的解法——把轨迹的代价回报摊回各步，CMDP 察觉不到任何区别，而优化器爽到不行。
+
+### 核心机制
+
+RCI 是两段拼起来的，而拼缝处才是关键。
+
+第一段：对每条带二值停止反馈 `z` 的轨迹 `tau = (s_0, a_0, ..., s_T)` 跑一个序列模型，输出每步代价 `c^_t`，训练时施加回报等价约束：`sum_t c^_t` 必须等于 `z`。
+
+于是安全轨迹每一步都是零；不安全轨迹里，模型手上有「一个单位的责任」要分配，它必须决定最后那次急转该背多少、之前的跟车过近该背多少。
+
+这就是 RUDDER 那套 return decomposition，只是从奖励移植到了代价。
+
+第二段刻意做得平淡：把重分配后的代价写回数据集，就当是人类逐步标注过一样，然后跑你本来就信任的任何约束离线 RL——奖励评论家 `Q_r`、如今吃稠密目标的代价评论家 `Q_c`、以及乘子上的对偶上升。
+
+理论部分是黏合剂。
+
+因为 CMDP 约束是 `J_C(pi) <= b`，而 `J_C` 是代价**求和**的期望，所以任何保持逐轨迹和不变的重分配，对**每一个**策略都不改变 `J_C(pi)`。
+
+结论：可行集相同、拉格朗日鞍点相同、最优策略相同。
+
+信息没多也没少，变的纯粹是学习问题的条件数。
+
+论文自己也承认收益就在这儿：同一个问题，但 `Q_c` 的信用分配链条短了一个量级。
+
+```
+   离线数据集 D
+   +-------------------------------------+
+   | tau = (s0 a0 s1 a1 ... sT)   z in \{0,1\} |
+   +-------------------------------------+
+                  |
+                  v
+   [ 阶段一 . 对代价做 return decomposition ]
+   序列模型 g( tau ) -> c^_0 c^_1 ... c^_T
+        硬/软约束:  sum_t c^_t == z
+        loss = 回报预测 + 重分配正则
+                  |
+                  v
+   +-------------------------------------+
+   | D+ = \{ (s a s' r c^) \}  逐步稠密    |
+   +-------------------------------------+
+                  |
+                  v
+   [ 阶段二 . 约束离线 RL ]
+       Q_r  <-- 对 r 做 TD
+       Q_c  <-- 对 c^ 做 TD  (稠密 局部 稳定)
+       lambda <-- 对 ( J_C - b ) 对偶上升
+       pi  = argmax  Q_r - lambda * Q_c
+                  |
+                  v
+            安全策略 pi*
+```
+
+**核喻**：这是一位车祸后做责任划分的保险理赔员。
+
+交警的记录就是停止反馈：「14：32 发生碰撞」。
+
+一个比特、一个时间戳，法律上够用，防患上毫无价值。
+
+**重分配网络就是那位理赔员**：他调出行车记录仪，写出一份责任明细——八秒前那次未打灯变道占 40%，跟车距离占 30%，车速占 20%，最后的急转占 10%。
+
+**回报等价约束就是那条会计规则**：所有百分比必须正好加起来等于一次事故。
+
+理赔员可以重新分摊责任，但既不能凭空创造也不能销毁责任——所以不管他怎么切，保险公司的总赔付额（也就是 CMDP 的约束值）分毫不动。
+
+**代价评论家是精算师**，负责给各种驾驶行为定保费：只给他「14：32 撞车」，他得从上万份报告里反推哪些习惯危险；给他责任明细，他直接照着念。
+
+**拉格朗日策略更新则是驾校**，按保费高低去矫正习惯。
+
+这个核喻还顺带预测了失效模式：如果理赔员判错了——责任压在急转上而不是变道上——赔付总额依然正确、账目依然平衡、精算师依然自信地给错误的行为定价。
+
+回报等价保证的是账，不是归因。
+
+### 关键概念
+
+- **停止反馈 (stop-feedback)**：想象你拿一个红色大按钮监督仓库机器人。你不会填表给每一条关节指令打分；你就是盯着，等机械臂快撞上货架时一巴掌拍下去。日志里留下的只有：这一集结局很糟，发生在第 137 步。这就是停止反馈——二值、轨迹级、时间戳打在**第一次**违规处，对之前的一切保持沉默。它是人类能提供的最便宜的安全标注，所以它也正是你实际拿到的东西。
+
+- **回报等价重分配**：两个代价函数如果对每条轨迹求和都相同，就是回报等价的。想象一排两百个杯子，末尾那个里有一颗弹珠。重分配把这颗弹珠磨成粉，撒到所有杯子里。整排一起称重：一模一样。但现在每个杯子里都有东西了，于是一台只能一次感知一个杯子的机器，也能告诉你质量集中在哪儿。CMDP 是那台称整排的秤——它分辨不出差别。TD 学习器是那台一次一杯的传感器——它在意得不得了。
+
+- **「无损」变换凭什么有用**：这一点最容易把人绕住。既然没增加信息，怎么会变好？因为 TD 学习消耗的不是信息，而是**梯度**。面对末端单个尖峰的代价评论家，要把价值搬到真正关键的那个状态上，得串起 137 次 bootstrap 更新，每一环都注入偏差和方差。稠密目标把这条链换成了直接回归。统计内容一样，优化地形天差地别——这也正是奖励整形（reward shaping）在可证保持最优策略的前提下依然有用的同一个道理。
+
+## 框架转变
+
+```
+之前(主流):                            之后(RCI):
+
+沿 tau 的代价信号                      沿 tau 的代价信号
+0 0 0 0 0 0 0 0 0 1                   . . : : + + * # # #
+^                 ^                   ^               ^
+t=0             违规                  t=0           违规
+
+        |                                     |
+        v                                     v
+Q_c 必须把一个比特                     Q_c 直接在稠密局部
+往回 bootstrap T 步                    目标上做回归
+        |                                     |
+        v                                     v
+方差大 速度慢                          条件数良好
+条件数差                               信用路径短
+        |                                     |
+   或者外挂一个                         而且由构造保证
+   把前兆判成安全的                     sum == 原始
+   分类器                               代价回报
+        |                                     |
+        v                                     v
+[ 代价模型是瓶颈          ]           [ 代价模型退化成预处理 ]
+[ 你在 RL 循环里跟它搏斗  ]           [ RL 循环原封不动      ]
+```
+
+**一句话**：从「稀疏代价是数据层面的限制，你得围着它重新设计 RL 算法」，转变为「稀疏代价是时序信用分配问题，在 RL 算法看到数据**之前**就解决掉」——核心转变是把困难从约束优化器里搬到一个行为好得多的监督式预处理阶段。
+
+## 专家评审
+
+*先说清楚：我只看到摘要，下面关于数字和消融的判断是「我会去查什么」，不是「我已经核实过什么」。*
+
+**选题眼光**：真缺口，而且对这个领域有点尴尾。
+
+安全离线 RL 这几年一直在优化那些直接把逐步代价递到你手上的 benchmark，几乎没人问过这些代价从哪来。
+
+但凡真采集过安全数据的人都知道：它们来自一个按钮。
+
+把停止反馈树立为现实的标注协议，这个框架本身是本文最有价值的贡献，可以说比方法更值钱。
+
+它正好卡在领域轨迹上「benchmark 驱动的进展开始被部署现实校验」的那个位置。
+
+**方法成熟度**：是巧妙的重组，不是新机器。
+
+Return decomposition 早被踩熟了（RUDDER、IRCR、randomized return decomposition），本文的动作是意识到 CMDP 的代价通道本来就该用它。
+
+理论是理智检查，不是引擎：「保和的重标注保持约束不变」一说出口几乎就成立了，如果有论文把它包装得很深，我反倒会警惕。
+
+两个更简单的方案有资格上台竞争：把代价均匀摊到整条轨迹（IRCR 式，几乎零成本，而且历来是个凶狠的基线），以及从违规步往回做固定指数衰减，用零个学习参数编码「越近的动作责任越大」。
+
+如果学出来的分解器没有明显打败这两个，本文的价值基本就只剩框架了。
+
+**实验诚意**：域选得对——高速驾驶给你碰撞前的长因果链，操作任务给你接触驱动的违规——而鲁棒性维度（异质数据集构成、标签噪声）恰恰是该压的两个点，说明作者知道自己的软肋在哪。
+
+我会重点盯几处：报告的基线里有没有均匀重分配，而不是只有 sparse 和 classifier；违规率是否与回报一起报告，因为把代价评论家逼保守可以靠「什么都不做」来买安全；以及当轨迹代价是二值时，约束阈值 `b` 到底怎么解释——它此时变成了违规**概率**，而拉格朗日对它相当敏感。
+
+还值得查折扣因子处理得是否诚实：回报等价对无折扣求和成立，而在 `gamma < 1` 下把代价质量往前挪会严格增大折扣代价回报。
+
+这不致命（它让方法更保守，对安全而言未必是坏事），但如果论文声称在折扣情形下精确无损，那就有东西被扫到地毯下面了。
+
+**写作功力**：从摘要的篇幅配比看，偷懒最可能发生在分解阶段本身。
+
+「通过 return decomposition 把稀疏停止反馈转成稠密逐步代价」这一个从句扛了太多重量，而可识别性问题——回报等价的分配有无穷多种，训练目标究竟选中了哪一种？凭什么它是因果上合理的那一种？——正是读者的信任建立或崩塌之处。
+
+把这一段重写成对归纳偏置的明确交代，再配一张定性图展示模型在一条高速轨迹上**把责任放在了哪里**，能让整篇论文从「一条合理的流水线」升级到「我们理解自己的模型学到了什么」。
+
+**判决**：弱接收 —— 把稀疏安全反馈重构为信用分配问题确实有用、流水线也干净，但理论只是形式化的例行公事，实证成败取决于与平凡重分配基线的消融对比，而摘要对此一字未提。
+
+## 要点总结
+
+- **可迁移的那个招**：任何只读轨迹**求和**的约束，都不在乎这个和在时间上如何分布。这就为免费重标注开了绿灯——不只是安全代价，还包括预算约束、能耗、按 episode 累积的公平性指标，任何能写成 return 的东西。如果你的评论家正被稀疏约束信号折磨，重分配是合法动作，你不需要再证明什么新定理。
+- **把难点挪进监督学习的地盘**：结构性教训是，把一个条件数糟糕的子问题从 RL 循环里搬到预处理阶段——那里你有完整轨迹、离线算力和稳定的 loss。下游 RL 算法完全不动，也就意味着这套东西能和你已经调好的任何约束求解器组合。
+- **按你真能拿到的标注去设计**：「第一次违规处的一个二值标签」比逐步代价更贴近人类安全监督的真相，值得当作你自己问题建模时的默认假设。那些把稠密代价直接塞给你的 benchmark，悄悄地在测错的东西。
+- **立刻能偷的廉价基线**：在训任何分解器之前，先试试把轨迹代价从违规步往回做均匀或指数衰减的摊平。一个下午就能做完，不需要新模型，而在奖励分解文献里它反复打平过学出来的方法。行得通就收工；行不通，你也终于有了一个有意义的对照。
+:::
