@@ -1,0 +1,352 @@
+---
+title:
+  en: "AdvFD: When Your Fréchet Loss Gets Gamed, Make the Metric Fight Back"
+  zh: "AdvFD：当 Fréchet 损失被刷分，就让度量自己反击"
+description:
+  en: "Fréchet distance losses improve FID but can quietly degrade real quality. AdvFD adds an adversarially learned feature space, kept honest by real-feature whitening, so the generator can no longer game a fixed ruler."
+  zh: "Fréchet 距离损失能刷高 FID，却可能悄悄损害真实画质。AdvFD 引入对抗学习的特征空间，并用真实特征白化把这把尺子校准，让生成器无法再钻固定度量的空子。"
+date: 2026-08-13
+tags: ["arxiv", "ai", "cs.cv"]
+image: "/arxiv-visuals/arxiv-advfd-boosting-visual-generation-via-adversarial.png"
+---
+:::en
+**Paper**: [2608.11205](https://arxiv.org/abs/2608.11205)
+**Authors**: Mingju Gao, Jingkai Zhou, Kun Gai, Changqian Yu, Hao Tang
+**Categories**: cs.CV
+
+## The Gap
+
+Here's the setup. Diffusion and flow-matching losses are *sample-level*: for each noisy input, predict the right target. They say nothing directly about whether the *distribution* of your outputs matches the distribution of real images. This mismatch bites hardest for one-step / few-step generators, where you no longer have dozens of denoising steps to average away errors.
+
+So a recent line of work does the obvious thing: take the same quantity we evaluate with, Fréchet distance, make it differentiable over a minibatch, and add it as a post-training loss. You embed real and generated batches into some pretrained feature space (Inception, DINOv2, CLIP), compute batch mean and covariance for each, and minimize
+
+```
+FD = ||mu_r - mu_g||^2 + Tr( Sigma_r + Sigma_g - 2 (Sigma_r Sigma_g)^(1/2) )
+```
+
+It works. FID drops. And that is exactly where the problem starts.
+
+The paper's claim is that FD-Loss suffers **Fréchet hacking**: the FD you optimize keeps improving, while (a) perceptual quality plateaus or gets worse, and (b) FD measured in **other* feature spaces stops improving or degrades. This is textbook Goodhart's law, but with a specific mechanical cause the authors name: the feature space is **static**. A frozen encoder gives you one fixed, low-dimensional, incomplete projection of the difference between two distributions. Match mean and covariance along those particular axes and the loss is satisfied — even if the distributions still differ wildly along axes the encoder never looked at. Adding more frozen encoders helps a bit, but you're still choosing your blind spots in advance.
+
+```
+   [ Problem ]
+   one-step generators need a distribution-level loss
+        |
+        v
+   [ Prior work ]  FD-Loss on frozen features (Inception / DINO / CLIP)
+        |
+        +--> observed failure: FD_target down, quality flat or worse,
+        |                       FD in other spaces stagnates
+        v
+   [ Diagnosis / Assumption ]
+   the failure is *structural*: a fixed feature space = a fixed,
+   incomplete view of the distribution gap  ==> gameable
+        |
+        v
+   [ Method ]  AdvFD
+   static FD term  +  learned feature space phi that MAXIMIZES FD
+   generator minimizes FD in that adaptive space   (min-max)
+        |
+        + guard: real-feature whitening
+        |        (kills the "just scale up features" cheat)
+        v
+   [ Evidence ]
+   one-step post-training on JiT and pMF, multiple model scales,
+   FD reported across held-out feature spaces
+        |
+        v
+   [ Conclusion ]
+   the ruler should be learned and calibrated, not frozen
+```
+
+## The Increment
+
+**One sentence**: Before, a Fréchet loss was a fixed ruler the generator could learn to satisfy without actually getting better; after, the ruler is an adversary that keeps searching for the axis where you're still wrong — with its units pinned down so it can't cheat either.
+
+### Core Mechanism
+
+Three pieces. First, keep the original static FD term on pretrained features — this is the anchor, and it matters, because a pure adversarial objective is where GAN instability lives. Second, add a learnable representation `phi` (a small trainable head/encoder) and an inner maximization: `phi` is trained to *maximize* the Fréchet distance between real and generated batches in its own output space. The generator then minimizes the same quantity. So instead of one fixed view, you get a view that actively hunts for whichever direction the generated distribution's first and second moments still disagree with the real one.
+
+Third, and this is the part that makes it actually work: **real-feature whitening**. There's an obvious degenerate solution for the inner player. FD is not scale-invariant — multiply all features by a constant `k` and the mean term scales by `k^2` and the trace term likewise. The adversary can therefore drive its objective to infinity without discovering anything about the distributions, purely by amplification. Worse, it can play with covariance conditioning to inflate the trace term. Whitening fixes this by normalizing `phi`'s output **with respect to the real features*: transform so real features have (approximately) zero mean and identity covariance. Now the real side of the comparison is pinned to a standard reference geometry, the units of the ruler are fixed, and the only way for `phi` to increase FD is to find a genuine discrepancy in the generated batch.
+
+Data flow per step: sample a real batch and a generated batch, push both through frozen encoders and through `phi`; estimate the whitening transform from real features; compute FD in the whitened adversarial space plus FD in the static spaces; ascend on `phi`, descend on the generator (alongside the usual flow-matching / one-step objective).
+
+```
+   real batch x_r                     generated batch x_g = G(z)
+        |                                       |
+        +----------------+----------------+-----+
+                         |                |
+              [ frozen encoders ]     [ learnable phi ]
+                 f1  f2  ...              |
+                  |   |                   v
+                  |   |          [ real-feature whitening ]
+                  |   |            mu_r -> 0, Sigma_r -> I
+                  |   |            (transform fit on REAL only)
+                  v   v                   |
+              FD_static(f_i)          FD_adv(phi)
+                  |                       |
+                  +-----------+-----------+
+                              |
+                      L = FD_static + lam * FD_adv
+                              |
+             ascent on phi <--+--> descent on G
+             (find worst axis)     (fix that axis)   + sample-level loss
+
+   without whitening:  phi -> k * phi  ==>  FD_adv -> k^2 * FD_adv
+                       ("winning" by shouting louder, learning nothing)
+```
+
+Metaphor: think of a **metrology lab inspecting a factory's output**. The static FD-Loss is a lab that bought three measuring instruments once and never changed them — a scale, a caliper, a colorimeter. The factory (the generator) is graded only on those three readings, so it learns to hit the target weight, length, and color exactly, while the products can still be visibly wrong in ways no instrument on the bench measures. That's Fréchet hacking.
+
+AdvFD hires a roving inspector whose job is to *design a new measurement each round*, specifically the one where the factory's batch deviates most from the reference batch of genuine goods. The factory fixes that deviation, the inspector designs a new one, and so on. But there's an exploit: the inspector is paid by "how much deviation did you find," so he could just switch from millimeters to nanometers and report enormous numbers while learning nothing. Real-feature whitening is the calibration rule: **every new instrument must be zeroed and scaled against the reference batch of genuine goods before it can report a number.** One unit is one unit, defined by the real products themselves. Now the only way to earn a big reading is to find a real defect. And the three old bench instruments stay in the room as a sanity anchor, so the roving inspector's creativity never fully replaces baseline checks.
+
+### Key Concepts
+
+- **Fréchet distance as a loss (and what it ignores)**: Take a batch of images, run them through an encoder, and you get a cloud of points in feature space. FD summarizes that cloud by only two things: where its center is, and how it's stretched — mean and covariance. It then measures how far apart two clouds' centers and stretches are. Concretely: two very different image sets can have identical mean and covariance if their differences live in third-or-higher moments, or in directions the encoder collapses. So "FD equals zero" does not mean "same distribution"; it means "same first two moments **as seen through this encoder*." That gap between the two statements is precisely the room in which hacking happens.
+
+- **Fréchet hacking**: The generator is being optimized against a proxy. Left alone, gradient descent will find whatever cheapest change reduces the proxy — including changes that push feature statistics into alignment while making images subtly worse (over-smoothing, mode collapse toward high-scoring texture statistics, low-level artifacts the encoder is blind to). The diagnostic the paper uses is nice and cheap: optimize FD in space A, and **watch FD in spaces B and C*. If A improves while B and C stall, you're not learning the distribution, you're learning A's blind spots. Anyone using FD-Loss should be running this check.
+
+- **Whitening as a constraint, not a trick**: GAN literature has always needed to bound the inner player — weight clipping in WGAN, gradient penalties, spectral norm — because otherwise the critic maximizes its objective by exploding its own scale. AdvFD faces the same disease in a Fréchet-shaped form, and the cure is geometry-specific: since FD compares mean offset and covariance geometry, fix the real side's mean to zero and covariance to identity. It removes exactly the two degrees of freedom (overall scale and covariance conditioning) the adversary would otherwise abuse, without restricting **which direction* it may look in.
+
+## Framework Shift
+
+```
+Before (static FD-Loss):              After (AdvFD):
+
+  real  gen                             real  gen
+    |    |                                |    |
+    v    v                                v    v
+  [ FROZEN encoder ]                    [ FROZEN encoders ]  (anchor)
+    fixed axes, chosen                        |
+    before training                      + [ phi : LEARNED axes ]
+    |                                          |
+    v                                    [ whitening vs REAL ]
+   FD  <-- generator only                      |
+        needs to satisfy                       v
+        THESE axes                       max over axes of FD
+        |                                      |
+        v                                      v
+   blind spots are fixed              generator must satisfy
+   ==> discoverable                   the WORST-CASE axis
+   ==> exploitable                    ==> blind spots move
+                                      ==> harder to camp on
+```
+
+From a *fixed measurement* to a *worst-case calibrated measurement*, the core shift is: stop treating the evaluation metric's feature space as ground truth and start treating it as one adversary-chosen probe among many, with the adversary's units nailed down by the real data.
+
+## Expert Assessment
+
+**Problem choice**: Real gap, well-timed. FD-as-loss became popular fast because it's simple and it moves the number everyone reports, and "the number we optimize is the number we report" is a genuine methodological hazard that the field is currently under-policing. Naming Fréchet hacking and giving a cheap cross-feature-space diagnostic is arguably worth as much as the method. The positioning is squarely on the trajectory of one/few-step generation, where distribution-level supervision is the live problem.
+
+**Method maturity**: Clever, but less novel than the framing implies. Adversarially learning a feature space in which you match mean and covariance is close to prior adversarial moment-matching work — McGan (mean and covariance feature matching with a constrained feature space) and the Fisher/Sobolev GAN family all inhabit this territory, and those papers also found that the inner player must be constrained or it explodes. AdvFD's real contribution is the specific constraint (whitening against real features, which is cleaner and cheaper than a gradient penalty) plus the demonstration that this works as a **post-training* add-on rather than a from-scratch objective. The honest tension: FD-Loss was appealing partly *because* it was GAN-free and stable, and AdvFD reintroduces min-max optimization. Whether whitening buys back enough stability is an empirical question the abstract asserts rather than demonstrates.
+
+**Experimental integrity**: The right things are present in outline — two backbones (JiT, pMF), multiple scales, and cross-feature-space FD as the anti-hacking check. Three things I'd want before believing it. (1) The critical baseline is not "static FD-Loss" but "static FD-Loss plus an ordinary GAN discriminator," since adversarial losses are already known to sharpen one-step generators; if AdvFD's gain is mostly "you added a discriminator," the Fréchet framing is decoration. (2) Human or at least reference-free perceptual evaluation, because the paper's own thesis is that FD numbers can lie — proving you fixed FD-hacking using FD numbers is circular unless the evaluation spaces are convincingly held out. (3) Batch-size sensitivity: covariance estimation in high dimensions from a minibatch is noisy, and whitening requires inverting/factorizing an estimated real covariance; the practical batch-size floor and the conditioning behavior deserve their own ablation.
+
+**Writing quality**: The abstract is tight and the diagnosis is stated crisply, which is the hard part. The corner-cutting is almost certainly in relating this to two decades of adversarial moment matching and critic-regularization literature — that section, written generously rather than defensively, would materially raise the paper, because the honest claim ("we identify a specific failure mode of a specific new practice, and a cheap geometry-matched fix") is strong enough without implying the min-max idea is new.
+
+**Verdict**: weak accept — a real, timely failure mode with a clean and well-motivated fix, held back by novelty overlap with adversarial moment-matching and by an evaluation that must work harder to escape circularity.
+
+## Takeaways
+
+- **Steal the diagnostic immediately.** Whenever you optimize a metric-shaped loss, hold out other feature spaces and monitor them. "Target metric down, held-out metrics flat" is a portable early-warning signal for reward hacking, applicable well beyond generative vision — RLHF reward models, retrieval rerankers, any learned proxy.
+- **Whitening as the cheapest critic constraint.** If your inner objective is scale-sensitive (anything built from means, covariances, or quadratic forms), normalizing against the **real* side's statistics removes the amplification exploit for near-zero cost and no extra hyperparameter, where a gradient penalty would cost you a backward pass and a coefficient to tune.
+- **Keep a frozen anchor next to the learned adversary.** The static-plus-adaptive composition is a reusable recipe: the frozen term bounds how badly the min-max can wander, the learned term supplies the coverage the frozen term lacks. This transfers to perceptual losses, learned metrics, and reward ensembles.
+- **The general framing worth carrying around**: any fixed evaluator defines a fixed blind-spot set, and any optimizer will eventually find it. Making the evaluator move — while calibrating its units against real data so its "improvement" can't be self-manufactured — is the structural fix, not more evaluators.
+:::
+
+:::zh
+**论文**: [2608.11205](https://arxiv.org/abs/2608.11205)
+**作者**: Mingju Gao, Jingkai Zhou, Kun Gai, Changqian Yu, Hao Tang
+**分类**: cs.CV
+
+## 缺口
+
+先把场景摆清楚。
+
+扩散和 flow matching 的损失都是**样本级**的：给一个带噪输入，预测对应的目标。
+它并没有直接约束"你输出的整个分布"是否贴近真实图像的分布。
+这个错配在一步/少步生成器上最致命——因为你不再有几十步去逐步把误差平均掉。
+
+于是最近有人做了最直接的事：把我们评测用的 Fréchet 距离改成 minibatch 上可微的形式，直接当 post-training 损失。
+把真实批和生成批送进某个预训练特征空间（Inception、DINOv2、CLIP），各自算均值和协方差，然后最小化
+
+```
+FD = ||mu_r - mu_g||^2 + Tr( Sigma_r + Sigma_g - 2 (Sigma_r Sigma_g)^(1/2) )
+```
+
+确实有效，FID 会掉。
+问题恰恰从这里开始。
+
+本文的核心主张是 FD-Loss 会出现 **Fréchet hacking**：你优化的那个 FD 一直在变好，但（a）主观画质停滞甚至变差；（b）在**其他**特征空间里量的 FD 不再改善甚至恶化。
+
+这就是教科书级的 Goodhart 定律，但作者给出了具体的机械原因：特征空间是**静态**的。
+一个冻结的 encoder 只能给你一个固定的、低维的、不完整的"分布差异投影"。
+只要在那几根固定的轴上把均值和协方差对齐，损失就满意了——即使在 encoder 从未看过的方向上，两个分布依然天差地别。
+多堆几个冻结 encoder 能缓解一点，但你仍然是在训练之前就把盲区选好了。
+
+```
+   [ 问题 ]
+   一步生成器需要一个分布级的损失
+        |
+        v
+   [ 已有做法 ]  在冻结特征上做 FD-Loss (Inception / DINO / CLIP)
+        |
+        +--> 观察到的失败：目标 FD 下降，画质持平或变差，
+        |                   其他特征空间的 FD 停滞
+        v
+   [ 诊断 / 假设 ]
+   这个失败是*结构性*的：固定特征空间 = 固定且不完整的
+   分布差异视角  ==> 可以被刷分
+        |
+        v
+   [ 方法 ]  AdvFD
+   静态 FD 项  +  一个被训练去*最大化* FD 的特征空间 phi
+   生成器则在这个自适应空间里最小化 FD      (min-max)
+        |
+        + 护栏：真实特征白化
+        |        (堵住"把特征整体放大"这条捷径)
+        v
+   [ 证据 ]
+   JiT 与 pMF 两种骨干上的一步 post-training，多个模型尺度，
+   并在留出的特征空间上汇报 FD
+        |
+        v
+   [ 结论 ]
+   尺子应该是学出来的、并且被校准过的，而不是冻死的
+```
+
+## 增量
+
+**一句话**：以前 Fréchet 损失是一把固定的尺子，生成器可以学会"讨好尺子"而并没有真的变好；现在这把尺子变成了一个不断去找"你还在哪里错"的对手，同时它自己的刻度被真实数据钉死，所以它也没法作弊。
+
+### 核心机制
+
+三个部件。
+
+第一，保留原来在预训练特征上的静态 FD 项。
+这是锚，很重要——因为纯对抗目标正是 GAN 不稳定性的老巢。
+
+第二，加一个可学习表征 `phi`（一个小的可训练 head/encoder）和一个内层最大化：训练 `phi` 去**最大化**它自己输出空间里真实批与生成批之间的 Fréchet 距离。
+生成器则最小化同一个量。
+于是你不再只有一个固定视角，而是有一个主动去搜"生成分布的一二阶矩还在哪个方向上不对"的视角。
+
+第三，也是真正让它跑得起来的部分：**真实特征白化**。
+内层玩家有一条显然的退化解——FD 不是尺度不变的：把所有特征乘上常数 `k`，均值项就乘 `k^2`，迹项同理。
+对手完全可以靠放大把目标推向无穷，而对两个分布一无所知；更糟的是它还能操纵协方差的条件数去吹大迹项。
+白化的做法是：以**真实特征**为基准去归一化 `phi` 的输出，做变换使真实特征近似零均值、单位协方差。
+这样比较的"真实那一侧"被钉在一个标准几何上，尺子的刻度固定了，`phi` 想让 FD 变大就只能去找生成批上真实存在的差异。
+
+单步数据流：采一个真实批和一个生成批，两者都过冻结 encoder、也都过 `phi`；用真实特征估白化变换；算白化对抗空间里的 FD 加上静态空间里的 FD；对 `phi` 做上升，对生成器做下降（和常规的 flow matching / 一步目标一起）。
+
+```
+   真实批 x_r                          生成批 x_g = G(z)
+        |                                       |
+        +----------------+----------------+-----+
+                         |                |
+              [ 冻结 encoder ]        [ 可学习 phi ]
+                 f1  f2  ...              |
+                  |   |                   v
+                  |   |          [ 真实特征白化 ]
+                  |   |            mu_r -> 0, Sigma_r -> I
+                  |   |            (变换只在真实侧拟合)
+                  v   v                   |
+              FD_static(f_i)          FD_adv(phi)
+                  |                       |
+                  +-----------+-----------+
+                              |
+                      L = FD_static + lam * FD_adv
+                              |
+             对 phi 上升 <-----+-----> 对 G 下降
+             (找最差的轴)            (补上这根轴)  + 样本级损失
+
+   没有白化：  phi -> k * phi  ==>  FD_adv -> k^2 * FD_adv
+               (靠"喊得更大声"取胜，什么都没学到)
+```
+
+核喻：把它想成**一间给工厂做质检的计量实验室**。
+
+静态 FD-Loss 就是这间实验室当年一次性买了三台仪器，之后再没换过——一台秤、一把卡尺、一台色差仪。
+工厂（生成器）只按这三个读数被打分，于是它学会把重量、长度、色值精准打到靶心，而产品仍然可能在台面上没有任何仪器测量的维度上明显不对。
+这就是 Fréchet hacking。
+
+AdvFD 请了一个流动质检员，他的工作是**每一轮设计一项新的测量**，专门挑工厂这批货相对真品参考批偏差最大的那一项。
+工厂补上这个偏差，质检员再设计新的，循环下去。
+但这里有个漏洞：质检员是按"你找出了多大偏差"拿钱的，那他完全可以把单位从毫米换成纳米，报出天文数字却什么也没查出来。
+
+真实特征白化就是那条校准规则：**任何新仪器在能报数之前，必须先对着真品参考批归零和定标。**
+一个单位就是一个单位，由真实产品自己定义。
+这样想拿到大读数就只能真的找到缺陷。
+而台面上那三台老仪器一直留在房间里当基线锚，流动质检员的创造力永远不会完全取代基础检查。
+
+### 关键概念
+
+- **Fréchet 距离当损失（以及它忽略了什么）**：拿一批图，过 encoder，就得到特征空间里的一团点。FD 只用两样东西概括这团点：中心在哪，怎么被拉伸——均值和协方差。然后量两团点的中心与拉伸差多远。具体说：两个非常不同的图像集合，只要差异藏在三阶及更高阶矩里、或者藏在 encoder 压掉的方向上，就可以有完全相同的均值和协方差。所以"FD 等于零"不等于"同分布"，只等于"在这个 encoder 眼里前两阶矩相同"。这两句话之间的缝隙，就是刷分发生的地方。
+
+- **Fréchet hacking**：生成器是在对一个代理指标做优化。放任不管，梯度下降就会找到降低代理指标的最便宜的改动——包括那些让特征统计量对上、但图像其实更糟的改动（过度平滑、朝高分纹理统计塌缩、encoder 看不见的低层伪影）。论文用的诊断很便宜也很漂亮：在空间 A 上优化 FD，**同时盯着空间 B、C 的 FD**。如果 A 在降而 B、C 停滞，那你学的不是分布，是 A 的盲区。任何在用 FD-Loss 的人都该跑一下这个检查。
+
+- **白化是约束，不是小技巧**：GAN 文献里一直需要限制内层玩家——WGAN 的权重截断、梯度惩罚、谱归一化——否则 critic 会靠自身尺度爆炸来最大化目标。AdvFD 遇到的是同一种病的 Fréchet 版本，而药方是贴着几何形状开的：既然 FD 比的是均值偏移和协方差几何，那就把真实侧的均值钉成零、协方差钉成单位阵。它恰好抽掉了对手会滥用的那两个自由度（整体尺度与协方差条件数），却完全不限制它可以往**哪个方向**看。
+
+## 框架转变
+
+```
+之前（静态 FD-Loss）：                之后（AdvFD）：
+
+  真实  生成                           真实  生成
+    |    |                                |    |
+    v    v                                v    v
+  [ 冻结 encoder ]                     [ 冻结 encoder ] (锚)
+    轴是固定的，训练前                        |
+    就已经选好                           + [ phi : 学出来的轴 ]
+    |                                          |
+    v                                   [ 对真实侧白化 ]
+   FD  <-- 生成器只需要                        |
+        满足这几根轴                            v
+        |                                最差轴上的 FD 最大值
+        v                                      |
+   盲区是固定的                                 v
+   ==> 可被发现                          生成器必须满足
+   ==> 可被利用                          最坏情况的那根轴
+                                        ==> 盲区会移动
+                                        ==> 难以蹲点刷分
+```
+
+一句话：从**固定测量**到**校准过的最坏情况测量**，核心转变是——不再把评测指标的特征空间当作真值，而是当作对手挑选的一次探测，并且用真实数据把对手的刻度钉死。
+
+## 专家评审
+
+**选题眼光**：真缺口，时机也好。
+
+FD 当损失之所以迅速流行，正因为它简单、而且能直接推动大家汇报的那个数字；而"我们优化的数字就是我们汇报的数字"是一个实实在在的方法论隐患，目前领域对它管得还不够严。
+点名 Fréchet hacking 并给出一个便宜的跨特征空间诊断，价值大概不亚于方法本身。
+定位也正好压在一步/少步生成这条主线上——那里分布级监督是真正的活问题。
+
+**方法成熟度**：有巧劲，但没有框架暗示的那么新。
+
+"对抗地学一个特征空间，在其中匹配均值和协方差"和已有的对抗矩匹配工作距离很近——McGan（在受约束特征空间里做均值与协方差匹配）、Fisher GAN / Sobolev GAN 这一族都在这块地上，而且那些论文同样发现内层玩家必须被约束否则会爆。
+
+AdvFD 真正的贡献是那个具体的约束（对真实特征做白化，比梯度惩罚更干净也更便宜），加上证明它可以作为 **post-training 的加项**工作，而不是必须从头训。
+一个诚实的张力：FD-Loss 当初的吸引力有一部分恰恰在于它**没有 GAN**、因此稳定，而 AdvFD 把 min-max 请回来了。
+白化能不能把稳定性买回来，是个实证问题，摘要是断言而非展示。
+
+**实验诚意**：轮廓上该有的都有——两个骨干（JiT、pMF）、多个尺度、以及用跨特征空间 FD 做反刷分检查。
+
+但我要看到三件事才会信。
+（1）关键基线不是"静态 FD-Loss"，而是"静态 FD-Loss + 普通 GAN 判别器"——因为对抗损失能让一步生成器变锐利已经是共识；如果 AdvFD 的增益主要来自"你加了个判别器"，那 Fréchet 这层框架就只是装饰。
+（2）需要人评，或至少无参考的感知评测：论文自己的论点就是 FD 数字会骗人，那么用 FD 数字去证明你修好了 FD-hacking 是循环论证，除非评测空间的留出足够可信。
+（3）batch size 敏感性：高维下用 minibatch 估协方差本身很噪，而白化还要对估出来的真实协方差做分解/求逆；实用的 batch 下限和条件数行为值得单独一节消融。
+
+**写作功力**：摘要很紧，诊断说得干脆，这是最难的部分。
+
+偷懒的地方几乎必然在与二十年对抗矩匹配、critic 正则化文献的关系梳理上。
+那一节如果写得大方一点而不是防守式的，整篇论文会明显上一个档次——因为那个诚实版本的主张（"我们指认了一种新实践的具体失效模式，并给出一个与几何匹配的便宜修复"）本身已经足够强，不需要暗示 min-max 是新东西。
+
+## 要点总结
+
+- **诊断方法立刻可以拿走。** 只要你在优化一个"指标形状"的损失，就留出别的特征空间去监控。"目标指标在降、留出指标持平"是一个可迁移的 reward hacking 早期预警信号，远不止生成视觉——RLHF 奖励模型、检索重排、任何学出来的代理指标都适用。
+
+- **白化是最便宜的 critic 约束。** 如果你的内层目标对尺度敏感（任何由均值、协方差、二次型搭起来的东西），拿**真实侧**的统计量去归一化，就能几乎零成本、零额外超参地堵掉放大捷径；而梯度惩罚要多一次反向和一个系数去调。
+
+- **在学出来的对手旁边留一个冻结的锚。** "静态 + 自适应"的组合是可复用的配方：冻结项限制 min-max 能跑偏到多远，学习项补上冻结项覆盖不到的部分。这套思路可以搬到感知损失、学习型度量、奖励模型集成上。
+
+- **值得随身带走的一般框架**：任何固定的评测器都定义了一个固定的盲区集合，而任何优化器最终都会找到它。让评测器动起来——同时用真实数据校准它的刻度，使它的"进步"无法自产自销——才是结构性的解法，而不是再加几个评测器。
+:::
