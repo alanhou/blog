@@ -1,0 +1,380 @@
+---
+title:
+  en: "Building the Jig Instead of Training the Hands: Test-Time Capability Transfer via Harnesses"
+  zh: "不训练学生，只造夹具：用 Harness 在推理期完成能力迁移"
+description:
+  en: "A strong model writes the scaffolding; a weak model runs inside it. No gradients, and average Theory-of-Mind accuracy jumps 0.49 to 0.91 — but read the ablations before you believe the number."
+  zh: "强模型写脚手架，弱模型在里面跑。没有梯度更新，四个 Theory-of-Mind 基准平均分从 0.49 涨到 0.91——但在相信这个数字之前，先看消融实验。"
+date: 2026-08-13
+tags: ["arxiv", "ai", "cs.lg", "cs.ai", "cs.cl"]
+image: "/arxiv-visuals/arxiv-ai4ai-at-test-time-strong-to.png"
+---
+:::en
+**Paper**: [2608.12307](https://arxiv.org/abs/2608.12307)
+**Authors**: Cheng Qian, Wenting Zhao, Liangwei Yang, Heng Wang, Jielin Qiu, Heng Ji, Silvio Savarese, Huan Wang, Shelby Heinecke
+**Categories**: cs.LG, cs.AI, cs.CL
+
+## The Gap
+
+Everything we call "distillation" assumes the transfer happens in the student's weights. Classic teacher forcing trains the small model on the big model's outputs. On-policy distillation samples from the student and has the teacher score or correct those samples. Reverse-KL variants, sequence-level RL against a teacher reward, rationale distillation — different objectives, same commitment: capability lives in parameters, so to move it you must edit parameters. That costs GPUs, requires weight access, and produces a student you have to re-train when the task changes.
+
+There's a second, mostly separate literature on inference-time structure: chain-of-thought prompting, self-consistency, prompt optimizers like APE and OPRO, program-of-thought, and agent frameworks such as DSPy. But those are almost always *self*-improvement — one model optimizing its own scaffold — or a human writing the scaffold by hand. The question this paper picks up is the crossing of those two lines: can a **strong model author the scaffold that a weak model runs inside**, and does that count as capability transfer? Nobody had measured it cleanly, and it matters, because if the answer is yes then part of what a frontier model "knows" is transferable as an artifact rather than as a gradient.
+
+```
+PROBLEM: capability transfer is assumed to require
+         weight updates (teacher forcing, on-policy
+         distillation, RL-from-teacher)
+              |
+              v
+ASSUMPTION: part of what the strong model has is
+            *cognitive structure* -- decomposition,
+            control flow, format discipline --
+            which can be externalized as an artifact
+              |
+              v
+METHOD: strong "builder" writes an inference harness
+        around a frozen weak "target"; refines it over
+        rounds against a 5% validation slice; freezes it
+              |
+              v
+EVIDENCE: 4 Theory-of-Mind benchmarks, avg 0.49 -> 0.91
+          ablations attribute gains to:
+            (a) reasoning offloaded into deterministic code
+            (b) benchmark-specific routing
+            (c) strict answer-format enforcement
+          NOT to longer reasoning or wider sampling
+              |
+              v
+CONCLUSION: test-time harness design is a distinct
+            transfer channel, complementary to
+            training-time distillation; weakest
+            targets gain most
+```
+
+## The Increment
+
+**One sentence**: Before, "strong helps weak" meant the strong model produced training signal; after, it can produce a **program* — and the program alone recovers most of the gap, with the weak model's weights untouched.
+
+### Core Mechanism
+
+The setup has three roles. A **builder** (strong model) never answers test questions. A **target** (weak model, frozen) answers all of them. Between them sits the **harness**: an executable artifact — code plus prompt templates plus a parser — that the builder writes. The harness decides how each input is preprocessed, which pipeline it goes down, what the target is asked, what gets computed deterministically instead of asked, and how the target's raw text becomes a graded answer.
+
+The loop is deliberately cheap. Each benchmark donates 5% of its data as a validation slice. Round one: the builder inspects the task, writes a first harness, and it is run with the target inside it. The builder sees the validation score and, presumably, failure cases; it edits the harness. Repeat for several rounds. Then the harness is **frozen** and evaluated once on the full test set. No gradients anywhere in this picture — the only thing that "learns" is a text/code artifact, and the only optimizer is the builder's own reasoning over validation feedback.
+
+What the ablations say the harness actually does is the interesting part, and it is less romantic than the framing suggests. Gains come from three places. First, **offloading**: for Theory-of-Mind tasks, tracking who-was-in-the-room-when is a state machine, and the builder writes that state machine in Python instead of hoping the target keeps it straight in prose. Second, **routing**: the harness recognizes item types and dispatches them to specialized pipelines. Third, **format enforcement**: a lot of apparent incapability was the weak model producing an unparseable answer, and the harness pins the output shape. Notably, the things that did **not* help much are the things the prompting literature loves: telling the target to think longer, or sampling it more times.
+
+```
+   [ BUILDER  (strong, no test access) ]
+         |
+         |  reads task description + 5% val slice
+         v
+   +--------------------------------------+
+   |  HARNESS  (code + prompts, an        |
+   |            inspectable artifact)     |
+   |                                      |
+   |   . input parser / normalizer        |
+   |   . ROUTER: item type -> pipeline    |
+   |   . deterministic code blocks        |
+   |       (state tracking, set logic,    |
+   |        belief bookkeeping)           |
+   |   . prompt templates for the parts   |
+   |       that genuinely need language   |
+   |   . output format enforcer           |
+   +--------------------------------------+
+         |
+         |  calls the target as a subroutine
+         v
+   [ TARGET  (weak, FROZEN weights) ]
+         |
+         v
+     answer  ==>  score on 5% val
+         |
+         +---------- round k feedback ----------+
+         |            (builder edits harness)   |
+         |<-------------------------------------+
+         |            repeat N rounds
+         v
+     FREEZE harness  ==>  run once on full test  ==>  0.91
+```
+
+Think of a machine shop. The **builder** is the senior toolmaker; the **target** is a junior machinist with unsteady hands. Conventional distillation is apprenticeship: the senior watches the junior cut metal for six months until the junior's hands themselves get steady. Expensive, slow, and you cannot hand steady hands to the next junior. This paper instead has the senior build a **jig**: a fixture that clamps the workpiece, with mechanical stops that make the wrong cut physically impossible. The deterministic code blocks are those stops — the junior isn't asked to eyeball the depth, the jig sets it. The router is the senior deciding which of three jigs to reach for depending on the part. The format enforcer is the go/no-go gauge at the end of the bench: a part that isn't within spec never leaves. The 5% validation slice is test cuts on scrap stock — the senior makes a few, sees where the jig binds, files it down, tries again. And the punchline of the ablations, in jig terms: the junior didn't get better at machining. The jig got good enough that machining skill stopped being the bottleneck. Which also tells you the jig's limits — it fits **this* part. Hand it a different part and you're back to needing a toolmaker.
+
+### Key Concepts
+
+- **Harness**: Not a prompt. A prompt is a sentence you hand a model; a harness is the whole apparatus around the model call — the code that runs before it, the branching that decides which call to make, the loop that makes several calls, and the code that cleans up after. Concretely: instead of asking "Sally left the room, then Anne moved the marble. Where does Sally think the marble is?", a harness parses the story into a list of events, runs a Python loop maintaining a dict of `\{agent: last_observed_location\}`, and only asks the model the one sub-question that genuinely needs reading comprehension. The model's contribution shrinks; the system's reliability rises.
+
+- **Strong-to-weak scaffolding**: The transfer channel here isn't knowledge, it's **organization*. The strong model knows that this class of problem is a state-tracking problem, knows to separate parsing from inference, knows to validate output shape. That know-how is expressible in code. So a frozen 8B model wrapped in a well-designed harness can behave like something much larger — not because it learned anything, but because someone else made the decisions it was bad at making.
+
+- **Offloading vs. eliciting**: Two ways to get more out of a weak model. **Eliciting* means coaxing better reasoning out of it — think step by step, sample twenty times and vote. *Offloading* means taking the reasoning away from it and giving that subtask to a Python interpreter, which is never inconsistent. The paper's ablation is that essentially all the gain here is offloading. That's a real finding, and it's slightly deflationary: the weak model's *reasoning* was never upgraded; its reasoning was routed around.
+
+## Framework Shift
+
+```
+Before (mainstream distillation):     After (this paper):
+
+  [ TEACHER ]                           [ BUILDER ]
+      |                                     |
+      | logits / traces / rewards           | writes + iterates
+      v                                     v
+  +-----------+                        +-------------+
+  | training  |                        |  HARNESS    |
+  |   loop    |  GPUs, data, weights   |  (code +    |  a few val rounds
+  +-----------+                        |   prompts)  |
+      |                                +-------------+
+      v                                     |  wraps
+  [ STUDENT ]  weights changed              v
+      |                                 [ TARGET ]  weights UNCHANGED
+      v                                     |
+  better student, permanently               v
+  transfer stored IN parameters         better system, right now
+                                        transfer stored IN an artifact
+```
+
+From weights to artifacts, the core shift is that capability transfer no longer has to be a training problem — it can be a *tooling* problem, where the strong model's contribution is a program you can read, version, and audit.
+
+## Expert Assessment
+
+*(Caveat: I'm working from the abstract's claims about the paper's own ablations; I haven't inspected the harnesses themselves, and that's exactly where the paper lives or dies.)*
+
+**Problem choice**: Real gap, well-timed. Two literatures — distillation and agent scaffolding — have been running in parallel with almost no contact, and the "who authors the scaffold" axis genuinely hadn't been isolated. It also lands on a practical question people actually have: I have API access to a frontier model and a small model I must serve; can the former help the latter without a fine-tuning run? Useful framing, and the "weaker targets gain most" result is the kind of scaling-style regularity that makes a paper citable.
+
+**Method maturity**: Clever framing, thin machinery. The method **is* "let a good model iterate on a script against a validation set" — which is well-trodden in prompt/program optimization; the novelty is who's holding the pen and who's being helped. That's fine. What's less fine is that the paper's own diagnosis undercuts its headline story. If the gains are deterministic code plus **benchmark-specific routing** plus format enforcement, then what's being transferred is closer to a benchmark-specific solver than to "cognitive structure." A simpler baseline is conspicuously implied and, from the abstract, unaddressed: let the builder write the harness and then swap in a **much* stronger target — how much of the 0.91 is the harness rather than any transfer at all? Relatedly, what does a hand-written harness by a competent engineer score? If the answer is 0.90, the builder model is a convenience, not a mechanism.
+
+**Experimental integrity**: This is where I'd push hardest. Theory-of-Mind benchmarks are the worst possible venue for this claim, because most of them (ToMi-lineage especially) are template-generated. A strong builder with 5% of the data and several refinement rounds is in an excellent position to reverse-engineer the generator, and a router that dispatches on item type is precisely what reverse-engineering looks like. Nothing about that is cheating — the protocol is honest, the harness is frozen before test — but "0.49 to 0.91" then measures **how templated the benchmark is* as much as it measures transfer. The paper needs a held-out test the abstract doesn't mention: build the harness on benchmark A, evaluate on benchmark B. Without cross-benchmark transfer, "transfers cognitive structure" is an overclaim; "recovers benchmark-specific solution structure" is what was shown. Four benchmarks in one narrow domain also makes the generality claim shaky — I'd want at least one domain where the reasoning genuinely can't be compiled into a state machine.
+
+**Writing quality**: The abstract is unusually honest — most authors would have buried "gains come primarily from offloading into deterministic code" in an appendix, and putting it up front earns trust. The corner cut is almost certainly the qualitative side: the single most valuable section would be a full harness listing with an annotated diff across refinement rounds, plus a taxonomy of what the builder added and when. Rewrite that and the paper stops being a benchmark-delta report and becomes a study of what "cognitive structure" concretely consists of. Second cut: the near-total absence, judging by the abstract, of a cost accounting. Builder tokens across rounds versus the cost of a LoRA fine-tune is the comparison every practitioner will make.
+
+**Verdict**: borderline, leaning weak accept — the question is sharp and the honest ablations are worth publishing, but without cross-benchmark generalization the headline number measures benchmark structure at least as much as capability transfer.
+
+## Takeaways
+
+- **The "offload, don't elicit" heuristic is the transferable lesson.** When a weak model underperforms on a task, first ask which sub-part is deterministic bookkeeping and move it to code. Empirically that beat both longer reasoning and wider sampling here. This generalizes far beyond ToM: entity tracking, unit conversion, date arithmetic, constraint checking, tabular aggregation.
+- **Measure how much of your "reasoning failure" is a parsing failure.** Format enforcement showing up as a **primary* gain driver is a mild indictment of a lot of small-model evaluation. Before you fine-tune, pin the output schema and re-measure.
+- **Use the strong model as a compiler, not an oracle.** Cheap pattern to steal: give the frontier model a task spec and a tiny labeled slice, have it emit a **program* that calls your cheap model, iterate a few rounds, freeze. You pay frontier prices once, at build time, then serve small forever. The artifact is inspectable and version-controllable, which fine-tuned weights are not.
+- **Builder reasoning effort scaling monotonically with harness quality** is a practical dial: if the harness is mediocre, turn up the builder's thinking budget before changing anything else.
+- **The cautionary steal**: if your evaluation is template-generated, a build-and-freeze loop over a validation slice will find the templates. Treat any large jump from this recipe as suspect until you've tested the harness on a differently-generated dataset.
+:::
+
+:::zh
+**论文**: [2608.12307](https://arxiv.org/abs/2608.12307)
+**作者**: Cheng Qian, Wenting Zhao, Liangwei Yang, Heng Wang, Jielin Qiu, Heng Ji, Silvio Savarese, Huan Wang, Shelby Heinecke
+**分类**: cs.LG, cs.AI, cs.CL
+
+## 缺口
+
+我们叫"蒸馏"的一切，都默认迁移发生在学生的权重里。
+
+经典 teacher forcing 用大模型的输出去训小模型；on-policy 蒸馏从学生采样、让教师打分或纠正；还有 reverse-KL 变体、序列级 RL、rationale 蒸馏。
+
+目标函数各不相同，但承诺是一样的：能力住在参数里，所以要搬动它就必须改参数。
+
+代价是 GPU、是权重访问权、是任务一变就得重训一遍。
+
+另一条线是推理期结构：CoT、self-consistency、APE / OPRO 这类 prompt 优化器、program-of-thought、DSPy 之类的 agent 框架。
+
+但这些几乎都是**自我**优化——一个模型改自己的脚手架——或者干脆由人手写脚手架。
+
+这篇论文抓的正是两条线的交叉点：**强模型能不能替弱模型写脚手架**，而且这算不算能力迁移？
+
+这件事此前没人干净地测过，而它重要，是因为如果答案是"能"，那么前沿模型"会的东西"里有一部分可以作为**产物**交付，而不必作为梯度交付。
+
+```
+PROBLEM: 能力迁移被默认必须改权重
+         (teacher forcing / on-policy distill / RL)
+              |
+              v
+ASSUMPTION: 强模型手里的一部分东西是
+            *认知结构* -- 任务分解、控制流、
+            格式纪律 -- 这些可以外化成产物
+              |
+              v
+METHOD: 强 builder 为冻结的弱 target 写一个
+        推理期 harness；在 5% 验证集上多轮迭代；
+        然后冻结
+              |
+              v
+EVIDENCE: 4 个 Theory-of-Mind 基准，均分 0.49 -> 0.91
+          消融把增益归因于:
+            (a) 把推理卸载进确定性代码
+            (b) 针对基准的分流 (routing)
+            (c) 严格的答案格式约束
+          而 *不是* 让 target 想更久或采样更多
+              |
+              v
+CONCLUSION: 推理期 harness 设计是一条独立的
+            迁移通道，与训练期蒸馏互补；
+            越弱的 target 收益越大
+```
+
+## 增量
+
+**一句话**: 以前"强帮弱"意味着强模型产出训练信号；现在它可以产出一个**程序**——光靠这个程序就能补回大部分差距，而弱模型的权重一动不动。
+
+### 核心机制
+
+三个角色。**builder**（强模型）从不回答测试题。**target**（弱模型，冻结）回答全部题目。
+
+中间夹着 **harness**：一个可执行产物——代码 + prompt 模板 + 解析器——由 builder 写出来。
+
+harness 决定每个输入怎么预处理、走哪条流水线、问 target 什么、哪些东西**不问而直接算**、以及怎么把 target 的原始文本变成可判分的答案。
+
+循环刻意做得很便宜。每个基准拿出 5% 数据当验证集。
+
+第一轮：builder 看任务、写出初版 harness，把 target 塞进去跑一遍。
+
+builder 看到验证分数（大概还有失败样例），然后改 harness。重复若干轮。
+
+之后 harness 被**冻结**，在完整测试集上跑一次。
+
+整张图里没有任何梯度——唯一"学习"的东西是一份文本/代码产物，唯一的优化器是 builder 自己对验证反馈的推理。
+
+消融揭示的 harness 实际作用，是最有意思也最不浪漫的部分。增益来自三处。
+
+第一是**卸载**：ToM 任务里"谁在什么时候在房间里"本质是个状态机，builder 干脆用 Python 把这个状态机写出来，而不是指望 target 用自然语言把它记清楚。
+
+第二是**分流**：harness 识别题型，派发给专门的流水线。
+
+第三是**格式约束**：相当多的"能力不足"其实是弱模型输出了无法解析的答案，harness 把输出形状钉死。
+
+值得注意的是，**没什么用**的恰恰是 prompting 文献最爱的两招：让 target 想更久，或者多采几次。
+
+```
+   [ BUILDER  (强，无测试集访问权) ]
+         |
+         |  读任务描述 + 5% 验证集
+         v
+   +--------------------------------------+
+   |  HARNESS  (代码 + prompt，           |
+   |            一份可读可审计的产物)     |
+   |                                      |
+   |   . 输入解析 / 归一化                |
+   |   . ROUTER: 题型 -> 流水线           |
+   |   . 确定性代码块                     |
+   |       (状态追踪、集合逻辑、          |
+   |        信念记账)                     |
+   |   . 真正需要语言能力那部分的 prompt  |
+   |   . 输出格式强制器                   |
+   +--------------------------------------+
+         |
+         |  把 target 当子程序调用
+         v
+   [ TARGET  (弱，权重冻结) ]
+         |
+         v
+     answer  ==>  在 5% 验证集上打分
+         |
+         +---------- 第 k 轮反馈 ---------------+
+         |            (builder 改 harness)      |
+         |<-------------------------------------+
+         |            重复 N 轮
+         v
+     冻结 harness  ==>  完整测试集跑一次  ==>  0.91
+```
+
+想象一个金工车间。**builder** 是资深工装师，**target** 是手还不稳的学徒。
+
+传统蒸馏是带徒弟：师傅盯着徒弟切了半年金属，直到徒弟的手本身稳了。贵、慢，而且这双稳的手没法交给下一个徒弟。
+
+这篇论文让师傅去做一副**夹具**：把工件卡死，加上机械限位，让错误的切法在物理上做不出来。
+
+确定性代码块就是那些限位——不让学徒目测深度，深度由夹具定死。
+
+router 是师傅根据零件类型伸手去拿三副夹具中的哪一副。
+
+格式强制器是工位末端的通止规——不合规的件根本出不了这张台子。
+
+5% 验证集是拿废料试切——师傅切几刀，看夹具哪里卡手，锉一下，再试。
+
+而消融实验的结论用夹具的话说就是：**学徒的手艺一点没变，只是夹具做得足够好，手艺不再是瓶颈了**。
+
+这也顺带说清了夹具的边界：它只配这一种零件。换个零件，你还是得找工装师。
+
+### 关键概念
+
+- **Harness（推理脚手架）**: 它不是 prompt。prompt 是你递给模型的一句话；harness 是模型调用周围的整套装置——调用前跑的代码、决定调哪一次的分支、连续多次调用的循环、以及调用后收尾的代码。举个具体例子：不是直接问"Sally 离开了房间，然后 Anne 移动了弹珠。Sally 认为弹珠在哪？"，而是由 harness 把故事解析成事件列表，跑一个 Python 循环维护 `\{agent： last_observed_location\}` 这个字典，只把真正需要阅读理解的那一个子问题交给模型。模型的贡献变小了，系统的可靠性上去了。
+
+- **强到弱的脚手架化**: 这里迁移的不是知识，是**组织方式**。强模型知道这类题本质是状态追踪题、知道要把解析和推断分开、知道要校验输出形状。这些 know-how 是可以写成代码的。所以一个冻结的 8B 模型套上设计良好的 harness，行为上可以像个大得多的模型——不是因为它学到了什么，而是因为它不擅长做的那些决策，被别人替它做了。
+
+- **卸载 vs 激发**: 从弱模型身上多榨点东西有两条路。**激发**是哄它推理得更好——think step by step、采二十次投票。**卸载**是把推理从它手里拿走，交给永远不会自相矛盾的 Python 解释器。这篇论文的消融说，增益基本全部来自卸载。这是个真发现，也略微泄气：弱模型的**推理**从没被升级，它的推理是被**绕过**了。
+
+## 框架转变
+
+```
+之前（主流蒸馏）：                    之后（本文）：
+
+  [ TEACHER ]                           [ BUILDER ]
+      |                                     |
+      | logits / traces / reward            | 写 + 迭代
+      v                                     v
+  +-----------+                        +-------------+
+  | 训练循环  |                        |  HARNESS    |
+  |           |  要 GPU / 数据 / 权重  |  (代码 +    |  只要几轮验证
+  +-----------+                        |   prompt)   |
+      |                                +-------------+
+      v                                     |  包裹
+  [ STUDENT ]  权重被改                     v
+      |                                 [ TARGET ]  权重不动
+      v                                     |
+  永久变强的学生                            v
+  迁移存在"参数"里                     立刻变强的系统
+                                        迁移存在"产物"里
+```
+
+一句话：从权重到产物，核心转变是**能力迁移不必再是训练问题，它可以是工装问题**——强模型交付的是一份你能读、能版本管理、能审计的程序。
+
+## 专家评审
+
+*（先声明：我依据的是摘要对自身消融的陈述，没有看过那些 harness 的真身，而这篇论文的生死恰恰就在那里。）*
+
+**选题眼光**: 真缺口，时机好。
+
+蒸馏和 agent scaffolding 这两条线并行跑了很久几乎没有交汇，"脚手架由谁来写"这个轴向确实没被单独隔离过。
+
+它还落在一个从业者真的会问的问题上：我手上有前沿模型的 API 和一个必须自己部署的小模型，前者能不能不通过微调帮到后者？
+
+框架很有用，而"越弱的 target 收益越大"这种带 scaling 味道的规律，是让论文被引用的那类结果。
+
+**方法成熟度**: 框架巧，机器薄。
+
+方法本身就是"让好模型对着验证集反复改一个脚本"——这在 prompt / program 优化里早已被踩烂；新的是握笔的人是谁、被帮的人是谁。这没问题。
+
+不太行的是：论文自己的诊断反过来削弱了它的主叙事。
+
+如果增益是确定性代码 + **针对基准的 routing** + 格式约束，那被迁移的东西更接近一个基准专用求解器，而不是"认知结构"。
+
+有一个显然该做、而摘要里看不到的简单基线：让 builder 写好 harness，然后把 target 换成一个**强得多**的模型——0.91 里有多少是 harness 本身、跟"迁移"完全无关？
+
+再者，一个称职的工程师手写的 harness 能打多少分？如果答案是 0.90，那 builder 模型只是便利，不是机制。
+
+**实验诚意**: 这里我会压得最狠。
+
+Theory-of-Mind 基准是验证这个主张最糟糕的场地，因为它们大多（尤其 ToMi 一脉）是模板生成的。
+
+一个强 builder 拿着 5% 的数据、跑好几轮精炼，处在一个绝佳的位置去**逆向工程生成器**；而按题型分流的 router，恰恰就是逆向工程长出来的样子。
+
+这不构成作弊——协议是诚实的，harness 在测试前冻结——但"0.49 到 0.91"于是既在测迁移，也在测**这个基准有多模板化**。
+
+论文需要一个摘要里没提的留出实验：在基准 A 上造 harness，去基准 B 上评。
+
+没有跨基准迁移，"迁移认知结构"是过度声明；被证明的是"复原了基准专用的解题结构"。
+
+四个基准全挤在一个窄领域，也让通用性主张站不太稳——我至少想看一个推理**没法**被编译成状态机的领域。
+
+**写作功力**: 摘要异常诚实——多数作者会把"增益主要来自卸载进确定性代码"埋进附录，把它放在开头是挣信任的。
+
+偷懒的地方几乎肯定在质性部分：最有价值的一节应该是完整的 harness 代码清单 + 跨轮次带注释的 diff，再加一份"builder 在第几轮加了什么"的分类学。
+
+把这节重写，论文就从一份基准增量报告，变成一项关于"认知结构到底由什么构成"的研究。
+
+第二处偷懒：从摘要看，成本核算几乎完全缺席。多轮 builder token 花费 vs 一次 LoRA 微调的成本，是每个从业者都会做的对比。
+
+**判决**: 临界，略偏弱接收 —— 问题问得准、消融诚实到值得发表，但缺了跨基准泛化，头条数字所测的"基准结构成分"至少不亚于"能力迁移成分"。
+
+## 要点总结
+
+- **"卸载优于激发"这条启发式是最值得偷的**。弱模型某个任务打不动时，先问哪一部分是确定性记账、把它挪进代码。这里的实测是它同时打败了"想更久"和"采更多"。这条能远远迁出 ToM：实体追踪、单位换算、日期算术、约束检查、表格聚合。
+- **先量一下你的"推理失败"里有多少其实是解析失败**。格式约束能成为**主要**增益来源，是对不少小模型评测的温和控诉。微调之前，先把输出 schema 钉死再测一遍。
+- **把强模型当编译器用，别当神谕用**。可复制的便宜套路：给前沿模型一份任务说明 + 一小片带标注数据，让它产出一个**调用你的廉价模型的程序**，迭代几轮，冻结。前沿价格只在构建期付一次，之后永远用小模型服务。产物可读、可进版本库——微调出来的权重做不到这两点。
+- **builder 推理预算与 harness 质量单调相关**，这是个实用旋钮：harness 平庸时，先把 builder 的思考预算拉高，再动别的。
+- **反面教训也要偷**：如果你的评测集是模板生成的，"造-冻结"这套循环会把模板挖出来。用这个配方拿到的任何大幅提升，在你把 harness 拿到另一种生成方式的数据上测过之前，都应视为可疑。
+:::
