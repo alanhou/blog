@@ -1,0 +1,430 @@
+---
+title:
+  en: "DARTree: Teaching a Chain-Trained Corrector to Think in Trees"
+  zh: "DARTree：让只会走直线的纠正头学会长成树"
+description:
+  en: "Diffusion drafters are fast but path-blind; chain correctors are causal but narrow. DARTree combines them by batching draft-head calls per tree level and doing best-first pruning only afterwards — up to 12.97 accepted tokens per round, training-free."
+  zh: "扩散草稿快但看不见路径，链式纠正有因果但太窄。DARTree 把纠正头按层批量调用、把最优优先剪枝挪到最后，训练无关地把单轮接受长度推到 12.97 个 token。"
+date: 2026-08-14
+tags: ["arxiv", "ai", "cs.lg"]
+image: "/arxiv-visuals/arxiv-dartree-speculative-diffusion-decoding-with-autoregressive.png"
+---
+:::en
+**Paper**: [2608.13524](https://arxiv.org/abs/2608.13524)
+**Authors**: Tianyi Li, Yaxin Luo, Xinyi Shang, Zhiqiang Shen
+**Categories**: cs.LG
+
+## The Gap
+
+Speculative decoding is settled science by now: a cheap drafter proposes tokens, the big model verifies them in one parallel forward pass, and you either accept a prefix of the draft or fall back — output distribution unchanged. The remaining game is entirely about *how many tokens survive verification per round*, because that number times the cost ratio is your speedup.
+
+Two lines of work have been pushing on the drafter. The first replaces the small autoregressive draft model with a **diffusion drafter** that emits an entire block of positions in a single forward pass. Enormously cheap per proposal — but the distributions it emits are **marginal*: position 3's distribution was computed without knowing what you actually picked at positions 1 and 2. Take the per-position argmax and you get sequences that are locally plausible and globally incoherent, which verification punishes immediately.
+
+The fix that emerged is a small **autoregressive correction head**: walk down the draft, and at each step re-condition the marginal on the tokens you've committed to so far. This is what DFlash-style methods do, and it works — but it corrects along **one* chain. Meanwhile the tree-drafting line (Domino and relatives) builds a wide candidate tree from the diffusion output so verification gets many lottery tickets at once — but each branch is still scored from the same path-blind marginals, with no correction carried along it.
+
+So the gap is a literally empty cell in a 2x2: causal correction *and* branching breadth. The reason it stayed empty isn't conceptual, it's latency. The natural way to build a good tree is best-first expansion (pop the highest-scoring node from a heap, run the draft head on it, push its children, repeat). That serializes one head call per node. A 60-node tree becomes 60 sequential forwards, and you've spent your entire speculative budget on drafting.
+
+```
+[Problem] diffusion drafter emits per-position marginals
+    |     fast block proposal . but path-blind
+    v
+[Prior A] chain + AR correction ... causal . width = 1
+[Prior B] diffusion tree .......... wide . no per-branch correction
+    |
+    | naive fix = best-first expansion
+    | cost = one head call PER NODE  ->  drafting latency explodes
+    v
+[Assumption] a head trained on chains still scores
+             off-chain branches well enough to rank them
+    |
+    v
+[Method] expand + score ALL nodes at a depth in ONE batch
+         fixed width per level . prune best-first AFTERWARDS
+    |
+    v
+[Evidence] 7 math / code / chat benchmarks * 4 model-temp configs
+           up to 12.97 accepted tokens per round
+           +98.6% vs DFlash . +27.9% vs Domino . 9.73x vs local AR
+    |
+    v
+[Conclusion] breadth and causal correction compose for free
+             if you decouple scoring from selection
+```
+
+## The Increment
+
+**One sentence**: Before, you chose between a corrected chain and an uncorrected tree; after, you get a corrected tree, and the drafter's cost scales with tree **depth* rather than tree *size* — with no retraining.
+
+### Core Mechanism
+
+Start with the diffusion drafter: one forward pass, out come L position-wise distributions for the next block. Treat these as raw material, not as a draft. Then reuse an off-the-shelf AR correction head — the same one that was trained to fix marginals along a chain — as a *scorer* over paths.
+
+Now the actual construction, which happens level by level. At depth `d` you hold exactly `W` surviving nodes (fixed width — this is beam search, essentially). You issue **one batched call** to the AR head containing all `W` paths. Out come `W` corrected conditional distributions, each properly conditioned on the tokens along its own branch. Expand each node by its top-`k` children, giving `W**k` candidates, score them by accumulated path probability, keep the top `W`, and move to depth `d+1`. After `D` levels you've made exactly `D` head calls — not one per node — and you're holding a scored pool of `D*W` nodes.
+
+Only now does the tree-shaping happen. Best-first pruning runs over the *cached* scores to pick which nodes actually go into the verification tree, building the sparse attention mask that lets the target model check every branch in a single forward. The heap operations are still sequential, but they touch no neural network. That's the whole trick: **the model calls are batched and breadth-first; the selection is sequential and best-first; the two never interleave.**
+
+```
+prefix
+  |
+  v
++--------------------------+
+| diffusion drafter        |   ONE forward
++--------------------------+
+   p1   p2   p3  ...  pL        marginals . no path memory
+         |
+         v
+  depth d : [n1] [n2] ... [nW]     W surviving paths
+         |
+         |  ONE batched AR-head call on all W paths
+         v
+  corrected q( . | path_i )  for i = 1..W
+         |
+         v
+  expand top-k each -> W*k candidates
+  score by path probability
+  keep top W          -> depth d+1
+         |
+      (repeat D times : head calls = D . NOT node count)
+         v
+  scored pool of D*W nodes  [all scores cached]
+         |
+         v
+  best-first pruning over cached scores   <-- zero model calls
+         |
+         v
+  verification tree + sparse attention mask
+         |
+         v
+  target model : ONE forward -> accept longest matching prefix
+```
+
+**The metaphor**: you're a travel agent planning a 10-day trip for a very picky client.
+
+The diffusion drafter is a generic guidebook: "top 5 things to do on day 7." Printed independently of everything else, so day 7's list doesn't know you'll be in a different city by then. Useful raw material, useless as an itinerary.
+
+The AR correction head is a local fixer you can phone. Tell him where you actually are and what you've already done, and he re-ranks the next day's options properly. The old chain method phones him once per day for a single itinerary — correct, but you only ever produce one plan. The old tree method skips the fixer entirely and just hands the client a fan of guidebook-derived plans — lots of options, all slightly wrong.
+
+DARTree keeps **eight candidate itineraries alive at once**, and every morning makes **one* conference call where the fixer re-ranks day `d+1` for all eight simultaneously. That's the batching. One call per day, not one call per itinerary. Each morning you keep the eight best partial plans and drop the rest.
+
+Only at the end, with all the plans and scores on the table, do you decide **which legs to actually book** — that's the best-first pruning, pure paperwork with the fixer already off the phone. Finally the client reviews the booking and signs off on however many consecutive days they like — that's verification and the accepted prefix.
+
+The naive alternative — "call the fixer, wait, decide, call again" — is what makes best-first expansion unusable. Shoot wide, cull later.
+
+### Key Concepts
+
+- **Marginal vs. conditional distributions**: Suppose the true continuation is either "the weather is lovely" or "a storm is coming," 50/50. A parallel predictor asked "what's at position 1?" says the/a; "position 2?" says weather/storm; "position 3?" says is/is. Each answer is individually correct — those are the marginals. But take the per-position best and you can easily assemble "the storm is lovely," which has zero probability under the true joint. Marginals tell you what's likely **at a spot*; they say nothing about what goes together. A correction head's entire job is to convert "likely at position 3" into "likely at position 3 *given* that you already committed to 'the weather'."
+
+- **Acceptance length, and why trees beat chains**: The unit of cost in speculative decoding is one verification pass by the big model. Whatever you feed it, you pay roughly the same. So the metric that matters is expected accepted tokens per verification — the paper's 12.97. A chain is one lottery ticket: one wrong token at position 3 and you accept 2. A tree hedges: if branch A dies at position 3, branch B might survive to 8, and the sparse attention mask lets you check both in the same pass. The catch nobody should forget: a bigger tree makes that "same pass" measurably more expensive, so tokens-per-round alone can be gamed. Wall-clock is the honest metric.
+
+- **Decoupling scoring from search order**: This is the transferable idea. Best-first search wants to expand nodes in score order, which forces you to evaluate them one at a time. Level-synchronous search evaluates a whole frontier at once, which is what GPUs want, but commits you to a fixed width. DARTree's move is to run level-synchronous **evaluation* to fill a cache, then run best-first *selection* over the cache. You lose the ability to let a surprisingly good branch pull extra evaluation budget toward itself — but you gain an order of magnitude in throughput, and empirically that trade is worth it.
+
+## Framework Shift
+
+```
+Before (mainstream approach):          After (this paper):
+
+chain + correction                            [r]
+    [r]                                    /   |   \
+     |    q( . | r )                    [a]   [b]   [c]    <-- W kept
+    [a]                                  :     :     :
+     |    q( . | ra )                  ONE batched head call
+    [b]                                per LEVEL . scores cached
+     |    q( . | rab )                       |
+    [c]                                      |  depth D done
+ causal . width = 1                          v
+                                     pool of D*W scored nodes
+tree without correction                      |
+    [r]                                      v
+  /  |  \                            best-first prune
+[a] [b] [c]      <- all from p2      (no model calls)
+ |    |    |                                 |
+... ... ...      <- all from p3              v
+ wide . marginal only                verification tree
+
+head calls = O(nodes) if best-first   head calls = O(depth)
+head calls = O(depth) but width 1     width = W . causal = yes
+```
+
+**From "pick your poison — causal or wide" to "wide by level, causal by batch," the core shift is that tree search stops paying a model call per node and starts paying one per depth.**
+
+## Expert Assessment
+
+*Caveat up front: I'm working from the abstract and the framing it commits to, not a full read of the tables and ablations. Treat the numeric criticisms below as the questions I'd ask a reviewer to check, not as established flaws.*
+
+**Problem choice**: Real gap, honestly identified, but it's the kind of gap that exists because someone hadn't yet written the paper — the cross-product of two live lines of work. That's not a criticism of usefulness; speculative decoding is a domain where the missing cell in a 2x2 can be worth 2x throughput, and the field's trajectory is exactly this: drafters getting structurally richer while staying cheap. What elevates it above pure combination is that the naive combination genuinely doesn't work (serial head calls eat the budget), so there's a real obstacle being removed rather than two ideas being stapled.
+
+**Method maturity**: Clever engineering, not a conceptual leap. Strip the framing and the candidate construction is beam search with a learned scorer, and the pruning stage is EAGLE-2's heap moved from before the forwards to after them. That's a good move — reordering two stages to match hardware is exactly the kind of insight that gets underrated — but it's a systems insight wearing an algorithms hat. Two things I'd want interrogated: (1) simpler baseline, does plain fixed-width beam output **without* the best-first pruning stage lose much? If pruning contributes a token or two, the paper's second contribution is thin. (2) The training-free claim is the load-bearing risk. A head trained to correct along on-policy chains is being asked to score off-policy sibling branches it never saw during training. That should degrade worst on low-probability branches — precisely the ones best-first pruning is deciding between. The method probably works because ranking is easier than calibration, but I'd want a calibration plot.
+
+**Experimental integrity**: Seven benchmarks across four model–temperature configs with a clean sweep is either a strong method or a well-chosen comparison set. Since DARTree structurally dominates both baselines (it **is* Domino plus correction, and DFlash plus width), a sweep is plausible rather than suspicious. Two red flags to check. First, "9.73x lossless speedup over locally measured autoregressive decoding" — that denominator does a lot of work. Locally measured batch-1 HuggingFace generation is a soft target; against a properly optimized baseline with CUDA graphs, the same method might show 4-5x. Second, and more important: acceptance length and speedup can move in opposite directions if DARTree's verification tree is larger than the baselines'. The comparison is only meaningful at matched verification-tree size or matched wall-clock per round. If the paper reports acceptance length prominently and tree size in an appendix, that's a tell.
+
+**Writing quality**: The abstract is written for people who already know EAGLE-2. "Decoupling AR-head inference from sequential heap operations" is the paper's actual contribution compressed into nine words that mean nothing to an outsider and everything to an insider — efficient, but it costs the paper readers. The section I'd rewrite is the latency accounting: a single figure showing head calls, tree size, and wall-clock per round for all three methods side by side would convert the central claim from "trust the aggregate speedup" to "here is precisely where the time went." Papers in this area live and die on that figure.
+
+**Verdict**: **weak accept** — a well-motivated, correctly-engineered filling of a real gap whose novelty is a stage reordering rather than a new idea, and whose headline numbers depend on baseline choices I'd want to audit.
+
+## Takeaways
+
+- **The reordering pattern is the real prize.** Whenever a search procedure wants to expand nodes in score order but each expansion requires a neural forward pass, ask whether you can evaluate level-synchronously into a score cache and run the priority-ordered logic afterward on cached values. This transfers directly to MCTS with a learned evaluator, retrieval reranking cascades, constrained decoding with a scoring model, and any beam-vs-best-first tension. The design question to internalize: **which stages of my algorithm need a GPU, and can I sort them so all the GPU stages are batched together?*
+
+- **Reusing a chain-trained module on branching structures is often free.** Nobody retrained anything here. Before you commission a new head for a new topology, test whether the existing one generalizes — ranking-only uses tolerate far more distribution shift than probability-accurate uses. Test the calibration on off-policy inputs, though; if you need actual probabilities rather than an ordering, this shortcut breaks.
+
+- **The marginal/joint gap is a reusable diagnosis.** Any time you get speed by predicting positions in parallel — non-autoregressive translation, diffusion generation, parallel structured prediction — you've bought marginals and you're pretending they're a joint. The cheap patch is a small causal corrector bolted on top rather than a redesign of the fast model. Worth reaching for before you conclude the parallel model is just bad.
+
+- **When you read speculative decoding papers, check the denominator and the tree size.** Tokens-per-round is a tunable number: enlarge the verification tree and it goes up while wall-clock goes down. Any speedup figure without a stated baseline implementation and matched verification cost should be read as an upper bound.
+:::
+
+:::zh
+**论文**: [2608.13524](https://arxiv.org/abs/2608.13524)
+**作者**: Tianyi Li, Yaxin Luo, Xinyi Shang, Zhiqiang Shen
+**分类**: cs.LG
+
+## 缺口
+
+投机解码这条路已经很成熟了：小模型出草稿，大模型一次并行前向验证，接受草稿的一个前缀，输出分布严格不变。
+
+剩下的全部战场只有一个数字——每轮验证能活下来几个 token。这个数字乘上成本比，就是你的加速比。
+
+草稿器这一端有两条在推进的线。第一条把小自回归模型换成**扩散草稿器**，一次前向吐出整块位置的分布。
+
+单次提议极便宜，但吐出来的是*边缘分布*：第 3 个位置的分布，是在不知道你第 1、2 个位置真正选了什么的前提下算出来的。
+
+逐位置取 argmax，你会得到局部合理、整体串味的序列，验证阶段立刻惩罚你。
+
+于是出现了补丁：一个小小的**自回归纠正头**。沿着草稿往下走，每一步用已经确定的 token 重新条件化那个边缘分布。
+
+DFlash 这一类做的就是这件事，确实有效——但它只沿着*一条*链纠正。
+
+同时另一条线（Domino 及其亲戚）用扩散输出构造一棵宽的候选树，让一次验证同时持有多张彩票——但每个分支依然是用那套看不见路径的边缘分布打分的，纠正没有沿着分支带下去。
+
+所以缺口就是一个 2x2 表里空着的格子：既要因果纠正，又要分支宽度。
+
+这个格子一直空着不是因为想不到，而是因为延迟。构造好树的自然做法是最优优先扩展：从堆里弹出得分最高的节点，跑一次纠正头，把孩子压回堆，循环。
+
+这就把纠正头的调用串行化成了**每个节点一次**。60 个节点的树等于 60 次串行前向，投机预算全烧在出草稿上了。
+
+```
+[问题] 扩散草稿器给的是逐位置边缘分布
+    |    整块提议快 . 但对路径失明
+    v
+[前作 A] 链 + 自回归纠正 ... 有因果 . 宽度 = 1
+[前作 B] 扩散树 ............ 够宽 . 分支上没有纠正
+    |
+    | 朴素做法 = 最优优先扩展
+    | 代价 = 每个节点一次头调用 -> 草稿延迟爆炸
+    v
+[假设] 在链上训出来的纠正头
+       给链外的兄弟分支打分 . 排序依然可用
+    |
+    v
+[方法] 同一深度的所有节点 . 一个 batch 内扩展并打分
+       每层固定宽度 . 最优优先剪枝挪到最后
+    |
+    v
+[证据] 7 个数学 / 代码 / 对话基准 * 4 组模型-温度配置
+       单轮最高接受 12.97 个 token
+       比 DFlash 多 98.6% . 比 Domino 多 27.9% . 对本地 AR 加速 9.73x
+    |
+    v
+[结论] 只要把打分和选择解耦
+       宽度和因果纠正就能免费叠加
+```
+
+## 增量
+
+**一句话**：以前你只能在"纠正过的一条链"和"没纠正的一棵树"之间二选一；现在你能要一棵纠正过的树，而且草稿器的开销从随树的**规模*增长变成随树的*深度*增长，还不用重训。
+
+### 核心机制
+
+先让扩散草稿器跑一次前向，拿到下一块的 L 个逐位置分布。
+
+关键在于：把它们当原材料，不当草稿。
+
+然后把那个现成的自回归纠正头——原本训练用来在链上修边缘分布的那个——拿来当**路径打分器**用。
+
+真正的构造是逐层进行的。在深度 `d`，你手里恰好有 `W` 个存活节点（固定宽度，本质就是 beam search）。
+
+你对这 `W` 条路径发起**一次批量调用**，纠正头返回 `W` 个条件分布，每个都正确地条件化在自己那条分支的 token 上。
+
+每个节点按 top-`k` 展开，得到 `W*k` 个候选，用累积路径概率打分，留下前 `W` 个，进入深度 `d+1`。
+
+`D` 层跑完，你总共只发起了 `D` 次头调用——不是每节点一次——手里握着 `D*W` 个已打分节点。
+
+树的形状是到这一步才定的。最优优先剪枝在**缓存好的分数**上跑，挑出真正进入验证树的节点，构造稀疏注意力掩码，让目标模型一次前向检查所有分支。
+
+堆操作依然是串行的，但它一个神经网络都不碰。
+
+整个诀窍就这一句：**模型调用是批量的、广度优先的；选择是串行的、最优优先的；两者永不交错。**
+
+```
+prefix
+  |
+  v
++--------------------------+
+| 扩散草稿器               |   一次前向
++--------------------------+
+   p1   p2   p3  ...  pL        边缘分布 . 无路径记忆
+         |
+         v
+  深度 d : [n1] [n2] ... [nW]      W 条存活路径
+         |
+         |  对全部 W 条路径 . 一次批量头调用
+         v
+  纠正后的 q( . | path_i )   i = 1..W
+         |
+         v
+  各自展开 top-k -> W*k 候选
+  按路径概率打分
+  保留前 W        -> 深度 d+1
+         |
+      (重复 D 次 : 头调用 = D . 与节点数无关)
+         v
+  D*W 个已打分节点  [分数全部缓存]
+         |
+         v
+  在缓存分数上最优优先剪枝   <-- 零次模型调用
+         |
+         v
+  验证树 + 稀疏注意力掩码
+         |
+         v
+  目标模型 : 一次前向 -> 接受最长匹配前缀
+```
+
+**核喻**：你是旅行社的行程规划师，客户挑剔，要排一个 10 天的行程。
+
+扩散草稿器是一本通用旅游手册："第 7 天最值得做的 5 件事"。
+
+这份清单是独立印出来的，它不知道你第 7 天已经换了城市。原材料有用，直接当行程用则完全不行。
+
+自回归纠正头是一个你可以打电话的当地地陪。你告诉他你现在在哪、已经玩过什么，他就能正确地给你重排下一天的选项。
+
+旧的链式方法：每天给他打一个电话，只维护一份行程——纠正是对的，但你永远只产出一个方案。
+
+旧的树方法：干脆不打电话，直接把一堆从手册推出来的方案扇形摊给客户——选项很多，但每个都有点不对。
+
+DARTree 的做法是**同时养着八份候选行程**，每天早上开**一次*电话会议，让地陪同时把八份行程的第 `d+1` 天全部重排一遍。
+
+这就是批量化：一天一个电话，不是一份行程一个电话。每天早上留下最好的八份，其余淘汰。
+
+只有到最后，所有方案和分数都摊在桌上了，你才决定**实际去订哪些行程段**——这就是最优优先剪枝，纯案头工作，地陪早就挂电话了。
+
+最后客户审一遍订单，签下连续的若干天——这就是验证和被接受的前缀。
+
+朴素的替代方案是"打电话、等、决定、再打电话"，这正是最优优先扩展没法用的原因。先大面积拍，再回来挑片。
+
+### 关键概念
+
+- **边缘分布 vs 条件分布**：假设真实的续写只有两种可能，"天气真好"和"暴雨要来"，各 50%。
+
+  一个并行预测器被问"第 1 个字是什么"，答天/暴；"第 2 个"，答气/雨；"第 3 个"，答真/要。
+
+  每个答案单独看都没错，这就是边缘分布。但逐位置取最优，你很容易拼出"天雨真来"这种真实联合分布下概率为零的东西。
+
+  边缘分布告诉你*某个位置上*什么概率高，它对"什么和什么能搭在一起"一无所知。
+
+  纠正头的全部工作，就是把"第 3 个位置上什么概率高"变成"*在你已经确定了『天气』的前提下*，第 3 个位置上什么概率高"。
+
+- **接受长度，以及树为什么打得过链**：投机解码的成本单位是大模型的一次验证前向。你喂它什么，代价大体一样。
+
+  所以真正重要的指标是每次验证的期望接受 token 数——论文里那个 12.97。
+
+  一条链是一张彩票：第 3 个位置错一个，你就只接受 2 个。
+
+  树是对冲：分支 A 在第 3 位死了，分支 B 可能活到第 8 位，而稀疏注意力掩码让你在同一次前向里检查两条。
+
+  但有个谁都不该忘的前提：树变大，那"同一次前向"是实打实变贵的，所以单看每轮 token 数是可以刷的。诚实的指标是墙钟时间。
+
+- **把打分和搜索顺序解耦**：这才是可迁移的那个点子。
+
+  最优优先搜索想按分数顺序扩展节点，这就迫使你一次只评估一个。
+
+  层同步搜索一次评估整个前沿，这正是 GPU 想要的，但代价是宽度被固定住。
+
+  DARTree 的动作是：用层同步*评估*把分数缓存填满，再在缓存上跑最优优先*选择*。
+
+  你失去的是"某个意外好的分支能把额外评估预算吸引过去"这个能力；换来的是一个数量级的吞吐，而经验上这笔交易划算。
+
+## 框架转变
+
+```
+之前（主流方法）：                     之后（本文方法）：
+
+链 + 纠正                                     [r]
+    [r]                                    /   |   \
+     |    q( . | r )                    [a]   [b]   [c]    <-- 每层留 W 个
+    [a]                                  :     :     :
+     |    q( . | ra )                  每 LAYER 一次批量头调用
+    [b]                                分数全部缓存
+     |    q( . | rab )                       |
+    [c]                                      |  跑完 D 层
+ 有因果 . 宽度 = 1                            v
+                                       D*W 个已打分节点池
+无纠正的树                                    |
+    [r]                                      v
+  /  |  \                              最优优先剪枝
+[a] [b] [c]      <- 全来自 p2           （零模型调用）
+ |    |    |                                 |
+... ... ...      <- 全来自 p3                 v
+ 够宽 . 只有边缘分布                    验证树
+
+最优优先则头调用 = O(节点数)           头调用 = O(深度)
+链式头调用 = O(深度) 但宽度 1           宽度 = W . 因果 = 有
+```
+
+**从"因果和宽度二选一"到"按层求宽、按批求因果"，核心转变是树搜索不再为每个节点付一次模型调用，而是每层付一次。**
+
+## 专家评审
+
+*先摆明前提：我读的是摘要和它承诺的框架，没有读完整的表格和消融。下面对数字的质疑，请当成我作为审稿人会去核的问题，而不是已经确认的缺陷。*
+
+**选题眼光**：真缺口，识别得也诚实，但属于"因为还没人写所以空着"的那类缺口——两条活跃研究线的笛卡尔积。
+
+这不是在贬低它的价值：投机解码正是那种"2x2 表里补上一格能值 2 倍吞吐"的领域，而这个领域的轨迹恰恰就是让草稿器在保持便宜的同时结构变丰富。
+
+真正把它从纯粹的组合里抬起来的是：朴素组合确实跑不通（串行头调用吃光预算），所以存在一个被真实移除的障碍，而不是两个想法被订书机钉在一起。
+
+**方法成熟度**：巧劲，但是工程上的巧劲，不是概念突破。
+
+剥掉包装，候选构造就是带学习打分器的 beam search，剪枝阶段就是 EAGLE-2 的堆从前向之前挪到了前向之后。
+
+这个挪动是好动作——为了迁就硬件而重排两个阶段，这类洞见通常被低估——但它是穿着算法外衣的系统洞见。
+
+两件我会追问的事：一，更简单的基线呢？纯固定宽度 beam 的输出、**不做**最后那步最优优先剪枝，损失多少？如果剪枝只贡献一两个 token，本文的第二个贡献就很薄。
+
+二，训练无关这个卖点是承重墙也是风险点。一个在同策略的链上训出来的头，现在被要求给它训练时从没见过的异策略兄弟分支打分。
+
+这种退化应该在低概率分支上最严重——而那恰恰是最优优先剪枝正在纠结的那些分支。
+
+方法大概能work是因为排序比校准容易，但我想看一张校准曲线。
+
+**实验诚意**：7 个基准、4 组模型-温度配置、全胜。这要么说明方法确实强，要么说明对比集挑得好。
+
+考虑到 DARTree 在结构上支配两个基线（它*就是* Domino 加纠正、DFlash 加宽度），全胜是合理的而非可疑的。
+
+两个要核的红旗。第一，"对本地测得的自回归解码加速 9.73x"——这个分母干了很多活。
+
+本地 batch-1 的 HuggingFace 生成是个软目标；换成开了 CUDA graph 的正经优化基线，同样的方法可能只剩 4-5x。
+
+第二个更重要：如果 DARTree 的验证树比基线更大，接受长度和加速比是可以背向而行的。
+
+这个对比只有在验证树规模对齐、或每轮墙钟时间对齐时才有意义。如果论文把接受长度放在正文最显眼处、树规模塞进附录，那就是个信号。
+
+**写作功力**：摘要是写给已经懂 EAGLE-2 的人的。
+
+"decoupling AR-head inference from sequential heap operations"——论文真正的贡献被压缩进九个词，对圈外人毫无意义，对圈内人一目了然。效率很高，但成本是读者。
+
+我会重写的是延迟核算那部分：一张图，把三个方法的头调用次数、树规模、每轮墙钟时间并排放出来，就能把核心主张从"请相信这个总加速比"变成"时间具体花在了哪里"。
+
+这个领域的论文，生死系于这张图。
+
+**判决**：**弱接收** —— 动机充分、工程正确地填上了一个真缺口，但新颖性是阶段重排而非新想法，且头条数字依赖于我想审计一遍的基线选择。
+
+## 要点总结
+
+- **那个"重排"模式才是真正值钱的东西。** 只要一个搜索过程想按分数顺序扩展节点、而每次扩展都要跑一次神经网络前向，就该问：我能不能先层同步地评估、把分数灌进缓存，然后在缓存上跑按优先级排序的逻辑？这直接迁移到带学习评估器的 MCTS、检索重排级联、带打分模型的约束解码，以及任何 beam 与最优优先的张力场景。要内化的设计问题是：**我的算法哪些阶段需要 GPU，能不能重排顺序让所有 GPU 阶段挤在一起批处理？*
+
+- **把链上训的模块拿到分支结构上复用，往往是免费的。** 这里谁也没重训。在你为新拓扑定制一个新头之前，先测测现成的那个能不能泛化——只用来排序的场景，对分布偏移的容忍度远高于需要准确概率的场景。但要在异策略输入上测校准；如果你要的是真概率而不是一个顺序，这个捷径就断了。
+
+- **边缘/联合的落差是一个可复用的诊断。** 任何时候你靠并行预测多个位置换来了速度——非自回归翻译、扩散生成、并行结构化预测——你买到的是边缘分布，而你在假装它是联合分布。廉价的补丁是在上面栓一个小的因果纠正器，而不是重新设计那个快模型。在你下结论说"这个并行模型就是不行"之前，值得先伸手去拿这个补丁。
+
+- **读投机解码的论文，先看分母和树规模。** 每轮 token 数是个可调的数字：把验证树做大，它就往上走，而墙钟时间往下走。任何没有说明基线实现、没有对齐验证开销的加速数字，都应该当成上界来读。
+:::
