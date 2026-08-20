@@ -1,0 +1,447 @@
+---
+title:
+  en: "Chain-of-Experience: The Notebook Stays Open"
+  zh: "经验链：让笔记本一直摊开着"
+description:
+  en: "A large empirical study of LLMs improving within a single task by re-reading their own attempts plus feedback. The gains are real and the cost accounting is refreshingly honest — but 'best over 20 iterations' with an oracle verifier is doing more work than the framing admits."
+  zh: "一项系统的实证研究：让 LLM 在同一道题上反复重看自己的历次尝试与反馈。增益是真的，成本核算也难得诚实——但「20 轮里取最好」外加一个真值验证器，承担的分量比论文表述透露的更多。"
+date: 2026-08-20
+tags: ["arxiv", "ai", "cs.cl"]
+image: "/arxiv-visuals/arxiv-chain-of-experience-for-continual-llm.png"
+---
+
+:::en
+**Paper**: [2608.18027](https://arxiv.org/abs/2608.18027)
+**Authors**: Haoqin Tu, Yunhao Fang, Yizhong Wang, Cihang Xie, Shen Yan
+**Categories**: cs.CL
+
+## The Gap
+
+Test-time scaling has split into three camps, and none of them keeps the thing this paper cares about.
+
+The first is **parallel search**: Tree-of-Thoughts, majority voting, best-of-n with a process or outcome verifier. Sample many candidates, pick the good one. The generation traces are rich — dozens of attempts, each with a verifier's opinion attached — and then they get collapsed into a single answer and deleted. The next problem starts from a blank slate.
+
+The second is **self-refinement**: Self-Refine, Reflexion, Self-Debug. These do loop, and they do keep the trail inside one context. But the literature around them is narrow in a specific way: usually one feedback source, a handful of iterations, models from two generations ago, and no cost accounting. Nobody had asked what happens when you run the loop twenty times, on GPT-5 and Claude 4.5 Sonnet, with the feedback channel as a controlled variable.
+
+The third is **cross-task memory**: Dynamic CheatSheet, Agentic Context Engineering, ReasoningBank. Solve a problem, distill the strategy into a persistent note, carry the note to the next problem. This preserves experience — but only in compressed form, and only *between* problems. Inside the current problem you are still a one-shot solver.
+
+The gap sits at the intersection: same-task, uncompressed, feedback-varied, at scale, with the bill attached. That is what CoE measures.
+
+```
+[PROBLEM] every inference is an isolated event; the model
+          restarts each problem with zero accumulated insight
+     |
+     +-----------------+------------------+
+     v                 v                  v
+[parallel search] [self-refinement]  [cross-task memory]
+ trail collapsed   loops, but tested   carries a *summary*
+ to one answer,    with 1-2 feedback   between problems;
+ then discarded    types, few rounds,  inside a problem you
+                   old models, no      are still one-shot
+                   cost accounting
+     |                 |                  |
+     +-----------------+------------------+
+                       v
+[ASSUMPTION] the unit of experience is the *entire* solving
+             history -- every attempt AND every environment
+             response -- and feedback richness is the knob
+                       |
+                       v
+[METHOD] CoE: a_t ~ P(a_t | Q, (a_0,f_0), ..., (a_(t-1),f_(t-1)))
+         feedback spectrum: none / model / executor / correctness
+         8 LLMs x 6 benchmarks x 20 iterations, tokens and
+         dollars logged alongside accuracy
+                       |
+                       v
+[EVIDENCE] averaged over 6 benchmarks: ICL 62.1, DC 62.7,
+           ACE 64.0, no-feedback CoE 66.8, self feedback 71.0,
+           best feedback 79.3.  +5.6% at 19% lower API cost.
+           Gains saturate early: 16.7% in rounds 1-20 vs 2.2%
+           in rounds 21-50 on AIME 2025.
+                       |
+                       v
+[CONCLUSION] same-task uncompressed experience beats cross-task
+             memory distillation, and compressing the trail
+             (DC, SimpleMem) actively hurts
+```
+
+## The Increment
+
+**One sentence**: Before, "test-time learning" meant either sampling in parallel and throwing the attempts away, or distilling them into a cheat sheet for *other* problems; after, it means keeping the raw attempt-and-feedback trail open inside the current problem, and the paper puts a number on what each kind of feedback is worth and what it costs.
+
+### Core Mechanism
+
+The formalism is deliberately thin. Standard QA samples `A ~ P(A | Q)`. CoE introduces a feedback variable drawn from the environment, `f ~ P'(F | Q, A)`, and turns the single turn into a sequential decision process where the `t`-th action conditions on everything that came before:
+
+`a_t ~ P(a_t | Q, (a_0,f_0), (a_1,f_1), ..., (a_(t-1),f_(t-1)))`
+
+That's it. There is no training, no parameter update, no retrieval index. The "learning" lives entirely in a context window that grows by one attempt-plus-verdict per round. The paper's contribution is not this equation — it's what happens when you sweep the environment `P'` across four settings and run the loop long enough to see it saturate.
+
+The four feedback types form a richness spectrum. **None** sets `f_i` empty: the model re-reads its own previous attempts and nothing else, so any improvement is pure self-reflection. **Model feedback** runs an auxiliary LLM as critic, producing prose critiques — usually the same model judging itself. **Execution feedback** runs the candidate in an interpreter and returns stack traces, error messages, and public test-case outcomes; a stripped **binary executor** variant returns only pass/fail, which turns out to matter a lot. **Correctness feedback** is an oracle bit, `f_i = 1[a_i is correct]`, which the paper is upfront about being unrealistic and includes as an upper bound.
+
+The critical design choice — and the one that produces the paper's most interesting negative result — is that nothing is ever summarized. The context at round 19 contains all nineteen prior attempts verbatim, alongside all nineteen verdicts. When the authors bolt Dynamic CheatSheet or SimpleMem onto the loop to compress that trail *within* the same task, performance drops: on AIME 2025, plain self-feedback gets 60.0% while +DC gets 50.0% and +SimpleMem 56.7%. Compression is not free storage optimization; it deletes the intermediate reasoning that the next attempt needed.
+
+```
+  one problem Q, iterations t = 0 .. 19
+
+  +----------------------------------------------------------+
+  |  CONTEXT at iteration t                                   |
+  |    Q                                     the question     |
+  |    (a_0, f_0)                            attempt+verdict  |
+  |    (a_1, f_1)                                             |
+  |     ...                                  full trail,      |
+  |    (a_(t-1), f_(t-1))                    uncompressed     |
+  +----------------------------------------------------------+
+              |
+              v
+        [ model M ]  ==>  a_t
+              |
+              v
+        [  env  E  ]  ==>  f_t         the pair (a_t, f_t) is
+              |                        appended, never summarized
+              +---------------------------> back to CONTEXT
+
+  the environment E, four instantiations, by richness:
+
+    none         f = (empty)          re-read your own attempts
+    model        f = M_fb(Q, a)       a critic LLM writes prose
+    executor     f = run(Q, a)        traces + public test pass
+                 (binary variant:     rate  ... or just one bit
+                  pass/fail only)
+    correctness  f = 1[a is correct]  oracle; upper bound only
+
+  richness matters: on LiveBench (Code), full executor 78.1%
+  vs binary executor 71.9% -- same signal source, 6 points
+  of difference purely from how much of it you pass through
+```
+
+**The metaphor: a lab notebook and four kinds of supervisor.** You are a grad student given one experiment to get right. Each attempt is a page in your notebook. The supervisor sits across the bench and says something after each run. The notebook stays open — you can see every previous page whenever you write a new one.
+
+The four supervisors are the four feedback types. The **empty chair** says nothing; you improve only by re-reading your own pages and noticing you contradicted yourself on page three. The **colleague** reads your writeup and tells you in words what looks wrong — sometimes insightful, sometimes confidently mistaken, but always phrased in the same language you think in. The **instrument** doesn't talk; it either produces a reading or throws an error, and the error message is often more useful than any colleague's opinion. The **professor who already knows the answer** just says "no" — maximum reliability, zero diagnostic content, and the reason the paper flags it as unrealistic.
+
+Now the results become intuitive. The colleague beats the empty chair because language-level critique is contextually aligned with how you reason (the paper measures this: model-generated feedback drives a higher proportion of feedback-attributable fixes, 58.7% vs 41.1%). The instrument beats the colleague on code because reality doesn't hallucinate. The professor's single bit wins on accuracy but tells you nothing about *why* — which is exactly why combining professor and colleague works better than either alone (dual feedback hits 76.7% on AIME against 70.0% correctness-only and 60.0% model-only).
+
+And the memory ablation: Dynamic CheatSheet is ripping the pages out and keeping an index card. You save shelf space and lose the failed derivation you were about to need.
+
+One more thing the metaphor gets right. The paper grades by *best page in the notebook*, not last page. Hold that thought.
+
+### Key Concepts
+
+- **Same-task vs cross-task experience**: These sound like variants of one idea and behave completely differently. Cross-task experience is what a textbook gives you — general strategy abstracted away from any particular problem. Same-task experience is what your last three wrong answers to *this* problem give you: not a strategy, a map of the specific holes you keep falling into. The paper's cleanest empirical result is that on modern reasoning models the textbook is nearly worthless — ICL at 62.1%, DC at 62.7%, ACE at 64.0%, all *below* a plain no-feedback CoE loop at 66.8% — while the hole-map is worth 4-13 points. The plausible reason: strong reasoning models already know the general strategies. What they lack is knowledge of their own specific failures a minute ago.
+
+- **Feedback richness vs feedback reliability**: Two independent axes that people routinely conflate. A stack trace is rich (tells you where and why) and reliable (reality generated it). An oracle bit is maximally reliable and minimally rich. An LLM critic is rich and unreliable. The paper separates these cleanly with the binary-executor arm — same reliable source, richness thrown away, 6 points lost on LiveBench (Code) — and with the cross-model feedback study, where GPT-5 mini as a judge for GPT-5 works on AIME 2025 (94.4% via model feedback vs 93.0% via correctness) but fails on the harder OmniMath (74.5% vs 82.8%), because the judge's own base ability on the task is the ceiling on how reliable its feedback can be. Practical rule that falls out: model-as-judge is deployable only when the judge is strong on the specific task, not strong in general.
+
+- **Improving capability, and the ceiling problem it tries to dodge**: The paper defines a model's improving capability as `(S_max - S_base) / (1 - S_base)` — gain achieved, divided by gain available. The normalization exists because a model at 90% can only gain 10 points while a model at 50% has 50 available, so raw gain would trivially favor weak models. With that correction the finding is that *stronger* models still improve more, average Pearson `r = 0.50` across six benchmarks. Worth knowing what that average hides: `r = 0.97` and `0.83` on the two coding tasks, but `0.33` and `0.24` on AIME and OmniMath, over seven or eight model points each. The coding correlations are real; the math ones are noise-compatible.
+
+## Framework Shift
+
+```
+Before (mainstream test-time scaling):   After (CoE):
+
+  Q --> [ a1 a2 a3 ... ak ] parallel       Q --> a0 --> f0
+              |                                   |
+        verifier / vote                           v
+              |                            Q,(a0,f0) --> a1 --> f1
+              v                                   |
+         one answer                               v
+              |                            Q,(a0,f0),(a1,f1) --> a2
+              v                                   |
+     the whole trail is                          ...
+     thrown away
+                                           the trail *is* the state
+  or, cross-task memory:                   no summarize step,
+     solve P1 --> summarize --> card       nothing thrown out
+     solve P2 --> summarize --> card
+              |                            improvement source:
+     P3 reads only the cards,              your own last k errors
+     never the raw attempts                on *this* problem
+
+  improvement source:                      cost is measured, not
+  other problems' strategies               assumed: dollars and
+                                           tokens reported per arm
+```
+
+From experience-as-strategy to experience-as-error-log, the core shift is that for a strong reasoning model the useful thing to remember is not what generally works, but what specifically just failed.
+
+## Expert Assessment
+
+**Problem choice**: Real, and well-timed. The "era of experience" framing is fashionable, which usually predicts a wave of thin papers, and this one avoids that by being a measurement paper rather than a method paper. The finding that DC/ACE/ICL all underperform a plain iteration loop on GPT-5-class models is genuinely useful negative evidence — a lot of infrastructure is currently being built on the assumption that cross-task memory is the win, and this suggests the returns evaporate as base models get stronger. The counterweight: CoE is not a new mechanism. Reflexion, Self-Refine and Self-Debug are all special cases, and the paper says so. Naming the union "Chain-of-Experience" and adding it to the Chain-of-X pile is branding, not contribution. The contribution is the matrix.
+
+**Method maturity**: The design is appropriately boring — no training, no scaffolding, a formalism you could write on a napkin — and that is the right choice for a study whose job is to isolate feedback type as a variable. The binary-vs-full executor arm is the sharpest piece of experimental design in the paper, because it varies richness while holding reliability fixed. The cross-model feedback study is the second best. What I miss is a stopping rule. Every arm runs a fixed 20 iterations, which means CoE as described is not a deployable procedure — a real system needs to know when to stop, and the paper's own finding that gains saturate around round 20 makes an adaptive rule both necessary and easy to design. It was left on the table.
+
+**Experimental integrity**: The reporting is above average — three runs with standard deviations, dollars and tokens per arm, a negative result on BrowseComp-Plus where self-feedback actively hurts because the task needs external knowledge, and a human-validated attribution study (6,630 flips, Cohen's kappa 0.768) that most papers would not have bothered with. Two real problems, though. First, accuracy is reported as **best over 20 iterations** — the max along the trajectory. Combined with correctness feedback, which is an oracle bit, this is uncomfortably close to a definition of pass@20: keep guessing, the oracle tells you when to stop, report the hit. The paper is transparent that correctness feedback is an upper bound, but the abstract's headline gains are not always cleanly separated by arm, and the honest self-feedback numbers (the deployable ones) are the smaller ones. Second, the "higher accuracy per token" claim does not survive contact with the paper's own Table 5: on AIME 2025, correctness feedback gets 84.6% for 108.7K tokens while Dynamic CheatSheet gets 74.7% for 11.2K — ten points for ten times the tokens. Per token, DC wins decisively. The appendix states the defensible version ("comparable token counts to other **multi-round** methods"); the abstract states the indefensible one. The cost story that *does* hold up is the interesting one and it's separate: feedback makes models less verbose, which is why self-feedback can beat no-feedback CoE on both accuracy and dollars simultaneously.
+
+**Writing quality**: Serviceable, occasionally rushed — typos in the prose, figure axes that survived the PDF extraction badly, and a section 5 that crams four distinct ablations into two pages. The section I would rewrite is the efficiency claim, because it is the one place where the framing outruns the data and it would cost nothing to fix: separate accuracy-per-token from accuracy-per-dollar, report both against single-round baselines as well as multi-round ones, and let the verbosity finding stand on its own. It's a better result than the one being claimed.
+
+**Verdict**: weak accept — a careful, well-instrumented study with several transferable negative results, held back by a headline metric (best-over-20 with an oracle verifier) and an efficiency claim that both flatter the method more than the underlying data does.
+
+## Takeaways
+
+- **Do not compress a within-task trail.** This is the most immediately actionable finding. If your agent is retrying the same task, resist the urge to summarize prior attempts to save context — DC and SimpleMem both *lost* points against passing the raw trail. Summarization is a lossy operation and the thing it deletes first is intermediate reasoning, which is exactly what the retry needs. Compress across tasks if you must; never within one.
+- **Separate feedback richness from feedback reliability when you design a signal.** The binary-vs-full executor gap (71.9% vs 78.1% on LiveBench Code) says you can leave six points on the floor purely by truncating a signal you already computed. If you're piping CI output into an agent loop, pipe the stack trace, not the exit code.
+- **Model-as-judge has a competence threshold, not a quality dial.** GPT-5 mini judging GPT-5 helps on AIME and hurts on OmniMath. The predictor is the judge's own base accuracy *on that task*. Before deploying a critic model, benchmark it as a solver on the same distribution — if it can't solve, it probably can't judge.
+- **Combine one rich channel with one reliable channel.** Dual feedback (critic prose + oracle bit) beat both singles where the task had headroom, and stopped helping on the task where the reliable channel was already dominant. The design rule: add a second channel only if it supplies the axis the first one lacks.
+- **Budget short loops.** Most of the gain lands in the first handful of iterations and 21-50 buys almost nothing (2.2% on AIME, 3.5% on OmniMath). If you're building this, spend the engineering on a stopping rule rather than on a longer loop.
+- **A caveat to steal along with the ideas**: when you evaluate your own iterative agent, report last-iteration accuracy, not best-iteration. Best-over-k with a verifier in the loop measures your verifier, not your agent.
+:::
+
+:::zh
+**论文**: [2608.18027](https://arxiv.org/abs/2608.18027)
+**作者**: Haoqin Tu, Yunhao Fang, Yizhong Wang, Cihang Xie, Shen Yan
+**分类**: cs.CL
+
+## 缺口
+
+测试时扩展已经分成三派，而这三派恰好都没保住这篇论文关心的那样东西。
+
+第一派是**并行搜索**：Tree-of-Thoughts、多数投票、配上过程或结果验证器的 best-of-n。
+采样一大堆候选，挑出好的那个。
+这个过程里生成的轨迹其实很丰富——几十次尝试，每次都附着验证器的判断——然后它们被压成一个答案，随即删除。
+下一道题从一张白纸重新开始。
+
+第二派是**自我精修**：Self-Refine、Reflexion、Self-Debug。
+它们确实在循环，也确实把轨迹留在同一个上下文里。
+但围绕它们的文献窄得有点具体：通常只有一种反馈来源、三五轮迭代、两代之前的模型，而且没人算账。
+没有人问过：如果把这个循环跑二十轮，跑在 GPT-5 和 Claude 4.5 Sonnet 上，并且把反馈通道当成受控变量，会发生什么。
+
+第三派是**跨任务记忆**：Dynamic CheatSheet、Agentic Context Engineering、ReasoningBank。
+解完一题，把策略蒸馏成一条持久笔记，带到下一题去。
+经验被保住了——但只以压缩形态保住，而且只在题**之间**流动。
+在当前这道题内部，你依然是个一次性求解器。
+
+缺口就落在三者的交叉处：同任务、不压缩、反馈类型可变、规模够大、并且账单摊开。
+这就是 CoE 要测量的东西。
+
+```
+[问题] 每次推理都是孤立事件；模型面对每道题
+       都从零经验重新开始
+     |
+     +-----------------+------------------+
+     v                 v                  v
+ [并行搜索]        [自我精修]         [跨任务记忆]
+  轨迹被压成       会循环, 但只测了     在题之间搬运
+  一个答案后       1-2 种反馈, 轮数少,  一份*摘要*;
+  丢弃            模型老旧, 不算成本    题内部仍是一次性
+     |                 |                  |
+     +-----------------+------------------+
+                       v
+[假设] 经验的单位是*整条*求解历史——每一次尝试
+       以及环境的每一次回应——反馈的丰富度是旋钮
+                       |
+                       v
+[方法] CoE: a_t ~ P(a_t | Q, (a_0,f_0), ..., (a_(t-1),f_(t-1)))
+       反馈谱: 无 / 模型 / 执行器 / 正确性
+       8 个 LLM x 6 个基准 x 20 轮, 准确率之外
+       同时记录 token 与美元
+                       |
+                       v
+[证据] 六基准平均: ICL 62.1, DC 62.7, ACE 64.0,
+       无反馈 CoE 66.8, 自反馈 71.0, 最佳反馈 79.3.
+       +5.6% 的同时 API 成本降 19%.
+       增益早早饱和: AIME 2025 上 1-20 轮拿走 16.7%,
+       21-50 轮只再拿 2.2%.
+                       |
+                       v
+[结论] 同任务的未压缩经验胜过跨任务的记忆蒸馏,
+       而压缩这条轨迹 (DC, SimpleMem) 反而掉点
+```
+
+## 增量
+
+**一句话**：以前所谓"测试时学习"，要么是并行采样完把尝试丢掉，要么是把它们蒸馏成给**别的题**用的小抄；这篇之后，它意味着把"尝试 + 反馈"的原始轨迹在当前这道题里一直摊开着，而且论文给出了每一类反馈值多少分、花多少钱。
+
+### 核心机制
+
+形式化部分刻意做得很薄。
+标准问答是 `A ~ P(A | Q)`。
+CoE 引入一个来自环境的反馈变量 `f ~ P'(F | Q, A)`，把单轮变成序贯决策：第 `t` 次动作以此前的一切为条件。
+
+`a_t ~ P(a_t | Q, (a_0,f_0), (a_1,f_1), ..., (a_(t-1),f_(t-1)))`
+
+就这些。
+没有训练，没有参数更新，没有检索索引。
+所谓"学习"完全活在一个每轮增长一条"尝试 + 判词"的上下文窗口里。
+论文的贡献不是这个公式——而是当你把环境 `P'` 在四种设定间扫一遍、并且把循环跑到看得见饱和为止时，会看到什么。
+
+四种反馈构成一条丰富度光谱。
+**无反馈**把 `f_i` 置空：模型只能重读自己此前的尝试，任何改进都是纯粹的自我反思。
+**模型反馈**用一个辅助 LLM 当评审，产出文字批评——通常就是同一个模型自己评自己。
+**执行反馈**把候选放进解释器跑，返回堆栈、报错和公开测试用例结果；另有一个精简的**二值执行器**变体只返回通过/不通过，而这个差别相当要命。
+**正确性反馈**是一个真值比特 `f_i = 1[a_i 正确]`，论文自己就明说它不现实，只作为上界参照。
+
+最关键的设计选择——也是产出了论文最有意思的负面结果的那个——是**任何东西都不做摘要**。
+第 19 轮的上下文里逐字躺着此前十九次尝试，以及十九条判词。
+当作者把 Dynamic CheatSheet 或 SimpleMem 接进循环、在**同一任务内**压缩这条轨迹时，性能是下降的：AIME 2025 上纯自反馈拿 60.0%，+DC 掉到 50.0%，+SimpleMem 56.7%。
+压缩不是免费的存储优化；它删掉的正是下一次尝试需要的中间推理。
+
+```
+  一道题 Q, 迭代 t = 0 .. 19
+
+  +----------------------------------------------------------+
+  |  第 t 轮的 CONTEXT                                        |
+  |    Q                                     题目             |
+  |    (a_0, f_0)                            尝试 + 判词      |
+  |    (a_1, f_1)                                             |
+  |     ...                                  完整轨迹,        |
+  |    (a_(t-1), f_(t-1))                    不压缩           |
+  +----------------------------------------------------------+
+              |
+              v
+        [ 模型 M ]  ==>  a_t
+              |
+              v
+        [ 环境 E ]  ==>  f_t          (a_t, f_t) 被追加,
+              |                        从不被摘要
+              +---------------------------> 回到 CONTEXT
+
+  环境 E 的四种实例, 按丰富度排列:
+
+    无          f = (空)             只能重读自己的尝试
+    模型        f = M_fb(Q, a)       评审 LLM 写一段文字
+    执行器      f = run(Q, a)        堆栈 + 公开测试通过率
+                (二值变体: 只给      ...... 或者只给一个比特
+                 通过/不通过)
+    正确性      f = 1[a 正确]        真值比特; 仅作上界
+
+  丰富度是要紧的: LiveBench (Code) 上完整执行器 78.1%
+  对二值执行器 71.9% -- 同一个信号源, 6 分的差距纯粹
+  来自你把它透传了多少
+```
+
+**核喻：一本实验记录本，外加四种导师。**
+你是个研究生，手上只有一个实验要做对。
+每次尝试是本子上的一页。
+导师坐在对面工作台，每跑完一次就说点什么。
+本子一直摊开——你写新一页时，前面每一页都看得见。
+
+四种导师就是四种反馈。
+**空椅子**什么也不说；你只能靠重读自己的页面，忽然发现第三页跟第七页自相矛盾。
+**同事**读你的记录，用话告诉你哪里不对——有时一针见血，有时自信地说错，但总归是用你思考所用的同一种语言说的。
+**仪器**不说话；它要么给出读数，要么抛出错误，而那条错误信息往往比任何同事的意见都有用。
+**已经知道答案的教授**只说"不对"——可靠性拉满，诊断信息为零，这也正是论文把它标为不现实的原因。
+
+于是结果就变得可以直觉理解了。
+同事赢过空椅子，是因为语言层面的批评与你的推理方式在语境上对齐（论文测过：模型生成的反馈带来的"可归因于反馈"的修复比例更高，58.7% 对 41.1%）。
+仪器在代码任务上赢过同事，因为现实不会幻觉。
+教授那一个比特在准确率上赢，却完全不告诉你"为什么"——这恰恰解释了为什么教授加同事的组合比单用任何一个都好（双反馈在 AIME 上到 76.7%，对正确性单用 70.0%、模型单用 60.0%）。
+
+至于那个记忆消融：Dynamic CheatSheet 就是把页面撕下来、只留一张索引卡。
+你省了书架，丢了那条你马上要用到的失败推导。
+
+还有一点这个比喻也说对了。
+论文的打分方式是取**本子里最好的那一页**，而不是最后一页。
+记住这句。
+
+### 关键概念
+
+- **同任务经验 vs 跨任务经验**：听起来像一个想法的两个变体，实际行为完全不同。
+跨任务经验是教科书给你的东西——从具体题目里抽象出来的通用策略。
+同任务经验是你在**这道题**上最近三次错答给你的东西：不是策略，而是一张"你反复掉进去的坑"的地图。
+论文最干净的实证结论是：在现代推理模型上教科书几乎不值钱——ICL 62.1%、DC 62.7%、ACE 64.0%，全都**低于**一个朴素的无反馈 CoE 循环 66.8%——而坑地图值 4 到 13 分。
+合理的解释是：强推理模型早就知道那些通用策略了。
+它们缺的是关于自己一分钟前具体怎么翻车的知识。
+
+- **反馈丰富度 vs 反馈可靠度**：两条互相独立的轴，人们却习惯性地把它们混为一谈。
+堆栈信息既丰富（告诉你在哪、为什么）又可靠（是现实生成的）。
+真值比特可靠度拉满、丰富度为零。
+LLM 评审则是丰富但不可靠。
+论文用二值执行器那一组把这两轴干净地分开了——同一个可靠信号源，丢掉丰富度，LiveBench (Code) 上损失 6 分——再用跨模型反馈实验补了一刀：GPT-5 mini 给 GPT-5 当评审，在 AIME 2025 上成立（模型反馈 94.4% 对正确性反馈 93.0%），在更难的 OmniMath 上就崩了（74.5% 对 82.8%），因为评审自己在该任务上的基础能力就是它反馈可靠度的天花板。
+可以直接拿走的规则：model-as-judge 只有在评审对**这个具体任务**足够强时才可部署，"总体上很强"不算数。
+
+- **提升能力，以及它想绕开的天花板问题**：论文把一个模型的提升能力定义为 `(S_max - S_base) / (1 - S_base)`——已获得的增益除以可获得的增益。
+之所以要归一化，是因为一个 90% 的模型最多只能再涨 10 分，而 50% 的模型有 50 分空间，用原始增益会白送给弱模型。
+做了这个校正之后的发现是：**更强**的模型依然提升更多，六个基准上平均皮尔逊 `r = 0.50`。
+但值得知道这个平均掩盖了什么：两个代码任务上 `r = 0.97` 和 `0.83`，而 AIME 和 OmniMath 上只有 `0.33` 和 `0.24`，每条曲线还只有七八个模型点。
+代码上的相关是真的；数学上的与噪声并不矛盾。
+
+## 框架转变
+
+```
+之前（主流测试时扩展）：                  之后（CoE）：
+
+  Q --> [ a1 a2 a3 ... ak ] 并行           Q --> a0 --> f0
+              |                                   |
+        验证器 / 投票                              v
+              |                            Q,(a0,f0) --> a1 --> f1
+              v                                   |
+          一个答案                                 v
+              |                            Q,(a0,f0),(a1,f1) --> a2
+              v                                   |
+      整条轨迹被丢弃                              ...
+
+  或者, 跨任务记忆:                        轨迹本身*就是*状态
+     解 P1 --> 摘要 --> 卡片                没有摘要环节,
+     解 P2 --> 摘要 --> 卡片                什么都不丢
+              |
+     P3 只读卡片,                          改进来源:
+     读不到原始尝试                         你自己在*这道题*上
+                                           最近 k 次的错误
+  改进来源:
+  别的题里的策略                            成本是测出来的, 不是
+                                           假设的: 每组都报
+                                           美元与 token
+```
+
+从"经验即策略"到"经验即错误日志"，核心转变是：对一个强推理模型来说，值得记住的不是"一般什么管用"，而是"刚才具体是什么失败了"。
+
+## 专家评审
+
+**选题眼光**：真实，而且时机对。
+"经验时代"这个框架正当红，通常这预示着一波灌水，而这篇靠"做测量而非做方法"避开了。
+DC/ACE/ICL 在 GPT-5 一档的模型上全面跑输一个朴素迭代循环，这是相当有用的负面证据——现在有不少基础设施正建立在"跨任务记忆是胜负手"这个假设上，而这篇暗示：底座越强，这份收益越蒸发。
+反过来说：CoE 不是新机制。
+Reflexion、Self-Refine、Self-Debug 都是它的特例，论文自己也这么写。
+把这个并集命名为 Chain-of-Experience 再堆进 Chain-of-X 那一摞里，是包装，不是贡献。
+贡献是那张实验矩阵。
+
+**方法成熟度**：设计朴素得恰到好处——不训练、不搭脚手架、形式化一张餐巾纸写得下——对一篇任务是"把反馈类型隔离成单一变量"的研究来说，这是正确选择。
+二值 vs 完整执行器那一组是全文最锋利的实验设计，因为它在固定可靠度的前提下只动丰富度。
+跨模型反馈研究次之。
+我觉得缺的是**停止规则**。
+每一组都固定跑 20 轮，这意味着 CoE 作为描述而言并不是一个可部署的流程——真实系统得知道什么时候停，而论文自己"增益在 20 轮附近饱和"的发现既让自适应规则变得必要，也让它变得好设计。
+这件事被留在桌上了。
+
+**实验诚意**：报告质量高于平均——三次运行带标准差、每组都报美元与 token、BrowseComp-Plus 上"自反馈反而掉点（因为该任务需要外部知识）"这个负面结果照登、还有一份人工校验过的归因研究（6,630 个翻转样本，Cohen's kappa 0.768），多数论文根本懒得做。
+但有两个真问题。
+其一，准确率是按 **20 轮中的最好一轮**报的——沿轨迹取 max。
+一旦和正确性反馈（一个真值比特）组合，这就非常接近 pass@20 的定义：一直猜，验证器告诉你什么时候停，然后把命中报出来。
+论文对"正确性反馈只是上界"是坦白的，但摘要里的头条增益并没有按组干净拆分，而真正可部署的自反馈数字是更小的那些。
+其二，"更高的每 token 准确率"这个说法扛不住论文自己的表 5：AIME 2025 上正确性反馈用 108.7K token 拿 84.6%，而 Dynamic CheatSheet 用 11.2K token 拿 74.7%——十倍 token 换十分。
+按每 token 算，DC 赢得很干脆。
+附录里写的是能站住的版本（"与其他**多轮**方法 token 量相当"），摘要里写的是站不住的那个。
+真正立得住的成本结论反而是另一个、也更有意思：反馈让模型话变少，所以自反馈能同时在准确率和美元上打赢无反馈 CoE。
+
+**写作功力**：够用，偶尔仓促——正文有错字，图的坐标轴在 PDF 里几乎散架，第 5 节把四个各自独立的消融塞进两页。
+我会重写的是效率那一段，因为那是全文唯一一处表述跑在数据前面的地方，而且修起来不花钱：把"每 token 准确率"和"每美元准确率"分开报，除了多轮方法之外也对单轮基线报一遍，然后让"反馈降低冗长度"这个发现独立成立。
+它比现在被声称的那个结论更好。
+
+**判决**：弱接收 —— 一份细致、仪表齐全、带出多条可迁移负面结论的实证研究，被一个头条指标（20 轮取最好 + 真值验证器）和一处效率表述拖了后腿，两者都把方法说得比数据支持的更漂亮。
+
+## 要点总结
+
+- **不要压缩任务内的轨迹。**
+这是最能立刻用上的一条。
+如果你的 agent 在同一个任务上反复重试，请压住"把历次尝试摘要一下省点上下文"的冲动——DC 和 SimpleMem 在这个设定下都是**掉分**的。
+摘要是有损操作，而它最先删掉的就是中间推理，恰恰是重试最需要的东西。
+跨任务要压就压；同一任务内部别压。
+
+- **设计信号时，把丰富度和可靠度分开考虑。**
+二值 vs 完整执行器的 71.9% 对 78.1%（LiveBench Code）说明：仅仅因为把一个你已经算出来的信号截断，就能白丢六分。
+如果你在往 agent 循环里灌 CI 输出，灌堆栈，别灌退出码。
+
+- **model-as-judge 有一道能力门槛，不是一个质量旋钮。**
+GPT-5 mini 评 GPT-5 在 AIME 上有帮助，在 OmniMath 上有害。
+预测因子是评审自己**在该任务上**的基础准确率。
+部署评审模型之前，先把它当求解器在同分布上跑个分——解不出来的，多半也评不明白。
+
+- **一条丰富通道配一条可靠通道。**
+双反馈（评审文字 + 真值比特）在还有提升空间的任务上打赢了两个单通道，而在可靠通道已经占绝对优势的任务上就不再有帮助。
+设计规则：只有当第二条通道补的是第一条缺的那根轴时，才值得加。
+
+- **给循环留短一点的预算。**
+大部分增益落在最初若干轮，21 到 50 轮几乎买不到东西（AIME 2.2%，OmniMath 3.5%）。
+真要做这套，工程量该花在停止规则上，而不是把循环拉长。
+
+- **连同想法一起偷走的还应有一条自我警惕**：评估你自己的迭代式 agent 时，请报最后一轮的准确率，不要报最好一轮的。
+带验证器的 best-over-k 衡量的是你的验证器，不是你的 agent。
+:::

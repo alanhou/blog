@@ -1,0 +1,421 @@
+---
+title:
+  en: "Self-Improving Agents Are Mostly Measuring Noise"
+  zh: "自我改进智能体：你测到的多半是噪声"
+description:
+  en: "A Salesforce team re-ran two memory-based self-improving web agents with three seeds and shuffled task orders. Variance rose in 71% of cases, the reported gains largely evaporated against a modern baseline, and the improvement turned out to depend on a hidden easy-to-hard curriculum baked into benchmark task IDs."
+  zh: "Salesforce 团队把两个基于记忆的自我改进 Web 智能体重跑三遍、再把任务顺序打乱：71% 的情况下方差变大，换成更强的基线后收益基本消失，而所谓的自我改进其实依赖 benchmark 任务编号里藏着的一条由易到难的隐式课程。"
+date: 2026-08-20
+tags: ["arxiv", "ai", "cs.ai", "cs.cl", "cs.lg"]
+image: "/arxiv-visuals/arxiv-on-the-fragility-of-self-improving.png"
+---
+
+:::en
+**Paper**: [2608.18066](https://arxiv.org/abs/2608.18066)
+**Authors**: Qinyuan Ye, Yu Li, Yada Pruksachatkun, Jiaxin Zhang, Chien-Sheng Wu
+**Categories**: cs.AI, cs.CL, cs.LG
+
+## The Gap
+
+Memory-based self-improving agents have a beautifully simple pitch. Give an agent a stream of tasks, let it write a note to itself after each one, store the notes in a textual memory bank, retrieve relevant notes before the next task. No gradients, no fine-tuning, no training infrastructure — just an agent that gets better at your product by using your product. Agent Workflow Memory (AWM) does this by summarizing reusable workflows out of successful trajectories. ReasoningBank (RBank) generalizes it: memory items are free-form reasoning insights, harvested from failures as well as successes, pulled back by a retriever rather than dumped wholesale into context.
+
+The reported numbers are good. AWM took a Claude-3.5-Sonnet WebArena agent from 32.7% to 36.3%. RBank took a Gemini-2.5-Pro agent from 46.7% to 53.9% on a 684-task subset. Both results, like essentially all web-agent evaluation, come from **a single run in a single fixed task order**.
+
+That is the gap, and it is not a nitpick. A self-improving agent is a *stateful* system: what it writes after task 7 changes what it retrieves at task 8, which changes what it writes after task 8. Any evaluation protocol that reports one sample from such a system is reporting one draw from a distribution nobody has looked at. And the "fixed task order" part hides a second problem — if the benchmark's default ordering happens to be easy-to-hard, the agent gets a curriculum it never asked for and no one credited.
+
+This paper does the boring, expensive, necessary thing: re-run everything three times, shuffle the task order, and upgrade the baseline to a current model so the starting point isn't a straw man.
+
+```
+[SETTING] memory-based self-improvement: task stream ->
+          write memory -> retrieve -> next task
+     |
+     v
+[HOW IT IS MEASURED TODAY] one run, one fixed task order,
+     mean pass@1, compared to a same-run no-memory baseline
+     |
+     v
+[SUSPICION] a stateful loop over a stochastic agent in a
+     stochastic environment cannot be summarized by one draw;
+     and "fixed order" may be smuggling in a curriculum
+     |
+     +---------------------+----------------------+
+     v                     v                      v
+[AXIS 1: 3 runs]     [AXIS 2: shuffle]     [AXIS 0: strong baseline]
+ report std and       Default vs            GPT-5-mini + modern
+ best-worst gap,      Shuffle-1 vs          harness, ground-truth
+ not just the mean    Shuffle-2             reward not LLM judge
+     |                     |                      |
+     +---------------------+----------------------+
+                           v
+[EVIDENCE] variance up in 17 of 24 cases (~71%); best-worst
+     gap reaches 10.4 points; +1.5% default-order gain has
+     p = 0.23; shuffled order turns +1.5% into -4.5%
+                           |
+                           v
+[DIAGNOSIS] read the memories by hand: they are full of
+     plausible-but-impossible advice (use the API, ask the
+     user) because nobody told the writer what the world is
+                           |
+                           v
+[PARTIAL FIX] inject rubrics + environment feedback + a
+     negative-constraint prompt: closes 31% of the gap.
+     69% remains unexplained.
+```
+
+## The Increment
+
+**One sentence**: Before this paper, "self-improving agent" meant a method with a positive delta on a leaderboard; after it, the delta is known to be smaller than the run-to-run noise it creates, and known to flip negative when you remove the one thing nobody realized the method depended on — the order the tasks arrive in.
+
+### Core Mechanism
+
+There is no new architecture here. The "method" is an evaluation design, and it is worth walking through because the design choices are the contribution.
+
+**The setup is deliberately generous to the methods under test.** Three benchmarks: WebArena (812 tasks, six domains), VisualWebArena (910 tasks), and SCUBA (267 enterprise CRM tasks after removing ones broken by site updates). GPT-5-mini as both the agent backbone and the memory-construction model, on a modern harness — which matters enormously, because that no-memory baseline hits 54.8% on WebArena, *higher than RBank's memory-enhanced 53.9% from the original paper*. The self-improvement methods are being asked to improve an agent that already beats their published result. On top of that, the authors hand the memory writer the **ground-truth reward** rather than an LLM-judge proxy, removing a known source of noise that the original implementations lived with. If the methods fail here, they don't fail because they were sandbagged.
+
+**Then two axes open up.** Axis one: run every configuration three times identically and report the standard deviation and the best-worst gap per domain, not just the mean. Axis two: in addition to the default task order (ascending task ID, exactly what prior work used), run two random shuffles. Those two axes are the whole experiment, and they are enough.
+
+**Then the forensics.** When the numbers come back bad, the authors read the memory banks by hand and count keywords. That is where the mechanism of failure actually shows up — not in an aggregate metric but in a memory item recommending an API call in an environment with no API.
+
+```
+  THE LOOP UNDER TEST (per run)
+
+   task q_1 ---> [ agent, backbone L ] ---> trajectory ---> reward r
+                        ^                                     |
+                        | retrieve                            | write
+                        |                                     v
+                  +----------------------------------------------+
+                  |          MEMORY BANK  M  (plain text)        |
+                  |  no validation. no expiry. no retraction.    |
+                  +----------------------------------------------+
+                        |                                     ^
+                        v                                     |
+   task q_2 ---> [ agent ] ---> trajectory ---> reward ------ +
+        ...
+   task q_N
+
+  WHERE THE NOISE ENTERS AND WHY IT COMPOUNDS
+
+   LLM sampling  ~~>  trajectory differs  ~~>  reward differs
+                                                    |
+                                                    v
+                                    memory written differs
+                                                    |
+                        (retrieved for every later task)
+                                                    |
+                                                    v
+                     run A and run B diverge permanently
+                     ==> variance of the loop > variance of the agent
+
+  THE BROADENED PROTOCOL
+
+   old:   [ 1 run ][ default order ]  ==>  one number, one delta
+
+   new:   [ run 1 ][ run 2 ][ run 3 ]  x  [ Default   ]
+                                          [ Shuffle-1 ]
+                                          [ Shuffle-2 ]
+          ==> mean, std, best-worst gap, and order sensitivity
+```
+
+**The metaphor: an unmoderated team wiki.** The memory bank is a wiki that every engineer can write to after closing a ticket. The memory-construction module is the post-mortem each engineer types up. The retriever is the search box you hit before starting your next ticket. So far, so good — this is how real teams actually accumulate competence.
+
+Now remove three things that real wikis have. Remove the editor: nothing anyone writes is ever reviewed. Remove retraction: nothing is ever deleted or marked obsolete. And remove the onboarding doc, so nobody writing a page knows what the team is actually allowed to do — which internal systems exist, which are off-limits, whether you can even call an API.
+
+You get exactly the pathologies the paper documents. Someone hits a slow map service, eyeballs the distance with a formula from memory, happens to get an answer close enough to pass, and writes a page: *"if the route engine is flaky, estimate distance directly."* Nobody reviews it. It surfaces in search. It gets used again, cited again, and by mid-quarter it is house style — the paper watches the word "Haversine" climb monotonically through the retrieved-memory counts. Someone else, never told the team is browser-only, writes a page recommending the API route; the agent later burns turns trying to follow it. Someone writes "get user confirmation before destructive actions," which is genuinely good advice in the real world and, in an environment with no user to ask, means the agent issues `wait` until it times out — 26 such memories across three WebArena runs, 22 across three VisualWebArena runs.
+
+And the curriculum point falls out of the same picture. A wiki built by juniors who were handed easy tickets first is a decent wiki. A wiki built by juniors thrown at random-difficulty tickets from day one is full of confident speculation written by people who were lost, and everyone after them reads it.
+
+### Key Concepts
+
+- **Variance amplification in a stateful loop**: A plain agent evaluated once has variance from LLM sampling plus environment flakiness — already larger than people admit. On WebArena's GitLab subset (180 tasks) the *no-memory* baseline's best and worst of three runs differ by 4.4 points, with a standard deviation of 1.98. That is already the size of a publishable improvement. Now wrap the self-improving loop around it: a coin flip at task 3 changes a memory that is retrieved by tasks 4 through 180, so early randomness doesn't average out, it *branches*. Empirically, variance grows in 17 of 24 domain-method cells (about 71%), with 11 cells showing a relative increase above 50%. RBank's best-worst gap reaches 7.8 points on GitLab, 8.3 on Map, and 10.4 on Multisite. Concretely: if your method's headline gain is 1.5 points and its best-worst spread is 8, a single run tells you approximately nothing.
+
+- **The implicit curriculum hidden in task IDs**: Benchmarks are built by annotators who write easy tasks first and harder ones later, so task ID correlates with difficulty. Plot the baseline agent's moving-average pass rate along the default order and you see it start near 75% and fall below 40% past task 150 on both Shopping Admin and GitLab. Prior work ran self-improvement in exactly this order. So the agent spends its first fifty tasks succeeding, which is precisely the regime where the memory writer produces clean, correct workflow notes — and only then meets the hard tasks, armed. That is a curriculum, and it was free and uncredited. Take it away and the direction of the effect reverses: averaged over settings, +1.5% under the default order becomes -4.5% under shuffled orders. On WebArena Shuffle-1, both methods land near 49% against a 54.8% baseline. Note carefully what the failure is: not "improves less," but **improves less than nothing**. The memory is actively worse than no memory. Six of eight order-shuffled comparisons degrade.
+
+- **Underspecification, and why memories are hypotheses rather than lessons**: The memory-construction prompt in the original RBank implementation is roughly "extract useful insights from the trajectory." It is never told what the environment supports, and the agent's task query is often ambiguous to begin with. WebArena task 118 asks the agent to "show me something that could alleviate" jaw bruxism; the intended answer is a mouth guard on the shopping site, but the agent reads it as a medical question, replies "consult your dentist," fails, reflects on the failure, and writes the memory *"gather targeted patient/context details before giving medical guidance"* — a sentence that will now be retrieved and will help nobody. The paper's sharpest formulation, from the conclusion: without validation, **agent memories are unverified hypotheses, not lessons learned**. Every reflection loop currently in production has this property.
+
+## Framework Shift
+
+```
+Before (mainstream practice):        After (this paper):
+
+ [ agent + method ]                   [ agent + method ]
+        |                                    |
+    1 run, default order            3 runs x 3 orders
+        |                                    |
+        v                                    v
+   pass@1 = 53.9                     mean 56.3, std up to 3.9
+   baseline  = 46.7                  best-worst gap up to 10.4
+        |                            p = 0.23 at n = 3
+        v                                    |
+   delta = +7.2  ==> "it works"              v
+                                     is the delta bigger than
+                                     the spread it created?
+   memory = knowledge                            ...often no
+
+   task order = incidental           memory = unverified
+                                              hypothesis
+   baseline = whatever the           task order = a hidden
+   original paper used                   prerequisite
+
+                                     baseline = current SOTA,
+                                       or the result is moot
+```
+
+From "does the delta exist" to "is the delta larger than the instability the method introduces, and does it survive removing the ordering nobody declared," the core shift is treating reliability as a first-class axis rather than an afterthought that a mean pass rate quietly averages away.
+
+## Expert Assessment
+
+**Problem choice**: Excellent, and unglamorous in the way that good reliability work usually is. Self-improving agents are one of the loudest directions in the field right now, and the entire evidence base rests on single-run, single-order comparisons. The task-order finding in particular is the kind of thing that is obvious in retrospect and that nobody checked — benchmark task IDs correlating with difficulty is not a subtle artifact, it is a natural consequence of how humans write benchmarks, and it has been silently subsidizing an entire method family. The baseline-drift point is nearly as valuable: both methods were validated against agents roughly twenty points weaker than what you would deploy today, and the gains do not survive the model upgrade. That is a general warning about any method whose job is to compensate for a weak base model.
+
+**Method maturity**: The protocol is right, but thin in one respect that matters. Three runs is the minimum that lets you say the word "variance" at all, and a standard deviation estimated from n = 3 is itself extremely noisy — the paper is measuring instability with an unstable instrument. Similarly, "17 of 24 cases" sounds strong but under a coin-flip null you'd expect 12; the claim is really carried by the magnitudes (11 cells above +50% relative) rather than the count. Two shuffles is likewise the smallest number that isn't one. None of this overturns the conclusions — the effects are large and the direction is consistent — but the honest reading is "clear qualitative signal, imprecise quantitative estimates," and I would rather the paper had said that itself.
+
+**Experimental integrity**: Unusually good, and deliberately biased *against* the paper's own thesis, which is the right direction to lean. They upgraded the baseline instead of inheriting a weak one. They handed the memory writer ground-truth rewards instead of a noisy LLM judge, which is more generous than the original implementations. They reported the p-value on their own headline gain (0.23) rather than burying it. One point cuts both ways and deserves flagging: with n = 3 you have almost no statistical power, so p = 0.23 is weak evidence of no effect, not evidence of absence — a reader should take it as "unresolved," which is also what the authors say. The one place I would push back is the +Rub intervention: feeding the evaluator's rubric into memory construction leaks grading signal into the method. The authors are careful that the agent never sees rubrics while acting, and as a *diagnostic* for underspecification it is exactly the right probe, but it is not a deployable technique, and the derived "closes 31% of the gap" headline rests on a small number of runs at one shuffle.
+
+**Writing quality**: Clean and well-organized; the case studies (Haversine, jaw bruxism, "user confirmation" causing timeout loops) are the best part of the paper and do more persuasive work than any table. The section I would rewrite is the variance analysis, which reports std and best-worst gap without ever stating uncertainty on those estimates or the number of runs needed to make them meaningful. A short power analysis — "to detect a 1.5-point effect against this observed spread you need roughly N runs" — would convert the paper's central recommendation from an exhortation into a usable number, and that is the one thing practitioners will actually want.
+
+**Verdict**: strong accept — the field is publishing self-improvement gains that are smaller than the noise those methods create, and this paper demonstrates it carefully, on strong baselines, with a mechanistic diagnosis rather than just a negative result.
+
+## Takeaways
+
+- **Shuffle the task order. It is the cheapest, most diagnostic ablation you are not running.** If your online-learning agent depends on an ordering you did not choose deliberately, you have a benchmark artifact, not a method. This transfers directly to curriculum learning, RAG systems that accumulate corpora, personalization loops, anything with a stream.
+- **Report the best-worst gap, not just the standard deviation.** At n = 3 a std is nearly meaningless, but "best run minus worst run" is a concrete, honest, hard-to-misread statement about what a reader would have seen if they ran it once. Put your method's gain and this gap in the same sentence and let people judge.
+- **Re-validate against a current baseline before believing any compensatory method.** AWM and RBank were measured against agents around 20 points weaker. Methods that patch a weak model's failure modes have a natural expiry date; check whether yours has passed.
+- **Tell the memory writer what the world does not allow.** The `+PMod` intervention is a prompt edit listing what to include (procedural knowledge, navigation structure, UI tips) and what to strictly avoid (API-based solutions, external sites, requesting human confirmation, task-specific details). This is a one-line change to any reflection loop, and it directly kills the plausible-but-impossible memory class.
+- **Separate what the actor sees from what the reflector sees.** Rubrics and grader output are unavailable during the attempt but available during the post-mortem. That asymmetry is a clean, general design pattern for reflection systems, and it is more useful than the specific numbers around it.
+- **Watch for lucky-shortcut lock-in.** The Haversine story is the transferable failure mode: a workaround adopted because the real tool was momentarily broken, occasionally rewarded, written to memory, then retrieved forever with monotonically increasing frequency. Any self-improving system that writes on success and never validates will canonize its luckiest accidents. The earlier the accident lands, the more it dominates — which is also why runs diverge.
+- **The open problem is stated plainly and is worth stealing**: memory validation. Nothing in the current stack ever asks whether a stored memory is *true*, whether it has expired, or whether it should be retracted. Filtering, verification, and lifecycle management for agent memory is an unclaimed and obviously necessary piece of infrastructure.
+:::
+
+:::zh
+**论文**: [2608.18066](https://arxiv.org/abs/2608.18066)
+**作者**: Qinyuan Ye, Yu Li, Yada Pruksachatkun, Jiaxin Zhang, Chien-Sheng Wu
+**分类**: cs.AI, cs.CL, cs.LG
+
+## 缺口
+
+基于记忆的自我改进智能体，故事讲得很漂亮。
+给智能体一串任务，每做完一个就给自己写条笔记，存进一个纯文本记忆库，下次做任务前检索回来。
+不用梯度，不用微调，不用训练基础设施——用着用着就变强了。
+Agent Workflow Memory（AWM）从成功轨迹里提炼可复用的工作流；ReasoningBank（RBank）把这件事放宽：记忆项是自由形式的推理洞见，失败轨迹也写，并且用检索器挑选而不是把全部塞进上下文。
+
+汇报的数字也确实好看。
+AWM 把 Claude-3.5-Sonnet 的 WebArena 智能体从 32.7% 提到 36.3%；RBank 把 Gemini-2.5-Pro 在 684 任务子集上从 46.7% 提到 53.9%。
+但这两个结果——和几乎所有 Web 智能体评测一样——都来自**单次运行、单一固定任务顺序**。
+
+这不是吹毛求疵。
+自我改进智能体是个**有状态**系统：它在第 7 个任务后写下的东西，会改变第 8 个任务检索到什么，进而改变第 8 个任务后写下什么。
+用一次采样去总结这样一个系统，等于报告了一个谁都没看过的分布中的某一个抽样。
+而"固定顺序"里还藏着第二个问题：如果 benchmark 的默认顺序恰好是由易到难，智能体就白拿了一条没人申报过的课程表。
+
+这篇论文做的是那件枯燥、烧钱、但必须有人做的事：每个配置跑三遍，把任务顺序打乱，并且把基线换成当代模型，免得打的是稻草人。
+
+```
+[设定] 基于记忆的自我改进: 任务流 -> 写记忆
+       -> 检索 -> 下一个任务
+     |
+     v
+[现有测法] 一次运行, 一个固定顺序, 报 mean pass@1,
+     与同一次运行里的无记忆基线相比
+     |
+     v
+[怀疑] 随机智能体 + 随机环境 + 有状态循环,
+       一次抽样概括不了; 而"固定顺序"可能
+       在偷偷夹带一条课程
+     |
+     +---------------------+----------------------+
+     v                     v                      v
+ [轴 1: 跑 3 遍]      [轴 2: 打乱顺序]      [轴 0: 强基线]
+  报 std 与最好-        Default vs           GPT-5-mini +
+  最差差值, 而          Shuffle-1 vs         现代 harness,
+  不只是均值            Shuffle-2            用真值 reward
+     |                     |                      |
+     +---------------------+----------------------+
+                           v
+[证据] 24 个格子里 17 个方差变大 (~71%); 最好-最差
+     差值最高 10.4 个点; 默认顺序下 +1.5% 的收益
+     p = 0.23; 打乱顺序后 +1.5% 变成 -4.5%
+                           |
+                           v
+[诊断] 人工翻记忆库: 里面全是"听起来合理但根本
+     做不到"的建议 (去调 API、去问用户), 因为
+     没人告诉写记忆的模型这个世界长什么样
+                           |
+                           v
+[部分修复] 注入评分细则 + 环境反馈 + 负面约束提示词:
+     补回 31% 的差距, 剩下 69% 仍然无解释
+```
+
+## 增量
+
+**一句话**: 这篇之前，"自我改进智能体"意味着一个在榜单上有正增量的方法；这篇之后，我们知道那个增量小于方法自己制造出来的运行间噪声，而且一旦拿掉那个谁都没意识到自己在依赖的东西——任务到达的顺序——增量会直接翻负。
+
+### 核心机制
+
+这里没有新架构。
+所谓"方法"就是一套评测设计，值得逐条走一遍，因为设计选择本身就是贡献。
+
+**这套设定刻意对被测方法很宽厚。**
+三个 benchmark：WebArena（812 任务，六个域）、VisualWebArena（910 任务）、SCUBA（企业 CRM 场景，剔除因网站更新而失效的任务后剩 267 个）。
+智能体主干和记忆构造模型都用 GPT-5-mini，配现代 harness——这一点极其关键，因为无记忆基线在 WebArena 上就有 54.8%，**比 RBank 原论文里带记忆的 53.9% 还高**。
+也就是说，自我改进方法被要求去改进一个已经打赢它们已发表结果的智能体。
+更进一步，作者给记忆构造模块喂的是**真值 reward**，而不是原实现里那个带噪的 LLM-Judge 代理分数。
+如果方法在这里失败，不是因为被下了绊子。
+
+**然后展开两个轴。**
+轴一：每个配置原样跑三遍，按域报标准差和最好-最差差值，而不只是均值。
+轴二：除了默认顺序（按任务 ID 升序，也就是此前工作用的顺序），再跑两个随机打乱的顺序。
+整个实验就这两个轴，而这已经够了。
+
+**接下来是取证环节。**
+数字变难看之后，作者亲手去读记忆库、数关键词。
+失效机理是在那里显形的——不在任何聚合指标里，而在一条建议"用 API 解决"的记忆项里，尽管这个环境根本没有 API。
+
+```
+  被测的循环 (单次运行内)
+
+   任务 q_1 --> [ 智能体, 主干 L ] --> 轨迹 --> reward r
+                       ^                          |
+                       | 检索                     | 写入
+                       |                          v
+                  +------------------------------------+
+                  |        记忆库 M (纯文本)           |
+                  |  无校验. 无过期. 无撤回.           |
+                  +------------------------------------+
+                       |                          ^
+                       v                          |
+   任务 q_2 --> [ 智能体 ] --> 轨迹 --> reward --- +
+        ...
+   任务 q_N
+
+  噪声从哪进来, 为什么会滚雪球
+
+   LLM 采样 ~~> 轨迹不同 ~~> reward 不同
+                                 |
+                                 v
+                        写下的记忆不同
+                                 |
+                  (被后面每一个任务检索到)
+                                 |
+                                 v
+                 run A 与 run B 永久分岔
+                 ==> 循环的方差 > 智能体本身的方差
+
+  拓宽后的协议
+
+   旧:  [ 1 次运行 ][ 默认顺序 ] ==> 一个数, 一个 delta
+
+   新:  [ run 1 ][ run 2 ][ run 3 ]  x  [ Default   ]
+                                        [ Shuffle-1 ]
+                                        [ Shuffle-2 ]
+        ==> 均值, 标准差, 最好-最差差值, 顺序敏感度
+```
+
+**核喻：一个没有编辑的团队 wiki。**
+记忆库是一个 wiki，每个工程师关掉一张工单后都可以往里写。
+记忆构造模块是每个人写的复盘。
+检索器是你开新工单前敲的那个搜索框。
+到这里都很正常——真实团队就是这样积累能力的。
+
+现在把真 wiki 有、而它没有的三样东西拿掉。
+拿掉编辑：谁写的都不会被审。
+拿掉撤回：没有任何条目会被删除或标记过时。
+再拿掉入职文档：写页面的人不知道这个团队究竟被允许做什么——有哪些内部系统、哪些是禁区、能不能调 API。
+
+于是你精确地得到论文记录的那些病症。
+某人碰上地图服务卡住，凭一个球面距离公式手算了一下，碰巧答案够接近，判了通过，于是他写了一页：*"路径引擎不稳时，直接估算距离。"*
+没人复核。它出现在搜索结果里。它被再次使用、再次引用，到季度中就成了团队规范——论文眼睁睁看着 "Haversine" 这个词在检索记忆的计数曲线里单调爬升。
+另一个人从没被告知这个环境只有浏览器，写了一页推荐走 API；智能体后来照做，把回合数烧光。
+还有人写下"执行破坏性操作前先获取用户确认"——这在真实世界里是好建议，但在一个没有用户可问的环境里，意思就是智能体一直发 `wait` 直到超时：WebArena 三次运行里出现 26 次，VisualWebArena 三次运行里 22 次。
+
+课程表那个发现也从同一幅图里掉出来。
+一个由"先派简单工单"的新人们建起来的 wiki，质量还不错。
+一个由从第一天起就被扔进随机难度工单的新人们建起来的 wiki，写满了当时一头雾水的人写下的自信推测，而后来的每个人都会读到它。
+
+### 关键概念
+
+- **有状态循环里的方差放大**: 一个普通智能体跑一次，方差来自 LLM 采样加环境抖动——本来就比大家承认的要大。
+  在 WebArena 的 GitLab 子集（180 个任务）上，**无记忆**基线三次运行的最好与最差相差 4.4 个点，标准差 1.98。
+  这个量级本身就够发一篇"改进"了。
+  现在把自我改进循环套上去：第 3 个任务上的一次掷币会改写一条记忆，而这条记忆会被第 4 到第 180 个任务检索到——早期随机性不会被平均掉，它会**分岔**。
+  实测：24 个「域 x 方法」格子里 17 个方差上升（约 71%），其中 11 个相对增幅超过 50%。
+  RBank 的最好-最差差值在 GitLab 上到 7.8 点，Map 上 8.3 点，Multisite 上 10.4 点。
+  说人话：如果你的方法号称提升 1.5 个点，而最好最差差 8 个点，那么单次运行几乎什么都没告诉你。
+
+- **藏在任务 ID 里的隐式课程**: benchmark 是人标的，标注者通常先写简单任务、后写困难任务，于是任务 ID 与难度相关。
+  把基线智能体按默认顺序的滑动平均通过率画出来，Shopping Admin 和 GitLab 上都是从 75% 附近起步，过了第 150 个任务后掉到 40% 以下。
+  此前工作恰恰就是按这个顺序跑自我改进的。
+  于是智能体的头五十个任务几乎都在成功，而这正是记忆写作者能产出干净、正确的工作流笔记的区间——等它遇到难题时，手里已经有装备了。
+  这就是一条课程表，白送的，而且没人给它记功。
+  把它拿掉，效应方向直接反转：跨设定平均下来，默认顺序的 +1.5% 变成打乱顺序下的 -4.5%。
+  WebArena Shuffle-1 上，两个方法都落在 49% 附近，而基线是 54.8%。
+  注意失败的形态：不是"提升变小了"，而是**提升小于零**。带记忆比不带记忆更差。
+  八组顺序打乱的对比里有六组退化。
+
+- **欠规约，以及为什么记忆只是假设而非教训**: RBank 原实现里的记忆构造提示词大致就是"从轨迹里提炼有用的洞见"。
+  它从未被告知环境支持什么，而任务描述本身也常常有歧义。
+  WebArena 第 118 号任务说"我有磨牙问题，给我看点能缓解的东西"，预期答案是购物站上的护齿套；智能体把它读成医学问题，回答"请咨询你的牙医"，判错，然后反思这次失败，写下记忆：*"给出医疗建议前先收集针对性的患者/情境细节"*——这句话从此会被检索到，并且帮不了任何人。
+  论文结论里最锋利的一句话：在没有校验机制的情况下，**智能体的记忆只是未经验证的假设，而不是学到的教训**。
+  今天在线上跑的每一个反思循环，都有这个性质。
+
+## 框架转变
+
+```
+之前（主流做法）：                  之后（本文）：
+
+ [ 智能体 + 方法 ]                   [ 智能体 + 方法 ]
+        |                                   |
+   1 次运行, 默认顺序               3 次运行 x 3 种顺序
+        |                                   |
+        v                                   v
+   pass@1 = 53.9                    均值 56.3, 标准差最高 3.9
+   基线   = 46.7                    最好-最差差值最高 10.4
+        |                           n = 3 时 p = 0.23
+        v                                   |
+   delta = +7.2 ==> "有效"                  v
+                                    这个 delta 有没有大过
+   记忆 = 知识                      它自己制造的波动?
+                                                ...常常没有
+   任务顺序 = 无关紧要
+                                    记忆 = 未经验证的假设
+   基线 = 原论文用的那个            任务顺序 = 隐藏的前置条件
+                                    基线 = 当代 SOTA,
+                                      否则结论无意义
+```
+
+一句话：从"增量存不存在"到"增量是否大于方法引入的不稳定、并且在拿掉没人申报过的顺序后是否还活着"，核心转变是把可靠性当成一等评测轴，而不是被一个平均通过率悄悄抹平的事后备注。
+
+## 专家评审
+
+**选题眼光**: 很好，而且以可靠性工作惯有的方式不讨喜。
+自我改进智能体是当下最喧嚣的方向之一，而整个证据基础建立在单次运行、单一顺序的对比上。
+任务顺序这个发现尤其属于"事后看显然、但此前没人查"的那类——benchmark 任务 ID 与难度相关根本不是什么微妙的伪影，它是人类写 benchmark 的自然后果，而它一直在悄悄补贴一整个方法家族。
+基线漂移这一点几乎同样有价值：两个方法当年验证时对着的智能体比今天你会部署的弱大约二十个点，而收益撑不过一次模型升级。
+这对任何以"补偿弱基座模型"为职责的方法都是通用警告。
+
+**方法成熟度**: 协议是对的，但有一处单薄且关乎结论。
+跑三遍是允许你说出"方差"这个词的最低次数，而 n = 3 估出来的标准差本身噪声极大——这篇论文是在用一把不稳的尺子量不稳定性。
+同理，"24 中 17"听着有力，但在掷币零假设下期望值是 12；真正撑住结论的是幅度（11 个格子相对增幅超过 50%），而不是计数。
+两种打乱顺序同样是"不等于一"的最小值。
+这些都推翻不了结论——效应很大、方向一致——但诚实的读法是"定性信号清晰、定量估计粗糙"，我更希望论文自己把这句话说出来。
+
+**实验诚意**: 相当好，而且刻意往**不利于自己论点**的方向偏，这个偏法是对的。
+他们升级了基线而不是继承一个弱的；他们给记忆写作者真值 reward 而不是带噪的 LLM 判官，这比原实现还宽厚；他们把自己头条收益的 p 值（0.23）报了出来而不是埋掉。
+有一点是双刃的，值得点明：n = 3 时统计功效几乎为零，所以 p = 0.23 是"无效应"的弱证据，而不是"效应不存在"的证据——读者应当理解为"悬而未决"，这也正是作者的说法。
+我唯一想反推的是 +Rub 这个干预：把评测器的评分细则喂进记忆构造，等于把判分信号泄进了方法里。
+作者很小心地保证智能体在执行任务时看不到细则，作为欠规约的**诊断探针**这也确实是恰当设计，但它不是可部署的技术，而由此得到的"补回 31% 差距"这个头条，是建立在单一打乱顺序下的少量运行上的。
+
+**写作功力**: 结构干净利落；那几个案例（Haversine、磨牙护齿、"用户确认"导致超时死循环）是全文最好的部分，说服力胜过任何一张表。
+我会重写的是方差分析那一节：它报了标准差和最好-最差差值，却从未说明这些估计本身的不确定度，也没说要多少次运行才能让它们有意义。
+一段简短的功效分析——"要在这个观测到的波动下检出 1.5 个点的效应，大约需要 N 次运行"——就能把论文的核心建议从一句号召变成一个可用的数字，而这恰恰是实践者真正想要的东西。
+
+**判决**: 强接收 — 这个领域正在发表一批小于其自身噪声的自我改进收益，而这篇论文在强基线上把这件事仔细证明了出来，并且给出了机理诊断而不只是一个负结果。
+
+## 要点总结
+
+- **把任务顺序打乱。这是你没在跑的、最便宜也最有诊断力的消融。** 如果你的在线学习智能体依赖一个不是你刻意选择的顺序，那你手里的是 benchmark 伪影，不是方法。这条直接迁移到课程学习、会累积语料的 RAG 系统、个性化循环——任何带数据流的东西。
+- **报最好-最差差值，别只报标准差。** n = 3 时标准差几乎没有意义，但"最好那次减最差那次"是一句具体、诚实、难以误读的陈述：读者自己跑一次会看到什么。把你的收益和这个差值放进同一句话里，让人自己判断。
+- **在相信任何补偿型方法之前，先用当代基线重新验证一遍。** AWM 和 RBank 当年对标的智能体弱了约 20 个点。凡是靠修补弱模型失效模式吃饭的方法，都自带保质期，去查一下你的过没过期。
+- **明确告诉记忆写作者：这个世界不允许什么。** `+PMod` 这个干预就是一段提示词，列出该写什么（流程性知识、站点导航结构、UI 交互技巧）和绝对避免什么（API 方案、访问外部网站、请求人类确认、绑死在特定站点或问题上的细节）。这是任何反思循环里一行字的改动，却能直接干掉"听起来合理但做不到"那一整类记忆。
+- **把执行者看到的东西和反思者看到的东西分开。** 评分细则和判分输出在执行时不可见、在复盘时可见。这个不对称是反思型系统一个干净且通用的设计模式，比它周围那几个具体数字有用得多。
+- **警惕"侥幸捷径固化"。** Haversine 那个故事是可迁移的失效模式：因为正牌工具一时不好使而采用的临时绕路，偶尔被判对，写进记忆，然后被以单调递增的频率永久检索。任何"成功就写、从不校验"的自我改进系统，最终都会把自己最走运的意外奉为正典。意外落地得越早，它统治得越彻底——这也正是不同运行会分岔的原因。
+- **它把开放问题讲得很清楚，值得直接拿走**：记忆校验。现有技术栈里没有任何环节会追问一条存下来的记忆是否**为真**、是否已过期、是否该被撤回。给智能体记忆做过滤、验证与生命周期管理，是一块无人认领但显然必要的基础设施。
+:::

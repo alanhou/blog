@@ -1,0 +1,451 @@
+---
+title:
+  en: "The Judge That Knows When to Google — And When to Shut Up"
+  zh: "让 LLM 裁判在没把握时先去搜一下，再给你一张误判率证书"
+description:
+  en: "A two-threshold router lets an LLM judge answer from memory when confident, escalate to web search when not, and abstain when even evidence doesn't help — with a finite-sample Clopper-Pearson bound on the error rate among accepted verdicts."
+  zh: "两个校准阈值把 LLM 裁判拆成三条路：有把握就直接判，没把握就去搜网页再判，搜完还是没把握就弃权。Clopper-Pearson 有限样本上界保证被接受判决的错误率不超过用户设定的 alpha。"
+date: 2026-08-20
+tags: ["arxiv", "ai", "cs.cl"]
+image: "/arxiv-visuals/arxiv-judge-retrieve-or-abstain-uncertainty-guarded.png"
+---
+
+:::en
+**Paper**: [2608.17994](https://arxiv.org/abs/2608.17994)
+**Authors**: Sher Badshah, Ali Emami, Hassan Sajjad
+**Categories**: cs.CL
+
+## The Gap
+
+LLM-as-a-judge grew up in the subjective world. MT-Bench, reward modeling, G-Eval — all of them score helpfulness, harmlessness, style, where there is no single right answer and approximate agreement with humans is good enough. Objective factual evaluation is a different animal: "Who voices Jack Kahuna Laguna in SpongeBob?" has exactly one right answer, and a reference-free judge either knows it or is bluffing.
+
+Two failure modes follow, and both are silent. The judge may simply lack the knowledge — recent events, rare entities, specialized domains — and cannot tell a correct answer from a plausible fabrication. Or the judge has the knowledge and hallucinates anyway, producing a confident wrong verdict. Neither failure announces itself. The paper's own qualitative table has a judge asserting that Steve Carell voiced the character and calling it "a well-documented fact." The gold answer is Johnny Depp.
+
+The field has three partial answers on the table, and each stops one step short. **Tool-augmented judges** (SAFE, SAGE) hand the judge a search engine, which fixes knowledge gaps but retrieves unconditionally — paying search cost on every instance, including the ones the judge already knew cold — and still offers no formal statement about how often the final verdicts are wrong. **Uncertainty quantification** (predictive entropy, self-consistency sampling) produces a score that correlates with correctness, but the threshold you apply to it is a hyperparameter someone tuned; correlation plus a hand-picked cutoff is not a guarantee. **Risk-controlled selective prediction** (COIN, SConU) does supply finite-sample guarantees, but it was built to filter *examinee* answers in QA, not to control errors in the meta-evaluation layer; the two closest works that do target judging — Trust or Escalate, SCOPE — guarantee agreement with humans on *subjective pairwise preference*, which is a different quantity than factual correctness. And every one of these treats abstention as the only escape hatch, which throws away exactly the instances where a two-second web lookup would have settled the matter.
+
+```
+[PROBLEM] reference-free judging of factual QA:
+          judge lacks knowledge OR hallucinates,
+          and both failures are silent
+     |
+     v
+[PARTIAL FIXES AND WHERE THEY STOP]
+   tool use     ==> fixes knowledge, retrieves always,
+                    no error guarantee
+   UQ + cutoff  ==> flags bad verdicts, cutoff is a
+                    hyperparameter, no guarantee
+   risk control ==> real guarantee, but built for
+                    examinee answers / subjective
+                    preference, abstain-only
+     |
+     v
+[ASSUMPTION] the uncertainty score separates correct
+             from incorrect verdicts well enough that
+             a calibrated cutoff is useful; and the
+             calibration set is i.i.d. with the
+             deployment distribution
+     |
+     v
+[METHOD] two modes, two thresholds, one joint
+         calibration.  U1 <= t1 -> accept parametric
+         verdict.  U1 > t1 and U2 <= t2 -> accept the
+         retrieval-augmented verdict.  else abstain.
+         Clopper-Pearson UCB on FDR among accepted.
+     |
+     +-- [LEMMA 1] routing is a deterministic function
+     |             of the input, so selected failures
+     |             stay i.i.d. Bernoulli and the
+     |             single-threshold proof carries over
+     |
+     v
+[EVIDENCE] 32 configs (2 candidates x 4 judges x
+           4 datasets), 100 splits each.  FDR at or
+           below alpha everywhere.  Coverage at
+           alpha = .20 on NQ-Open: .07 -> .82;
+           HotpotQA: .40 -> .85
+     |
+     v
+[CONCLUSION] uncertainty should trigger *escalation*
+             first and abstention only second, and the
+             whole policy still admits one certificate
+```
+
+## The Increment
+
+**One sentence**: Before, an LLM judge on factual tasks either answered everything (with an unknown error rate) or abstained on anything it wasn't sure about (with a guarantee, but throwing away most of the data); after, uncertainty routes an instance to web evidence *before* it routes it to the bin, and the whole three-way policy still carries one finite-sample bound on the error rate among the verdicts you keep.
+
+### Core Mechanism
+
+Start with the single-mode base case. The judge `J` reads a question and a candidate answer and emits a binary verdict plus an uncertainty score `U`. The score here is predictive entropy computed at the verdict token — you take the log-probabilities of the `True` and `False` tokens from the same forward pass that produced the verdict and compute the binary entropy, so uncertainty costs zero extra inference. A held-out calibration set of `N` instances carries ground-truth labels. For any candidate threshold `t` you can count how many calibration instances would be accepted (`U <= t`) and how many of those the judge got wrong; that ratio is the empirical FDR. The trick is that you do not trust the empirical ratio — you feed the counts into a one-sided Clopper-Pearson upper confidence bound and pick the largest `t` whose *bound* stays under the user's risk level `alpha`. That is a real guarantee: with probability at least `1 - delta` over the calibration draw, the true error rate among accepted verdicts is at most `alpha`.
+
+Now the actual contribution. Instead of one threshold, there are two, and a second evaluation mode sits between confidence and the bin. Mode 1 is the judge with parametric knowledge only. Mode 2 queries a web search engine with the original question, concatenates the top-`k` results (title, snippet, URL; `k = 3` by default) into an evidence passage, appends it to the prompt, and re-runs the judge. At test time: if `U1 <= t1`, ship the Mode 1 verdict and never touch the search API; if `U1 > t1` but `U2 <= t2`, ship the Mode 2 verdict; otherwise abstain and flag for human review. Retrieval cost is paid only on the instances Mode 1 could not close.
+
+The calibration is *joint*, not sequential. During calibration both modes are pre-computed for all `N` instances, and the selection size and error count are computed for a candidate *pair* `(t1, t2)` — an instance counts as selected if either arm accepts it, and its error is attributed to whichever arm actually produced the verdict. Then a grid search over the sorted unique uncertainty values picks the pair maximizing coverage subject to the Clopper-Pearson bound staying under `alpha`, in `O(|T1| * |T2|)` time with cumulative sums. The theoretical work is Lemma 1: because both `U1` and `U2` are deterministic functions of the input `(x, y_hat)`, the routing decision introduces no new randomness, so the failure indicators over the selected subset are still i.i.d. Bernoulli and the single-threshold Clopper-Pearson argument transfers verbatim. No extra distributional assumptions, no conformal machinery beyond what the base case needed.
+
+```
+CALIBRATION (offline, needs labels)      DEPLOYMENT (online)
+
+for each (x, y_hat, y*) in D_cal:              (x, y_hat)
+    v1, U1 <- J(x, y_hat)                          |
+    E     <- RETRIEVE(x)                           v
+    v2, U2 <- J(x, y_hat, E)                 +-----------+
+    c1, c2 <- match against y*               | Mode 1: J |  parametric
+        |                                    +-----------+
+        v                                          |
+  grid over (t1, t2):                          U1 <= t1 ?
+    m = # accepted by either arm             /            \
+    w = # errors among them                yes             no
+    UCB = BetaInv(1-delta; w+1, m-w)        |               |
+    keep pair with max m s.t. UCB <= alpha  v               v
+        |                              [ACCEPT v1]    +-----------+
+        v                               zero search   | RETRIEVE  |
+   (t1_hat, t2_hat)  ---------------->   cost         | top-k web |
+                                                      +-----------+
+                                                            |
+                                                            v
+                                                      +-----------+
+                                                      | Mode 2: J |
+                                                      | (x,y_hat, |
+                                                      |     E)    |
+                                                      +-----------+
+                                                            |
+                                                       U2 <= t2 ?
+                                                      /          \
+                                                    yes           no
+                                                     |             |
+                                                     v             v
+                                                [ACCEPT v2]   [ABSTAIN]
+                                                              human review
+
+  guarantee:  Pr( error rate among all ACCEPTed <= alpha ) >= 1 - delta
+```
+
+**The metaphor: airport screening with a published clearance standard.** Every passenger is an instance. Walking through the metal detector is Mode 1 — instant, free, and it produces not a decision but a *reading*. The sensitivity dial on that detector is `t1`. Passengers whose reading sits below the dial walk straight to the gate; nobody wastes a hand search on them.
+
+Everyone above the dial goes to secondary screening: the bag comes off the belt, gets opened, gets X-rayed. That is retrieval — expensive, slower, but it puts actual evidence on the table instead of relying on the officer's memory of what a suspicious silhouette looks like. Secondary screening has its own dial, `t2`. Clear it and you fly. Fail it — the X-ray was inconclusive, the contents ambiguous — and you don't get waved through on a hunch; you get escalated to a human supervisor. Three outcomes, two dials, and crucially the *second look happens before the refusal*, which is the whole point. A single-dial system has to refuse everyone who beeps.
+
+Where do the dial settings come from? Not from an officer's intuition. A regulator runs a batch of test bags with known contents through both stages and sets both dials together so that, with 95% confidence, at most `alpha` of everything cleared — through either lane — was cleared in error. That joint setting is why the two dials cannot be tuned independently: loosening the first dial pushes more marginal cases into the fast lane, which means the second dial must tighten to keep the overall clearance standard. And the certificate covers *cleared passengers*, not all passengers — a system that refuses everybody trivially satisfies it. Which is exactly why coverage is reported alongside FDR, and why the interesting number is how many people actually fly.
+
+### Key Concepts
+
+- **FDR among accepted, not accuracy overall**: The quantity being controlled is `E[W | U <= t]` — the error rate *conditional on the judge having chosen to answer*. This is subtler than it looks, and the conditioning is where naive approaches break. Suppose your judge is 70% accurate overall. Nothing stops the 30% it gets wrong from being concentrated in exactly the instances it feels most confident about — that is what a systematic hallucination looks like. Controlling FDR-among-accepted means you're making a promise about the *selected* subpopulation, which is a moving target: change the threshold and you change which population you're making the promise about. And note what the promise buys you. It does not make the judge smarter. It converts an unknown error rate into a knob: you say "I will tolerate 10% wrong verdicts," the framework tells you what fraction of your data it can evaluate at that price, and the rest goes to a human. That's the entire product.
+
+- **The Clopper-Pearson upper bound, and why the empirical rate isn't enough**: Imagine you accept 10 calibration instances at some threshold and the judge got all 10 right. Empirical FDR: 0%. Would you ship a claim of "0% error" on that basis? Obviously not — 10 samples is nothing. Clopper-Pearson answers the question properly: what is the largest true error rate that would still make "0 errors out of 10" a non-freakish observation at the 5% level? The answer is about 26% — because a coin that's wrong 26% of the time still comes up clean ten times in a row with 5% probability. So the bound reports 26%, not 0%, and if your `alpha` is 10% that threshold gets rejected. This is exact and finite-sample: no normal approximation, no asymptotics, valid at `N = 10` as much as at `N = 10,000`. The price is conservatism, and conservatism spends coverage — which is precisely the currency the second mode exists to earn back.
+
+- **Why routing doesn't break the proof (and what would)**: The worry is natural. Conformal-style guarantees are fragile under adaptivity — if you let the system *look at outcomes* and then decide how to handle an instance, the selected failures stop being i.i.d. and the bound dies. Lemma 1's observation is that this system never does that. The routing decision depends only on `U1` and the fixed thresholds, and `U1` is a deterministic function of `(x, y_hat)`. The judge's computation is deterministic; the retrieval is treated as deterministic given the query. So "which lane did this instance take" is just another deterministic feature of the input, conditioning on selection preserves i.i.d.-ness, and the Bernoulli structure survives. What *would* break it: routing that depends on the ground-truth label, retrieval whose results shift between calibration and deployment (the paper tests this — see below), or a threshold search that's certified as if it were a single pre-specified pair (the paper is honest that this one is a real gap).
+
+## Framework Shift
+
+```
+Before (mainstream):                 After (this paper):
+
+  judge always answers                 U1 -- below t1 --> ACCEPT (free)
+        |                               |
+        v                               +-- above t1 --> RETRIEVE
+   verdict, unknown error rate                              |
+                                                            v
+  OR, with selective prediction:                    U2 -- below t2 --> ACCEPT
+                                                     |
+  U -- below t --> ACCEPT                            +-- above t2 --> ABSTAIN
+    |
+    +-- above t --> ABSTAIN            one certificate covers BOTH
+                    (data lost)        accept paths:
+                                       Pr(FDR <= alpha) >= 1 - delta
+  guarantee: yes
+  coverage on hard sets: ~5%           coverage on hard sets: ~74-85%
+  uncertainty means: give up           uncertainty means: go look it up
+
+  OR, with tool augmentation:
+
+  every instance --> RETRIEVE          retrieval spend is targeted:
+        |                              ~45% of TriviaQA never searches
+        v                              (Qwen3-14B judge, alpha = .20)
+   verdict, unknown error rate
+   search cost on 100% of data
+```
+
+From abstain-or-guess to escalate-then-abstain, the core shift is treating an uncertainty score as a *routing signal with a budget* rather than a binary trust switch — and showing that the extra branch costs nothing in the proof.
+
+## Expert Assessment
+
+**Problem choice**: Real, well-scoped, and sitting at a genuinely useful intersection. The field has been sliding toward LLM judges as infrastructure — RLAIF reward signals, agent self-evaluation, automated benchmark scoring — while the reliability story stayed at "GPT-4 correlates with humans at 0.8." For subjective tasks that's arguably fine. For factual tasks it's a load-bearing beam nobody stress-tested. The specific insight that abstention is a wasteful default when the failure is a *knowledge gap* rather than an *ambiguity* is a good one, and obvious only in retrospect. The trajectory is clear: this is the third or fourth paper from adjacent groups pulling conformal risk control into the judging layer, and the combination with tool use is the natural next node.
+
+**Method maturity**: Honestly, the method is simple, and I mean that as praise. Two thresholds, a grid search, and a textbook binomial bound. Lemma 1 is close to trivial once stated — the whole content is "routing is a deterministic function of the input" — but the value of a trivial lemma is that it licenses the construction without new assumptions, and papers that skip stating it are the ones that quietly break. My real reservation is elsewhere: the framework needs a labeled calibration set with ground-truth answers for every `(task, candidate model, judge model)` triple, and any change to any of the three requires recalibration. That's a heavy operational tax on a method whose selling point was *reference-free* evaluation. It doesn't eliminate labeled data; it amortizes it, trading a fully-labeled test set for a labeled calibration set plus an abstention rate. That's a real win, but it should be framed as such rather than as escaping references altogether.
+
+**Experimental integrity**: The main claim — FDR at or below `alpha` across all 32 candidate/judge/dataset configurations, 100 splits each, with bands of 0.01 to 0.02 — is exactly what it should be, and a guarantee that holds for a Qwen3-4B judge as well as a 14B one is a meaningful demonstration that the mechanism doesn't secretly depend on judge strength. The coverage gains are large and specific (NQ-Open with a Qwen3-8B judge: 7% to 82% at `alpha = .20`; HotpotQA with Llama-8B: 40% to 85%). Three things give me pause, all visible in their own appendices, which speaks well of them:
+
+First, the **empty-evidence control**. Appendix D.3 runs the Mode 2 prompt with the evidence slot left blank. On HotpotQA at `alpha = .20`, direct Mode 1 gets 5% coverage, empty-evidence Mode 2 gets 57%, and the full retrieval framework gets 74%. So the majority of the headline gain on the hardest dataset comes from the *second forward pass under a different prompt*, not from the retrieved web pages. The paper draws the opposite conclusion from the Self-eval control (which barely helps) and I don't think that's the right read — Self-eval and Empty are different interventions, and Empty is the one that lands. This deserved to be in the main paper, not buried at D.3.
+
+Second, the **selection-vs-certification gap**. The deployed thresholds are chosen by grid search over the calibration data to maximize coverage subject to the bound. Clopper-Pearson is valid for each *fixed* pair; certifying the *selected* pair needs a correction. The authors know this and provide a Bonferroni variant — and its cost is brutal: NQ-Open coverage at `alpha = .20` drops from 0.82 to 0.05, HotpotQA at `alpha = .15` from 0.49 to 0.00. They argue, correctly, that Bonferroni is absurdly loose here because adjacent grid thresholds select nearly identical instance sets, and that the true jointly-valid coverage sits much closer to the pointwise numbers. I believe them. But "the number we report doesn't have the guarantee we proved, and the number that does is near zero" is an uncomfortable place for a paper whose title says *provable*. A data-splitting variant — select thresholds on one half, certify on the other — would cost a factor of two in calibration data and close the hole cleanly. Its absence is the paper's biggest missed opportunity.
+
+Third, **what the ground truth actually is**. The label `e*` comes from an admission function, and the one used for all main results is Qwen2.5-7B-Instruct judging semantic equivalence against references. So the certified quantity is "at most `alpha` of accepted verdicts disagree with a 7B model's opinion of correctness." Table 7 shows how much this matters: on NQ-Open at `alpha = .15`, coverage is 56% under the LLM evaluator and exactly 0% under both exact match and token F1. The framework is agnostic to the choice, and the FDR guarantee holds under all three — but the *meaning* of the guarantee swings enormously, and a reader skimming the abstract will not catch that.
+
+Credit where due on two fronts. The **retrieval drift** experiment is genuinely good practice: they re-queried the same 2,000 questions three months later, found the top-3 URL sets had turned over substantially (mean Jaccard 0.30 on TriviaQA, 0.24 on HotpotQA), applied the old thresholds anyway, and found FDR still controlled and coverage stable. That's the right way to probe the determinism assumption Lemma 1 leans on. And the observation that retrieval *raises* uncertainty on 14-29% of instances — concentrated on multi-hop questions where snippets are partially relevant or sources disagree — is the kind of finding most papers would leave out. It's also the cleanest justification for why `t2` needs to exist at all.
+
+**Writing quality**: Clean, well-organized, appropriately terse. Section 3.2 is a stub — it announces "Uncertainty Quantification" and says only that better separation yields higher coverage, deferring the actual definition to the experiments. Given that predictive entropy at the verdict token is the entire uncertainty story in the main results, and that Appendix D.2 shows a LoRA probe lifting HotpotQA coverage from 0.04 to 0.44 at `alpha = .10`, the UQ choice is doing far more work than its half-page suggests. The section I'd rewrite is the results narrative: promote the empty-evidence baseline and the Bonferroni table out of the appendix and address them head-on. The paper is strong enough to survive its own caveats, and burying them makes it look more fragile than it is.
+
+**Verdict**: weak accept — a clean, correct, genuinely useful construction with an honest empirical program, held back by a certification gap the authors document but don't close, and by a headline gain that their own control suggests is substantially prompt-driven rather than evidence-driven.
+
+## Takeaways
+
+- **Escalate before you abstain.** This is the transferable idea and it costs almost nothing to adopt. Any system with an abstention path — RAG with a "I don't know" fallback, a classifier with a reject option, a triage router — is throwing away instances where a cheap second look would resolve the uncertainty. Add a middle tier with its own threshold and calibrate the two together, not sequentially.
+- **A deterministic router is free in the proof.** If your routing decision is a function of the input alone (no peeking at labels, no adaptivity across instances), you can bolt arbitrarily many branches onto a selective-prediction system and the finite-sample guarantee carries over unchanged. That's a useful design constraint to know about *in advance*, because it tells you exactly which kinds of cleverness are forbidden.
+- **Uncertainty-gated tool calls, priced.** The cost story here is concrete: at `alpha = .20` with a Qwen3-14B judge on TriviaQA, roughly 45% of instances never touch the search API. If you're paying per search call in an agent loop, "retrieve only when the calibrated threshold says you're not confident enough" is a directly implementable spend policy with a stated error budget, not a vibe.
+- **Watch for the empty-evidence control in your own ablations.** Before you attribute a retrieval win to retrieval, run the retrieval prompt with the evidence slot blank. The gap between that and your full system is the actual value of the evidence. This paper's own numbers show the gap is often smaller than it looks.
+- **Ask what your ground truth is before you trust a bound.** A finite-sample guarantee is a statement about agreement with whatever produced your calibration labels. If those labels came from another model, the certificate is about model agreement, and the word "provable" is carrying assumptions that live outside the proof.
+:::
+
+:::zh
+**论文**: [2608.17994](https://arxiv.org/abs/2608.17994)
+**作者**: Sher Badshah, Ali Emami, Hassan Sajjad
+**分类**: cs.CL
+
+## 缺口
+
+LLM-as-a-judge 是在主观任务里长大的。
+MT-Bench、奖励建模、G-Eval，评的都是有用性、无害性、风格这类没有唯一答案的东西，跟人类大致对齐就算合格。
+客观事实评测完全是另一回事：「海绵宝宝里 Jack Kahuna Laguna 是谁配的音」只有一个正确答案，一个没有参考答案的裁判要么真知道，要么在硬编。
+
+于是有两种失效模式，而且都是静默的。
+一种是裁判压根不具备这个知识——新近事件、冷门实体、专业领域——它分不清正确答案和听起来很像的编造。
+另一种是裁判有知识但照样幻觉，给出一个自信的错判。
+两种失效都不会自己举手。
+论文里的定性表格中，裁判斩钉截铁地说 Steve Carell 配的音，还补一句「这是有充分记载的事实」。
+标准答案是 Johnny Depp。
+
+现有方案有三条线，每条都差最后一步。
+**工具增强的裁判**（SAFE、SAGE）给裁判接上搜索引擎，知识缺口是补上了，但检索是无条件的——哪怕裁判早就烂熟于心的题目也照样付一次搜索成本——而且对最终判决错多少依然给不出任何形式化陈述。
+**不确定性量化**（预测熵、自洽性采样）能算出一个与正确率相关的分数，但你拿去卡的那条阈值是某个人调出来的超参；「相关性 + 手选切点」不等于保证。
+**风险受控的选择性预测**（COIN、SConU）确实提供有限样本保证，但它们是为过滤**被测模型**的答案设计的，不是为控制元评测层的错误；最接近这个场景的两篇——Trust or Escalate 和 SCOPE——保证的是**主观成对偏好**上与人类的一致率，跟事实正确性不是同一个量。
+而且以上所有方法都把弃权当成唯一出路，等于把「两秒钟搜一下就能定案」的那批样本白白扔掉。
+
+```
+[问题] 无参考的事实型 QA 评判:
+       裁判要么缺知识, 要么幻觉,
+       两种失效都是静默的
+     |
+     v
+[已有方案各自停在哪]
+  工具增强   ==> 补知识, 但每题都搜, 无错误率保证
+  UQ + 卡阈值 ==> 能标出可疑判决, 但阈值是超参
+  风险受控   ==> 有真保证, 但针对被测答案 /
+                 主观偏好, 且只能弃权
+     |
+     v
+[假设] 不确定性分数对"判对/判错"有足够区分度,
+       且校准集与部署分布 i.i.d.
+     |
+     v
+[方法] 两种模式, 两条阈值, 一次联合校准.
+       U1 <= t1 -> 直接采纳参数化判决;
+       U1 > t1 且 U2 <= t2 -> 采纳检索增强判决;
+       否则弃权. 用 Clopper-Pearson 上置信界
+       约束被接受判决的 FDR
+     |
+     +-- [引理 1] 路由完全由输入决定, 因此被选子集
+     |            的失败指示仍是 i.i.d. Bernoulli,
+     |            单阈值的证明原样迁移
+     |
+     v
+[证据] 32 组配置 (2 被测 x 4 裁判 x 4 数据集),
+       每组 100 次随机划分. FDR 处处不超过 alpha.
+       alpha = .20 时 NQ-Open 覆盖率 .07 -> .82,
+       HotpotQA .40 -> .85
+     |
+     v
+[结论] 不确定应当先触发**升级**, 弃权只是最后一步;
+       而整套三分支策略仍然只需要一张证书
+```
+
+## 增量
+
+**一句话**：以前事实型任务上的 LLM 裁判要么全判（错误率未知），要么一没把握就弃权（有保证，但绝大部分数据被丢掉）；这篇之后，不确定性先把样本路由去查网页、再考虑扔进弃权桶，而这套三分支策略整体仍然带着一个关于「你留下的那些判决」错误率的有限样本上界。
+
+### 核心机制
+
+先看单模式基线。
+裁判 `J` 读入问题和候选答案，输出一个二元判决加一个不确定性分数 `U`。
+这里的分数是判决 token 位置上的预测熵——从产出判决的同一次前向里取出 `True` 与 `False` 两个 token 的对数概率，算二元熵，所以不确定性的额外推理成本是零。
+留出的校准集有 `N` 条带真值标签的样本。
+对任一候选阈值 `t`，你可以数出有多少校准样本会被接受（`U <= t`），其中裁判判错了几条，比值就是经验 FDR。
+关键在于：你不信这个经验比值。
+把计数丢进单侧 Clopper-Pearson 上置信界，选出「**上界**仍低于用户风险水平 `alpha`」的最大 `t`。
+这才是真保证：以至少 `1 - delta` 的概率（对校准集的抽样随机性而言），被接受判决中的真实错误率不超过 `alpha`。
+
+接下来是真正的增量。
+不是一条阈值，而是两条，并且在「自信」和「弃权桶」之间塞进了第二种评测模式。
+Mode 1 是纯参数化知识的裁判。
+Mode 2 用原问题去查搜索引擎，把 top-`k` 结果（标题、摘要、URL，默认 `k = 3`）拼成一段证据接到 prompt 后面，让裁判重判一次。
+推理时：`U1 <= t1` 就直接出 Mode 1 的判决，搜索 API 一次都不碰；`U1 > t1` 但 `U2 <= t2` 就出 Mode 2 的判决；否则弃权，标记为需要人工复核。
+检索成本只花在 Mode 1 收不住的那批样本上。
+
+校准是**联合**的，不是分步的。
+校准阶段对全部 `N` 条样本把两种模式都预先算好，然后对候选阈值**对** `(t1, t2)` 统计选择规模和错误数——只要任一条路接受就算被选中，错误归给实际出判决的那条路。
+再在排序后的唯一不确定性取值上做网格搜索，选出在「Clopper-Pearson 上界不超过 `alpha`」约束下覆盖率最大的那一对，借助前缀和做到 `O(|T1| * |T2|)`。
+理论部分是引理 1：因为 `U1` 和 `U2` 都是输入 `(x, y_hat)` 的确定性函数，路由决策没有引入新的随机性，所以被选子集上的失败指示仍是 i.i.d. Bernoulli，单阈值的 Clopper-Pearson 论证可以一字不改地搬过来。
+不需要额外的分布假设，也没有超出基线所需的共形机制。
+
+```
+校准阶段 (离线, 需要标签)               部署阶段 (在线)
+
+对 D_cal 中每条 (x, y_hat, y*):                (x, y_hat)
+    v1, U1 <- J(x, y_hat)                          |
+    E     <- RETRIEVE(x)                           v
+    v2, U2 <- J(x, y_hat, E)                 +-----------+
+    c1, c2 <- 与 y* 比对                     | Mode 1: J |  纯参数化
+        |                                    +-----------+
+        v                                          |
+  在 (t1, t2) 网格上:                          U1 <= t1 ?
+    m = 任一路接受的样本数                   /            \
+    w = 其中的错判数                        是              否
+    UCB = BetaInv(1-delta; w+1, m-w)        |               |
+    取满足 UCB <= alpha 且 m 最大的一对      v               v
+        |                              [采纳 v1]      +-----------+
+        v                               零搜索成本    | 检索 top-k|
+   (t1_hat, t2_hat)  ---------------->                +-----------+
+                                                            |
+                                                            v
+                                                      +-----------+
+                                                      | Mode 2: J |
+                                                      | (x,y_hat, |
+                                                      |     E)    |
+                                                      +-----------+
+                                                            |
+                                                       U2 <= t2 ?
+                                                      /          \
+                                                    是            否
+                                                     |             |
+                                                     v             v
+                                                [采纳 v2]      [弃权]
+                                                               人工复核
+
+  保证:  Pr( 所有被采纳判决的错误率 <= alpha ) >= 1 - delta
+```
+
+**核喻：带有公开放行标准的机场安检。**
+每位旅客就是一条样本。
+走安检门是 Mode 1——瞬时、免费，而且它产出的不是决定，是一个**读数**。
+安检门上的灵敏度旋钮就是 `t1`。
+读数低于旋钮的旅客直接去登机口，没人在他们身上浪费一次开包。
+
+高于旋钮的全部进二次安检：箱子下传送带、打开、上 X 光。
+这就是检索——更贵、更慢，但它把真实证据摆上台面，而不是靠安检员对「可疑轮廓」的记忆。
+二次安检有自己的旋钮 `t2`。
+过了就能飞。
+没过——X 光看不清、内容物存疑——你不会因为「感觉问题不大」被放行，而是升级给人类主管。
+三种结局，两个旋钮，而最关键的是**第二次查验发生在拒绝之前**，这正是全部要点所在。
+单旋钮系统只能把所有报警的人一律拒掉。
+
+那旋钮该拧到哪？
+不靠安检员的直觉。
+监管方拿一批已知内容物的测试行李跑完两级流程，然后**同时**设定两个旋钮，使得在 95% 置信度下，所有被放行的人（无论走哪条通道）里错放的比例不超过 `alpha`。
+这个「同时」正是两个旋钮不能各调各的原因：把第一个旋钮拧松，更多边缘样本会走进快速通道，那第二个旋钮就必须拧紧，才能守住整体放行标准。
+还要注意证书覆盖的是**被放行的人**，不是所有人——一个谁都不放行的系统天然满足它。
+所以覆盖率必须和 FDR 并排报告，而真正有意思的数字是：到底有多少人真的飞成了。
+
+### 关键概念
+
+- **被接受判决中的 FDR，而不是整体准确率**：被控制的量是 `E[W | U <= t]`，即**在裁判选择了作答这一条件下**的错误率。这比看上去微妙，而条件化恰恰是朴素做法崩掉的地方。假设你的裁判整体准确率 70%，没有任何机制阻止那错的 30% 恰好集中在它最自信的那批样本上——系统性幻觉长的就是这个样子。控制「被接受者中的 FDR」意味着你是在对一个**被筛选出来的子总体**做承诺，而这个子总体是会动的：换阈值就换了承诺对象。另外要看清这个承诺买到了什么。它不会让裁判变聪明。它把一个未知的错误率变成一个旋钮：你说「我能容忍 10% 的错判」，框架告诉你在这个价位上它能评多少比例的数据，剩下的交给人。产品就这么多。
+
+- **Clopper-Pearson 上界，以及为什么经验值不够用**：设想某个阈值下你接受了 10 条校准样本，裁判 10 条全对。经验 FDR：0%。你会据此对外宣称「错误率 0%」吗？当然不会——10 个样本什么都说明不了。Clopper-Pearson 把问题问对了：在 5% 显著性水平下，最大的真实错误率是多少，才让「10 中 0 错」这个观测不算离奇？答案大约是 26%——因为一枚 26% 概率出错的硬币，连续十次干净通过的概率仍有 5%。所以上界报的是 26% 而不是 0%，如果你的 `alpha` 是 10%，这条阈值就被否掉了。这个界是精确且有限样本的：不用正态近似，不靠渐近，`N = 10` 和 `N = 10,000` 一样有效。代价是保守，而保守要花覆盖率来买——这恰恰就是第二种模式存在的意义：把这笔钱赚回来。
+
+- **为什么加了路由证明不塌（以及什么会让它塌）**：担心是合理的。共形类保证在自适应下很脆弱——一旦你让系统**看到结果**再决定怎么处理某条样本，被选中的失败就不再 i.i.d.，界就废了。引理 1 的观察是：这套系统从不这么干。路由决策只依赖 `U1` 和固定阈值，而 `U1` 是 `(x, y_hat)` 的确定性函数。裁判的计算是确定的；检索在给定查询下也被当作确定的。于是「这条样本走了哪条通道」不过是输入的又一个确定性特征，条件化于选择保持了 i.i.d.，Bernoulli 结构得以存活。**会**让它塌的是：依赖真值标签的路由、在校准与部署之间发生漂移的检索（论文实测了这一条，见下）、以及把网格搜索选出的阈值对当作事先指定的单一阈值对去认证（这一条论文自己承认是真缺口）。
+
+## 框架转变
+
+```
+之前（主流）：                        之后（本文）：
+
+  裁判有问必答                          U1 -- 低于 t1 --> 采纳 (免费)
+      |                                  |
+      v                                  +-- 高于 t1 --> 去检索
+  判决, 错误率未知                                        |
+                                                          v
+  或者, 选择性预测:                                U2 -- 低于 t2 --> 采纳
+                                                    |
+  U -- 低于 t --> 采纳                              +-- 高于 t2 --> 弃权
+    |
+    +-- 高于 t --> 弃权                 一张证书同时覆盖两条采纳路径:
+                   (数据白丢)           Pr(FDR <= alpha) >= 1 - delta
+
+  有保证
+  难数据集覆盖率: ~5%                   难数据集覆盖率: ~74-85%
+  不确定 == 放弃                        不确定 == 去查一下
+
+  或者, 工具增强:
+
+  每条样本 --> 检索                     检索开销是定向花的:
+      |                                 TriviaQA 上约 45% 的样本
+      v                                 从不搜索
+  判决, 错误率未知                      (Qwen3-14B 裁判, alpha = .20)
+  100% 数据都付搜索成本
+```
+
+一句话：从「要么弃权要么硬猜」到「先升级、再弃权」，核心转变是把不确定性分数当作**带预算的路由信号**，而不是一个二元的信任开关——并且证明这条额外分支在数学上是免费的。
+
+## 专家评审
+
+**选题眼光**：真问题，边界清楚，位置踩得很准。
+这个领域正在把 LLM 裁判当基础设施用——RLAIF 的奖励信号、智能体自评、自动榜单打分——而可靠性叙事还停在「GPT-4 与人类相关系数 0.8」。
+主观任务上这大概够用。
+事实任务上这是一根没做过应力测试的承重梁。
+「当失效原因是**知识缺口**而非**歧义**时，弃权是一种浪费」这个具体洞察是好的，也只有事后看才显得理所当然。
+轨迹也很清晰：这已经是相邻研究组把共形风险控制拉进评判层的第三四篇了，与工具使用结合是自然的下一个节点。
+
+**方法成熟度**：坦白说，方法很简单，这句话是褒义。
+两条阈值、一次网格搜索、一个教科书级的二项界。
+引理 1 一旦说出来几乎是显然的——全部内容就是「路由是输入的确定性函数」——但一条显然引理的价值在于它让整个构造无需新增假设，而跳过不说的论文往往就是悄悄破功的那批。
+我真正的保留在别处：这套框架需要为每一个 `(任务, 被测模型, 裁判模型)` 三元组准备一份带真值答案的校准集，三者任一变动都要重新校准。
+对一个卖点是**无参考**评测的方法来说，这是相当重的运维税。
+它并没有消灭标注需求，只是把它摊薄了：拿「全量标注的测试集」换成「标注的校准集 + 一个弃权率」。
+这确实是实打实的收益，但应该这样表述，而不是宣称彻底摆脱了参考答案。
+
+**实验诚意**：主结论——32 组「被测/裁判/数据集」配置、每组 100 次划分，FDR 处处不超过 `alpha`，波动带 0.01 到 0.02——正是它该有的样子；而一个在 Qwen3-4B 裁判上和在 14B 上同样成立的保证，有力地说明该机制并不偷偷依赖裁判强弱。
+覆盖率提升也够大够具体（`alpha = .20` 时，NQ-Open 上 Qwen3-8B 裁判从 7% 到 82%；HotpotQA 上 Llama-8B 从 40% 到 85%）。
+但有三处让我停下来，而且全都出现在他们自己的附录里——这一点值得肯定：
+
+第一，**空证据对照**。
+附录 D.3 把 Mode 2 的 prompt 原样跑一遍，只是证据槽留空。
+HotpotQA、`alpha = .20`：Mode 1 直判覆盖率 5%，空证据 Mode 2 覆盖率 57%，完整检索框架 74%。
+也就是说，最难数据集上的大部分增益来自**换了 prompt 的第二次前向**，而不是那些网页。
+论文从 Self-eval 对照（几乎没用）得出了相反结论，我认为读法不对——Self-eval 和 Empty 是两种不同的干预，真正击中的是 Empty。
+这该进正文，不该埋在 D.3。
+
+第二，**「选出来的」和「被认证的」不是同一对阈值**。
+部署阈值是在校准数据上做网格搜索、以覆盖率最大为目标选出来的。
+Clopper-Pearson 对每一个**固定**阈值对有效；要认证**被选中**的那一对需要做校正。
+作者知道这件事，也给了 Bonferroni 变体——代价是毁灭性的：NQ-Open 在 `alpha = .20` 覆盖率从 0.82 掉到 0.05，HotpotQA 在 `alpha = .15` 从 0.49 掉到 0.00。
+他们辩解说 Bonferroni 在这里松得离谱，因为相邻网格阈值选中的样本集几乎相同，真实的联合有效覆盖率离逐点数值近得多。
+这个辩解我信。
+但对一篇标题里写着 *provable* 的论文来说，「我们报的数没有我们证的保证，而有保证的那个数接近零」是个不太舒服的位置。
+一个数据划分变体——在一半上选阈值、在另一半上认证——只需付出两倍校准数据，就能干净地补上这个洞。
+它的缺席是这篇论文最大的错失。
+
+第三，**真值到底是什么**。
+标签 `e*` 来自一个 admission function，主结果全程用的是 Qwen2.5-7B-Instruct 判断语义等价。
+所以被认证的量其实是「被接受判决中，与一个 7B 模型对正确性的看法不一致的比例不超过 `alpha`」。
+表 7 显示这有多要命：NQ-Open、`alpha = .15`，用 LLM evaluator 覆盖率 56%，用精确匹配和 token F1 都是 0%。
+框架对这个选择是不可知的，三种标准下 FDR 保证都成立——但保证的**含义**摆动极大，只扫摘要的读者不会意识到这一点。
+
+有两处必须给分。
+**检索漂移**实验是真正的好实践：三个月后重查同样 2,000 道题，发现 top-3 URL 集合换血明显（TriviaQA 平均 Jaccard 0.30，HotpotQA 0.24），然后照样套用旧阈值，结果 FDR 仍受控、覆盖率基本稳定。
+这正是探测引理 1 所依赖的确定性假设的正确方式。
+另外「检索在 14-29% 的样本上反而**抬高**了不确定性」这个发现——集中在多跳问题上，因为摘要只部分相关或来源互相打架——多数论文会选择不写。
+它也是 `t2` 为什么必须存在的最干净理由。
+
+**写作功力**：干净、结构清楚、篇幅克制。
+3.2 节是个占位符：标题写着「不确定性量化」，正文只说了「区分度越好覆盖率越高」，真正的定义推给了实验部分。
+考虑到判决 token 上的预测熵就是主结果里全部的不确定性故事，而附录 D.2 又显示一个 LoRA 探针能把 HotpotQA 在 `alpha = .10` 的覆盖率从 0.04 抬到 0.44，UQ 的选择所承担的分量远超它那半页篇幅。
+我会重写的是结果叙事：把空证据基线和 Bonferroni 表格从附录提到正文，正面回应。
+这篇论文的分量足以扛住自己的 caveat，藏起来反而显得比实际更脆弱。
+
+**判决**：弱接收——构造干净、正确、确有用处，实证也做得诚实；扣分在于一个作者自己记录却没有闭合的认证缺口，以及一个被他们自己的对照实验指出「主要来自 prompt 而非证据」的头条增益。
+
+## 要点总结
+
+- **先升级，再弃权。** 这是最可迁移的一条，而且采纳成本几乎为零。任何带弃权路径的系统——带「我不知道」兜底的 RAG、带 reject option 的分类器、分诊路由器——都在白扔那些「再看一眼就能定案」的样本。加一个带自己阈值的中间层，并且把两条阈值**联合**校准，而不是分步调。
+- **确定性路由在证明里是免费的。** 只要路由决策只依赖输入（不偷看标签、样本之间不自适应），你可以往选择性预测系统上挂任意多条分支，有限样本保证原样成立。这个设计约束值得**提前**知道，因为它直接告诉你哪些花招是被禁止的。
+- **由不确定性门控的工具调用，是可以定价的。** 这里的成本故事很具体：`alpha = .20`、Qwen3-14B 裁判、TriviaQA 上约 45% 的样本从不碰搜索 API。如果你在智能体循环里按次付搜索费，「只在校准阈值判定你不够自信时才检索」是一条可直接落地、且带明确错误预算的花钱策略，不是拍脑袋。
+- **在自己的消融里加上空证据对照。** 把检索带来的提升归功于检索之前，先把检索 prompt 的证据槽留空跑一遍。它与完整系统之间的差距，才是证据的真实价值。这篇论文自己的数字就说明，这个差距常常比看上去小。
+- **信一个界之前，先问清楚你的真值是什么。** 有限样本保证是关于「与产出校准标签的那个东西保持一致」的陈述。如果那些标签来自另一个模型，这张证书说的就是模型间的一致性，而 *provable* 这个词正在承载一堆活在证明之外的假设。
+:::

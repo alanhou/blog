@@ -1,0 +1,435 @@
+---
+title:
+  en: "StagedWorkspace: The Agent Is Editing a File It Never Actually Read"
+  zh: "StagedWorkspace：智能体改的那个文件，它其实没读过"
+description:
+  en: "Coding agents got a shared-state contract for free from git. Everyone doing PDFs, spreadsheets and slides has been quietly letting search, edits and submission drift to different versions of the same file — and StagedWorkspace shows that closing that gap is worth 8-12 points."
+  zh: "编程智能体从 git 那里白捡了一份共享状态契约；而做 PDF、表格、幻灯片的智能体一直在让检索、编辑和提交指向同一个文件的不同版本。StagedWorkspace 证明，把这个缝合上值 8 到 12 分。"
+date: 2026-08-20
+tags: ["arxiv", "ai", "cs.ai"]
+image: "/arxiv-visuals/arxiv-stagedworkspace-a-versioned-workspace-for-knowledge.png"
+---
+
+:::en
+**Paper**: [2608.18050](https://arxiv.org/abs/2608.18050)
+**Authors**: Yining Hua, Hongbin Na, Yifan Zhou, Akshay Kalose, Cyrus Ayubcha, Levi Lian
+**Categories**: cs.AI
+
+## The Gap
+
+Software-engineering agents solved a problem they never had to name. SWE-bench hands the agent a repository checkout; SWE-agent gives it patch-oriented tools over that same checkout. Search, edit, diff and test all resolve against one state, and everybody — agent, grader, human reviewer — agrees on what "the current version" means. That agreement came free with git and with the fact that source code is line-addressable text.
+
+Move to PDFs, spreadsheets, slide decks, notebooks and mixed-format project folders, and the free lunch ends. Office agents typically run a parser that flattens files into searchable text, and that parsed cache is a *copy*. The agent searches the copy, opens the original, edits the original, and submits the original. Nothing in that loop forces those four things to refer to the same version. The paper's framing of the failure is blunt and correct: an agent can retrieve a column definition from one workbook version, edit a different version in its sandbox, and hand in a deliverable that contradicts the evidence it cited.
+
+The authors trace this to three interface trade-offs the field has been picking between rather than resolving. Artifact-only harnesses keep the true files but make search miserable — the agent pages through 700 PDFs burning context. Parsed-only harnesses give you search but lose layout hierarchy, formulas and anything visual, and you cannot execute a parsed spreadsheet. And an unversioned mutable workspace lets an agent overwrite or delete files with no durable diff for anyone to review. StagedWorkspace's move is to name the missing thing — a **workspace-state contract** — and then argue it is not a comfort feature but a measurable experimental variable that current benchmarks leave uncontrolled.
+
+```
+[PROBLEM] agent searches a parsed copy, edits the native file,
+          submits a third thing. no rule ties them together.
+     |
+     v
+[WHY IT PERSISTS] coding agents inherited the contract from
+                  git + line-addressable text. binary office
+                  files have no equivalent, so harnesses pick
+                  ONE view and eat the other's weakness
+     |
+     v
+[CLAIM] every view (search / edit / review / submit) should
+        name the workspace version it exposes or modifies
+     |
+     +----------------+------------------+
+     v                v                  v
+[W_t native]    [C_t parsed]        [D_t = diff(W_0, W_t)]
+ authoritative   hash-keyed          journaled review
+ execute+submit  stale-markable      surface
+     |                |                  |
+     +----------------+------------------+
+                      v
+[EVIDENCE] fixed-harness paired ablations on OfficeQA Pro
+           (~697 Treasury PDFs) and APEX-Agents (480 rubric
+           tasks, ~166 files each). dual view beats the worse
+           single view by 8.3-12.1 Pass@1 / 4.7-9.2 rubric pts
+                      |
+                      v
+[CONCLUSION] workspace state is an experimental variable, and
+             benchmarks that ignore it confound interface with
+             model capability
+```
+
+## The Increment
+
+**One sentence**: Before, "give the agent office files" was an unexamined plumbing decision made differently by every harness; after, it is a controlled variable with paired ablations attached, plus a concrete mechanism — content-hash-keyed parsed records — that keeps the searchable view honest about which version it is showing.
+
+### Core Mechanism
+
+The state model is three lines and genuinely is the whole idea. At a synchronization point `t`, taken after each batch of tool calls, the workspace is `W_t` (the current native files, authoritative for execution and submission), `C_t` (parsed records, each tagged with the source path **and content hash** of the file version it was parsed from), and `D_t = delta(W_0, W_t)` (the review diff against the starting state). Parsed tools read `C_t`. Native tools read and edit `W_t`. Review tools expose `D_t`. Crucially, `C_t` and `D_t` are *derived views*, not independent document copies — there is exactly one authoritative artifact tree.
+
+The synchronization rule is the part worth stealing. After every mutating tool batch, the harness hash-scans the sandbox. Files whose hashes match reuse their cached parsed records untouched. Files whose hashes changed have their parsed records **marked stale immediately** and queued for asynchronous re-parsing. The freshness label is agent-visible: a parsed read during the re-parse window still returns the old value, but it returns it stamped `stale` rather than silently pretending to be current. That distinction — wrong-and-labeled versus wrong-and-confident — is the entire safety story, and it is why the design does not need re-parsing to be fast. Underneath, the workspace also keeps an accepted-artifact tree and a staged-change journal, which is what lets it detect stale edits, hold pending changes for review, and promote or roll back.
+
+The diff surface is deliberately format-specific rather than universal: text files get line diffs, spreadsheets expose row- and cell-level changes, slide decks expose slide-level changes, and unsupported binaries fall back to before/after previews. This is the pragmatic concession to the fact that `git diff` has nothing to say about a `.pptx`.
+
+```
+  turn loop, one synchronization point:
+
+  [ sandbox hydrated from W_t ]
+            |
+            v
+  ReAct: reason -> tool batch -> observe    (budget: 250 calls)
+            |
+            v
+  +--------------------------------------------------+
+  |  HASH SCAN over sandbox                          |
+  |                                                  |
+  |  report.pdf    hash match     -> reuse record    |
+  |  budget.xlsx   hash MISMATCH  -> mark stale,     |
+  |                                  queue re-parse  |
+  |  memo.docx     hash match     -> reuse record    |
+  +--------------------------------------------------+
+            |
+            v
+        W_t     -> W_(t+1)
+        C_(t+1)  = sync(C_t, W_(t+1))
+        D_(t+1)  = delta(W_0, W_(t+1))
+            |
+            v
+  three agent-facing views over ONE state:
+
+     parsed C        native W          review D
+   search, grep,   open, render,    workspace_diff,
+   parsed read     execute, edit    file_diff
+        |               |                 |
+        +-------+-------+--------+--------+
+                v                v
+          evidence used   ==  artifact submitted
+
+
+  the stale window, concretely (cell B12: 4.2 -> 4.6):
+
+    before edit      re-parse pending      after re-parse
+    -----------      ----------------      --------------
+    source  4.2      source  4.6           source  4.6
+    cached  h_before cached  h_before      cached  h_after
+    read -> 4.2      read -> 4.2           read -> 4.6
+    [current]        [STALE]               [current]
+                        ^
+                        +-- wrong value, but *labeled* wrong
+```
+
+**The metaphor: a construction site with as-built drawings.** The building under construction is `W_t` — the only thing that actually exists and the only thing that gets handed over. The drawing set pinned up in the site office is `C_t`: a flat, searchable, indexable representation you consult precisely because walking the whole building to find one dimension is absurd. The punch list is `D_t`: what changed between the day work started and today.
+
+The failure mode StagedWorkspace attacks is the one that ruins real projects. Somebody moves a wall on Tuesday. The drawing in the office still shows the wall where it was, and it looks perfectly authoritative — clean lines, title block, revision number. On Thursday a subcontractor reads that drawing, orders ductwork to the old dimension, and the mistake is not discovered until handover. Nobody lied; the drawing simply belonged to a version of the building that no longer exists.
+
+The content hash is the revision stamp. Every drawing carries the revision of the building it was traced from, and a foreman comparing stamps can tell in one glance whether it is live. When the wall moves, the drawing does not get quietly corrected later — it gets a big red **SUPERSEDED** stamp *immediately*, while the draftsman is still redrawing it. A subcontractor reading it during that window still sees the old wall, but sees the stamp too, and knows to go look at the building. The punch-list walkthrough before handover is the review-diff arm: you walk the client through every change against the original scope before you hand over the keys. And "artifact-only" versus "parsed-only" are the two bad site policies this replaces: burn the drawings and make everyone walk the building, or lock the building and let everyone work off drawings they cannot verify.
+
+### Key Concepts
+
+- **Workspace-state contract**: A contract here means an obligation the interface takes on, not a legal document. The obligation is: every observation and every mutation must be able to name which version of the workspace it refers to. Coding agents have this without thinking about it — `grep`, your editor, and `pytest` all see the same working tree, so "the code" is unambiguous. The moment your search index is a separately-built artifact, "the file" splits into two nouns that can disagree, and the contract is what forbids that disagreement from being silent. The paper's contribution is less the mechanism (content hashing is 1970s technology) than the insistence that this is a thing benchmarks must control rather than a thing each harness improvises.
+
+- **Hash-keyed cache invalidation, and why the *stale label* is the load-bearing part**: The obvious engineering answer to "the cache is out of date" is "re-parse faster." That is the wrong axis. Re-parsing a 200-page PDF is slow and always will be, so any system that relies on freshness-by-speed has a window where it is confidently wrong. StagedWorkspace instead makes staleness a first-class, agent-visible property. The value returned during the window is identical either way; what changes is whether the model knows to distrust it. A model that reads `B12 = 4.2 [stale]` can decide to open the native workbook; a model that reads `B12 = 4.2` cannot. Invalidation is also per-record, keyed on path plus hash, so editing one workbook in a 166-file project folder does not nuke the index for the other 165.
+
+- **Dual access, and why "which single view is worse" flips between benchmarks**: The two benchmarks stress opposite halves. OfficeQA Pro is find-and-read over ~697 Treasury Bulletin PDFs, so parsed search is the load-bearing tool and the weak arm is artifact-only (the agent can open PDFs but has no indexed way to locate the right table). APEX-Agents is deliverable-heavy professional work across cross-format project folders, so native execution is load-bearing and the weak arm is parsed-only (the agent finds the instructions but cannot run pandas on a parsed spreadsheet). The paper's own trace example makes this crisp: on a HarFeast task, parsed search identifies what the survey columns mean, and native execution applies that reading to the same 3,000-row workbook that will be graded. Neither view alone completes the task, and that is the actual argument for dual access — not that more tools are better.
+
+## Framework Shift
+
+```
+Before (mainstream office-agent harness):   After (StagedWorkspace):
+
+  pick ONE view, eat its weakness             ONE authoritative state W_t
+                                                       |
+  [ parser ] --build--> [ index ]              +-------+-------+
+       ^                    ^                  v       v       v
+       |                    |               parsed  native  review
+    (once)              agent searches       C_t     W_t     D_t
+       |                    |                  |       |       |
+  [ native files ] <--edits-+                  +---+---+---+---+
+       |                                           |       |
+       | (index never told)                    every record carries
+       v                                       the source HASH it
+  [ submitted file ]                           came from
+                                                   |
+  search saw v1                            hash mismatch ==> STALE
+  edit hit v2                              (visible to the agent)
+  submit was v3                                    |
+  ...and nothing noticed                           v
+                                           search, edit, review and
+  interface = plumbing detail              submit all name a version
+
+                                           interface = measured variable
+```
+
+From "which view do we give the agent" to "which version does each view name," the core shift is treating the workspace itself as state under contract rather than as a pile of files the tools happen to point at.
+
+## Expert Assessment
+
+**Problem choice**: Real, and the diagnosis is better than the solution. The observation that the coding-agent world got a state contract for free from git — and that everyone else has been improvising it — is one of those things that is obvious the second someone says it and was apparently not said clearly before. The broader claim is the sharper one: if harnesses differ in an uncontrolled way on workspace access, then cross-harness leaderboard comparisons for office and workplace agents are partly measuring plumbing. The paper's own Discussion makes this point about small-versus-large model gaps, and it deserves more attention than the system does.
+
+**Method maturity**: The mechanism is deliberately boring, which I count in its favor, but let us be honest that the novelty is in the framing and the measurement, not the engineering. Content-hash-keyed cache invalidation with a stale flag is standard build-system practice; the derived-view discipline is standard database practice. The one genuinely thoughtful design choice is exposing staleness to the model instead of chasing freshness — that is the right call and the paper does not oversell it. What is missing is a comparison against the cheap alternatives: a naive mtime-based invalidation, or the dumbest baseline of all, re-parse-on-every-read for the file you just touched. On task folders of ~166 files where you edit two, I would like to know how much of the gain survives against that strawman. Also unaddressed: what happens when the parser itself is nondeterministic, so a re-parse of an unchanged-in-substance file produces a different record.
+
+**Experimental integrity**: Mixed, and readers should know exactly which numbers to trust. The paired three-arm ablations are the good part — model, prompt, parser, retriever, grader, file tracker and 250-call tool budget all held fixed, 10,000-resample paired bootstrap over matched items, three attempts per task for the ablation models. That is careful work, and the authors are commendably explicit that only the ablations support causal reads. But the abstract leads with "63.9% versus published 29.3%," and that is a non-paired cross-harness comparison against a row that used a different agent, retrieval backend and parser. The paper says so in the Limitations; the abstract does not. The honest headline is the paired one, and it is smaller: 8.3-12.1 Pass@1 on OfficeQA against artifact-only, 4.7-9.2 rubric points on APEX against parsed-only.
+
+Two more things a careful reader should catch. First, the abstract's phrase "the more limiting single view" is doing quiet work — the identity of that arm *flips* between benchmarks, so the range 8.3-12.1 and the range 4.7-9.2 are measured against different comparators. The paper is transparent about this in Section 4.2 and the reason is well-argued, but the abstract's phrasing lets it read as a single consistent effect. Second, dual versus artifact-only on APEX has positive paired lifts for every model but bootstrap p values above 0.05, and several OfficeQA lifts have half-widths close to the effect (Gemini 3.1 Pro: +8.3 with a 7.9 half-width). The strongest claims are the ones with the smallest margins. The review-axis result is weaker still: 57 file-editing tasks, roughly 12% of APEX, reported without intervals or p values, with per-model lifts from +2.5 to +8.5 that do not obviously separate from noise at that n. The authors themselves call it a supporting mechanism rather than the whole system, which is the right posture.
+
+Credit where due on two counts: the efficiency diagnostics genuinely head off the "you just spent more compute" objection — GPT-5.4 dual is essentially cost-matched with artifact-only ($0.84 vs $0.85 per question) while scoring higher — and the failure analysis is unusually unflattering to the paper's own thesis. Reporting that 188 of 452 evaluated APEX tasks are all-arm zeros, meaning they do not move under any read-axis toggle, is exactly the number a promotional paper would bury.
+
+**Writing quality**: The Methods section is clean and the state model is stated with admirable economy. The abstract is the weak link and is where the corners got cut: it foregrounds the least-controlled comparison, compresses two different ablation contrasts into one phrase, and omits that the review-axis evidence is a small unlabelled subset. Rewriting the abstract to lead with the paired ablations — which are the paper's real achievement — would raise the whole thing, because the careful work is already done and is being undersold by a headline that invites the skepticism it does not deserve. Section 2 is also long for what it establishes; the entire related-work argument is "everyone has half of this," and it takes four dense paragraphs to say it.
+
+**Verdict**: weak accept — a genuinely useful reframing with careful paired ablations underneath, held back by an abstract that oversells with cross-harness numbers the paper itself declines to defend.
+
+## Takeaways
+
+Things that transfer whether or not you care about office agents:
+
+- **Make staleness visible instead of racing to eliminate it.** The generalizable move is admitting that any derived view — a search index, an embedding store, a summary cache, a materialized dashboard — has a window where it is wrong, and that labeling the window is cheaper and more robust than shrinking it. If your RAG index lags your source of truth, returning `[possibly stale, source changed 4s ago]` gives a model something to act on. Returning the stale value bare does not.
+
+- **Key cache records on content hash plus path, and invalidate per record.** Sounds trivial until you notice how many agent stacks rebuild or trust the whole index. On a 166-file project folder where the agent touched two files, per-record invalidation is the difference between a 2-file re-parse and either a full rebuild or silent corruption.
+
+- **Make the diff a tool the model can call before it submits.** Even the paper's weakest result points somewhere useful: letting the agent see what it actually changed, right before handoff, is cheap to implement and the observed lift was largest for the weaker model. A diff proves nothing about semantic correctness, but it is a compact last chance to compare intended edits against actual ones.
+
+- **Format-specific diffs beat no diffs.** Row/cell diffs for spreadsheets, slide-level diffs for decks, before/after previews for opaque binaries. Waiting for a universal answer to "what is a diff for a `.pptx`" means shipping nothing.
+
+- **For evaluation people, the real payload**: if you are benchmarking agents on file-based work, publish which view of the workspace each arm had. Otherwise your leaderboard gap between a small model and a large one may partly be a gap between two parsers. The paper's finding that non-frontier models gain most from a synchronized workspace, while frontier models barely move, is precisely the interaction that makes uncontrolled harnesses misleading.
+:::
+
+:::zh
+**论文**: [2608.18050](https://arxiv.org/abs/2608.18050)
+**作者**: Yining Hua, Hongbin Na, Yifan Zhou, Akshay Kalose, Cyrus Ayubcha, Levi Lian
+**分类**: cs.AI
+
+## 缺口
+
+编程智能体解决了一个它们从来没需要命名的问题。
+SWE-bench 递给智能体一个仓库 checkout，SWE-agent 在同一个 checkout 上提供面向 patch 的工具。
+搜索、编辑、diff、测试全都落在同一份状态上，智能体、评分器、人类审阅者对"当前版本"是什么有共识。
+这份共识是 git 白送的，前提是源码本身是可按行寻址的纯文本。
+
+换到 PDF、电子表格、幻灯片、notebook 和混合格式的项目文件夹，白送的午餐就没了。
+办公智能体通常跑一个解析器，把文件压平成可检索的文本——那份解析缓存是一个**副本**。
+智能体在副本上检索，打开原件，编辑原件，提交原件。
+这条链路里没有任何东西强制这四件事指向同一个版本。
+论文对失败模式的描述直白且准确：智能体可以从工作簿的一个版本里读出列的定义，在沙箱里编辑另一个版本，然后交出一份跟它引用的证据自相矛盾的成果。
+
+作者把根因归到三个接口权衡上——领域一直在这三者之间做选择，而不是把它们解决掉。
+只给原生文件的方案保住了真实文件，但检索极其痛苦，智能体得翻 700 份 PDF 把上下文烧光。
+只给解析视图的方案有检索，但丢掉版式层级、公式和一切视觉证据，而且你没法执行一个被解析过的表格。
+而一个无版本的可变工作区，允许智能体覆盖或删除文件，不留下任何可供审阅的持久 diff。
+StagedWorkspace 的动作是给缺失的那个东西起名——**工作区状态契约**——然后论证它不是锦上添花的功能，而是一个可测量的实验变量，且当前基准根本没有控制它。
+
+```
+[问题] 智能体在解析副本上检索，改动原生文件，
+       提交第三样东西。没有规则把三者绑在一起。
+     |
+     v
+[为何长期存在] 编程智能体从 git + 行寻址文本那里
+               白捡了契约。二进制办公文件没有对应物，
+               于是各家 harness 各挑一种视图，
+               并各自吞下另一种的弱点
+     |
+     v
+[主张] 每一种视图（检索 / 编辑 / 审阅 / 提交）
+       都必须指明自己暴露或修改的是哪个版本
+     |
+     +----------------+------------------+
+     v                v                  v
+[W_t 原生]       [C_t 解析]         [D_t = diff(W_0, W_t)]
+ 权威状态         按 hash 索引       带日志的审阅面
+ 执行 + 提交      可标记 stale
+     |                |                  |
+     +----------------+------------------+
+                      v
+[证据] 固定 harness 的配对消融：OfficeQA Pro
+       （约 697 份财政部 PDF）与 APEX-Agents
+       （480 个 rubric 任务，每个约 166 个文件）。
+       双视图比更差的那个单视图高 8.3-12.1 Pass@1
+       / 4.7-9.2 rubric 分
+                      |
+                      v
+[结论] 工作区状态是一个实验变量；忽略它的基准
+       会把接口差异和模型能力混在一起
+```
+
+## 增量
+
+**一句话**: 之前，"把办公文件交给智能体"是一个没人细究的管道决策，每家 harness 各做各的；之后，它成了一个带配对消融的受控变量，外加一个具体机制——用内容哈希索引解析记录——让可检索的那份视图对"自己是哪个版本"保持诚实。
+
+### 核心机制
+
+状态模型只有三行，而它确实就是全部想法。
+在同步点 `t`（每批工具调用之后取一次），工作区被表示为 `W_t`（当前原生文件，执行与提交的权威状态）、`C_t`（解析记录，每条都带上它被解析自的那个文件版本的路径**和内容哈希**）、以及 `D_t = delta(W_0, W_t)`（相对起始状态的审阅 diff）。
+解析工具读 `C_t`，原生工具读写 `W_t`，审阅工具暴露 `D_t`。
+关键在于：`C_t` 和 `D_t` 是**派生视图**，不是独立的文档副本——权威的产物树有且只有一棵。
+
+真正值得抄走的是同步规则。
+每批会产生变更的工具调用之后，harness 对沙箱做一次哈希扫描。
+哈希未变的文件原封不动复用缓存记录；哈希变了的文件，其解析记录**立刻被标记为 stale**，并排队做异步重解析。
+新鲜度标签对智能体可见：在重解析窗口内的一次解析读取仍然返回旧值，但这个旧值带着 `stale` 戳，而不是不动声色地假装自己是最新的。
+这个区别——"错但被标注"对"错且自信"——就是全部的安全故事，也是这套设计不需要重解析很快的原因。
+底层还维护着一棵已接受产物树和一份暂存变更日志，这让系统能检测过期编辑、把待定变更挂起供审阅、以及提升或回滚。
+
+diff 面刻意做成按格式区分而非统一：文本文件用行 diff，表格暴露行级和单元格级变更，幻灯片暴露页级变更，不支持的二进制退化为前后预览。
+这是对现实的务实让步：`git diff` 对一个 `.pptx` 无话可说。
+
+```
+  一个同步点的回合循环：
+
+  [ 沙箱由 W_t 注水 ]
+            |
+            v
+  ReAct: 推理 -> 工具批 -> 观察      (预算: 250 次调用)
+            |
+            v
+  +--------------------------------------------------+
+  |  对沙箱做哈希扫描                                 |
+  |                                                  |
+  |  report.pdf    哈希匹配      -> 复用缓存记录      |
+  |  budget.xlsx   哈希不匹配    -> 标记 stale,       |
+  |                                 排队重解析        |
+  |  memo.docx     哈希匹配      -> 复用缓存记录      |
+  +--------------------------------------------------+
+            |
+            v
+        W_t     -> W_(t+1)
+        C_(t+1)  = sync(C_t, W_(t+1))
+        D_(t+1)  = delta(W_0, W_(t+1))
+            |
+            v
+  同一份状态之上的三种面向智能体的视图：
+
+     解析 C          原生 W           审阅 D
+   search, grep,   打开, 渲染,     workspace_diff,
+   解析读取         执行, 编辑       file_diff
+        |               |                 |
+        +-------+-------+--------+--------+
+                v                v
+          所用证据      ==      所交产物
+
+
+  stale 窗口的具体样子（单元格 B12: 4.2 -> 4.6）：
+
+    编辑之前          重解析进行中         重解析之后
+    --------          ------------         ----------
+    源值    4.2       源值    4.6          源值    4.6
+    缓存 h_before     缓存 h_before        缓存 h_after
+    读到 -> 4.2       读到 -> 4.2          读到 -> 4.6
+    [current]         [STALE]              [current]
+                         ^
+                         +-- 值是错的，但被"标注"为错
+```
+
+**核喻：带竣工图的施工现场。**
+在建的那栋楼是 `W_t`——唯一真实存在、也是唯一最终交付的东西。
+钉在工地办公室墙上的那套图纸是 `C_t`：一份扁平、可检索、可索引的表示，你依赖它，正是因为为了查一个尺寸而把整栋楼走一遍太荒谬。
+整改清单是 `D_t`：从开工那天到今天之间改了什么。
+
+StagedWorkspace 要打的那个失败模式，正是毁掉真实工程的那一个。
+周二有人挪了一堵墙。
+办公室里那张图还画着墙的旧位置，而且看上去权威得无可挑剔——线条干净、有图签栏、有版次号。
+周四一个分包商照着这张图，按旧尺寸订了风管，错误直到交付才被发现。
+没有人撒谎；那张图只是属于一个已经不存在的楼的版本。
+
+内容哈希就是版次戳。
+每张图都带着它所描摹的那个楼的版次，工头对一眼戳就知道它还活着没有。
+墙一挪，图不是过一会儿被悄悄改掉——它**立刻**被盖上一个大红的 **SUPERSEDED**，而此时绘图员还在重画。
+在这个窗口里读图的分包商依然看到旧墙，但同时看到了那个戳，于是知道该去现场看楼。
+交付前的整改清单走查就是审阅 diff 那条轴：交钥匙之前，你带着业主把相对原始范围的每一处变更走一遍。
+而"只给原生"和"只给解析"就是这套方案取代的两种糟糕工地政策：烧掉图纸让所有人走楼，或者锁死楼让所有人对着无法核验的图纸干活。
+
+### 关键概念
+
+- **工作区状态契约**：这里的"契约"指接口自己承担的义务，不是法律文件。义务是：每一次观察和每一次修改，都必须能指明它针对的是工作区的哪个版本。编程智能体不用想就有这个东西——`grep`、编辑器和 `pytest` 看到的是同一棵工作树，所以"代码"这个词没有歧义。一旦你的检索索引是一个单独构建出来的产物，"文件"就裂成两个可以互相矛盾的名词，而契约就是禁止这种矛盾静默发生的东西。这篇论文的贡献与其说是机制（内容哈希是 1970 年代的技术），不如说是坚持：这是基准必须控制的东西，而不是每个 harness 各自即兴发挥的东西。
+
+- **按哈希失效，以及为什么承重的是那个 stale 标签**：对"缓存过期了"这件事，工程上最顺手的回答是"重解析得更快点"。这个轴是错的。重解析一份 200 页的 PDF 很慢，而且永远会慢，所以任何靠"快到来不及过期"的系统，都存在一个它自信地给出错误答案的窗口。StagedWorkspace 反过来把 stale 做成一等的、对智能体可见的属性。窗口内返回的值两种做法完全一样；变的是模型知不知道该怀疑它。一个读到 `B12 = 4.2 [stale]` 的模型可以决定去打开原生工作簿；一个只读到 `B12 = 4.2` 的模型不能。失效还是按记录粒度的，键是路径加哈希，所以在一个 166 个文件的项目文件夹里改一个工作簿，不会把另外 165 个的索引一起炸掉。
+
+- **双视图，以及"哪一个单视图更差"为什么会在两个基准之间反转**：两个基准压的是相反的两半。OfficeQA Pro 是在约 697 份财政部公报 PDF 里做"找到并读懂"，所以解析检索是承重工具，弱的那条臂是"只给原生"（智能体能打开 PDF，但没有索引化的手段定位到正确的表格）。APEX-Agents 是跨格式项目文件夹里的重交付专业工作，所以原生执行是承重的，弱的那条臂是"只给解析"（智能体找得到指令，但没法在被解析过的表格上跑 pandas）。论文自己的 trace 例子讲得很清楚：在一个 HarFeast 任务里，解析检索确定了调查问卷各列的含义，原生执行把这个解读应用到那份**将被评分的**三千行工作簿上。任一视图单独都完不成任务，这才是双视图的真正论据——而不是"工具越多越好"。
+
+## 框架转变
+
+```
+之前（主流办公智能体 harness）：           之后（StagedWorkspace）：
+
+  挑一种视图, 吞下它的弱点                  唯一权威状态 W_t
+                                                    |
+  [ 解析器 ] --构建--> [ 索引 ]              +-------+-------+
+       ^                   ^                 v       v       v
+       |                   |               解析   原生    审阅
+    (一次性)          智能体检索            C_t     W_t     D_t
+       |                   |                 |       |       |
+  [ 原生文件 ] <--编辑-----+                 +---+---+---+---+
+       |                                         |       |
+       | (索引从未被告知)                    每条记录都带着
+       v                                     它来源的 HASH
+  [ 提交的文件 ]                                  |
+                                          哈希不匹配 ==> STALE
+  检索看到 v1                               (对智能体可见)
+  编辑打在 v2                                     |
+  提交的是 v3                                     v
+  ...而且没人发现                       检索、编辑、审阅、提交
+                                        全都指明一个版本
+  接口 = 管道细节
+                                        接口 = 被测量的变量
+```
+
+一句话：从"给智能体哪种视图"到"每种视图指明哪个版本"，核心转变是把工作区本身当作受契约约束的状态，而不是一堆工具碰巧指向的文件。
+
+## 专家评审
+
+**选题眼光**: 真问题，而且诊断比方案更出色。
+"编程智能体从 git 那里白拿了一份状态契约，而其他所有人一直在即兴发挥"——这种观察属于被人说破的一瞬间就显得理所当然，但此前似乎确实没人说清楚。
+更锋利的是那个更宽的主张：如果各家 harness 在工作区访问方式上以不受控的方式互不相同，那么办公与职场智能体的跨 harness 排行榜比较，有一部分是在测量管道。
+论文自己在讨论部分就小模型与大模型的差距提出了这一点，它值得比这套系统本身更多的关注。
+
+**方法成熟度**: 机制刻意做得很无聊，这一点我算作优点，但也得诚实：新意在于框架和测量，不在工程。
+带 stale 标记的内容哈希缓存失效是构建系统的标准做法；派生视图的纪律是数据库的标准做法。
+唯一真正有想法的设计选择，是把 stale 暴露给模型而不是去追求新鲜度——这个判断是对的，而且论文没有过度吹嘘它。
+缺的是跟廉价替代方案的对比：基于 mtime 的朴素失效，或者最笨的那个基线——对刚碰过的文件在每次读取时重解析。
+在约 166 个文件、只改了两个的任务文件夹上，我很想知道相对这个稻草人还能剩下多少收益。
+另一个没被处理的问题：如果解析器本身不确定，对一个实质未变的文件重解析会产生不同的记录，怎么办。
+
+**实验诚意**: 好坏参半，读者应当清楚该信哪些数字。
+配对三臂消融是好的那部分——模型、prompt、解析器、检索器、评分器、文件追踪和 250 次工具调用预算全部固定，10000 次重采样的配对 bootstrap 在配对条目上进行，消融模型每任务三次独立尝试。
+这是细致的工作，而且作者非常值得称道地明确说明：只有消融支持因果解读。
+但摘要打头的是"63.9% 对已发表的 29.3%"，而那是一个非配对的跨 harness 比较，对手那一行用的是不同的智能体、检索后端和解析器。
+论文在局限性里说了，摘要没说。
+诚实的标题应该是配对的那组，而它小得多：OfficeQA 上相对"只给原生"是 8.3-12.1 Pass@1，APEX 上相对"只给解析"是 4.7-9.2 个 rubric 分。
+
+还有两处细心读者应当抓住。
+其一，摘要里"更受限的那个单视图"这个说法在悄悄干活——那条臂的身份在两个基准之间**反转**了，所以 8.3-12.1 和 4.7-9.2 这两个区间是相对不同的对照测出来的。
+论文在 4.2 节对此是透明的，理由也充分，但摘要的措辞让它读起来像一个一致的单一效应。
+其二，APEX 上"双视图 vs 只给原生"对每个模型的配对提升都为正，但 bootstrap p 值都在 0.05 以上；OfficeQA 上也有几处提升的半宽接近效应本身（Gemini 3.1 Pro：+8.3，半宽 7.9）。
+声量最大的那些结论，恰恰是余量最小的。
+审阅轴的结果更弱：57 个文件编辑任务，约占 APEX 的 12%，报告时没有区间也没有 p 值，各模型提升从 +2.5 到 +8.5，在这个样本量下很难说跟噪声分得开。
+作者自己称之为"支撑性机制而非整个系统"，这个姿态是对的。
+
+两处该给的分要给到：效率诊断确实堵住了"你不过是多花了算力"这个质疑——GPT-5.4 双视图与只给原生基本成本持平（每题 $0.84 对 $0.85）而分更高；失败分析对论文自己的论点也罕见地不留情面。
+报告 452 个被评估的 APEX 任务里有 188 个是全臂零分、即在任何读取轴开关下都纹丝不动，这正是一篇宣传型论文会埋掉的数字。
+
+**写作功力**: 方法部分干净，状态模型写得极为经济。
+摘要是短板，也是偷工减料发生的地方：它把最不受控的比较推到最前，把两组不同的消融对照压成一句话，还略去了审阅轴证据来自一个未标注区间的小子集。
+把摘要改成以配对消融开头——那才是这篇论文真正的成就——会把整篇的分量抬起来，因为细致的工作已经做完了，只是被一个反而招来它并不该承受的怀疑的标题给贱卖了。
+第 2 节相对它要立的论点也偏长：整段相关工作的论证就是"每家都只有其中一半"，用了四个密集的段落。
+
+**判决**: 弱接收 —— 一次真正有用的重构框架，底下有细致的配对消融支撑，但被一个用论文自己都不愿辩护的跨 harness 数字来抬价的摘要拖了后腿。
+
+## 要点总结
+
+不管你关不关心办公智能体，能迁移的东西：
+
+- **把 stale 做成可见的，而不是拼命去消灭它。**
+  可推广的动作是承认：任何派生视图——检索索引、embedding 库、摘要缓存、物化看板——都存在一个它是错的窗口，而给这个窗口打标签，比缩短它更便宜也更稳健。
+  如果你的 RAG 索引落后于真相源，返回 `[可能过期，源文件 4 秒前变更]` 能让模型据此行动；裸返回过期值则不能。
+
+- **缓存记录按内容哈希加路径做键，并按记录粒度失效。**
+  听着平凡，直到你发现有多少智能体栈是整体重建或整体信任索引的。
+  在一个 166 个文件、智能体只碰了两个的项目文件夹上，按记录失效就是"重解析两个文件"与"要么全量重建、要么静默污染"之间的区别。
+
+- **把 diff 做成模型在提交前可以调用的工具。**
+  连论文最弱的那个结果都指向有用的方向：在交付前让智能体看看自己到底改了什么，实现成本很低，而观察到的提升在更弱的模型上最大。
+  diff 证明不了语义正确，但它是一个紧凑的最后机会，让模型把"想改的"和"实际改的"对一遍。
+
+- **按格式定制的 diff 胜过没有 diff。**
+  表格用行/单元格 diff，幻灯片用页级 diff，不透明二进制用前后预览。
+  为了等一个"什么才是 `.pptx` 的 diff"的统一答案而什么都不发，是最差的选择。
+
+- **对做评测的人，真正的载荷**：如果你在基于文件的工作上评测智能体，请公布每条实验臂拿到的是工作区的哪种视图。
+  否则你排行榜上小模型与大模型之间的差距，可能有一部分是两个解析器之间的差距。
+  论文那个"非前沿模型从同步工作区获益最多、前沿模型几乎不动"的发现，正是让不受控的 harness 变得具有误导性的那种交互作用。
+:::
