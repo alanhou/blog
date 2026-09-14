@@ -490,6 +490,20 @@ class CallLlmTests(unittest.TestCase):
 
         self.assertEqual(2, client.chat.completions.create.call_count)
 
+    @patch("fetch_arxiv.time.sleep")
+    def test_cloudflare_challenge_is_retried(self, _sleep):
+        """The gateway's challenge page arrives as HTML with no status code in
+        the message, so only the body identifies it as transient."""
+        client = Mock()
+        client.chat.completions.create.side_effect = [
+            Exception("<!DOCTYPE html><title>Just a moment...</title>"),
+            iter([]),
+        ]
+
+        fetch_arxiv.call_llm(client, "gpt-x", "openai", messages=[])
+
+        self.assertEqual(2, client.chat.completions.create.call_count)
+
 
 if __name__ == "__main__":
     unittest.main()

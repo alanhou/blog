@@ -538,11 +538,14 @@ def call_llm(client, model, provider, messages, temperature=0.5, max_tokens=4096
             # Retry on transient errors (timeouts, server errors, rate limits, 404s).
             # 403 is in the list because the gateway in front of the endpoint
             # returns bare "403 Forbidden" HTML when it throttles, and the same
-            # key succeeds again minutes later.
+            # key succeeds again minutes later. The Cloudflare markers cover the
+            # same thing in its other guise: a managed challenge page whose
+            # status never reaches the error string, only the HTML body does.
             is_transient = any(
                 code in err_str
                 for code in ["403", "404", "524", "529", "500", "502", "503", "429",
-                             "overloaded", "Connection", "timeout", "Timeout"]
+                             "overloaded", "Connection", "timeout", "Timeout",
+                             "Just a moment", "cloudflare"]
             )
             if is_transient and attempt < retries - 1:
                 # Long waits on purpose: short backoff just re-hits a gateway
