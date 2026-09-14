@@ -1,0 +1,277 @@
+---
+title:
+  en: "CLEAR: Gating Safety On and Off Instead of Rewriting the Whole Model"
+  zh: "CLEAR：把安全能力「按需开关」，而不是重写整个模型"
+description:
+  en: "Global safety tuning makes a model safer and dumber at the same time, because it changes how the model responds to every prompt. CLEAR routes a safety adapter through a lightweight hidden-state gate, taking Llama-3-8B-Instruct from 32.3% to 0.5% attack success on HarmBench while losing far less utility than SFT or LoRA."
+  zh: "全局安全微调在让模型更安全的同时也让它更迟钝，因为它改变了模型对每一个提示的回应方式。CLEAR 用轻量的隐状态门控来调节安全适配器的激活强度，使 Llama-3-8B-Instruct 在 HarmBench 上的攻击成功率从 32.3% 降到 0.5%，而效用损失远小于 SFT 或 LoRA。"
+date: 2026-08-24
+tags: ["arxiv", "ai", "cs.ai"]
+image: "/arxiv-visuals/arxiv-clear-continuous-latent-adapter-routing-for.png"
+---
+
+:::en
+**Paper**: [2608.21278](https://arxiv.org/abs/2608.21278)
+**Authors**: Chengxiao Wang, Enyi Jiang, Xiaojing Liao, Sanmi Koyejo
+**Categories**: cs.AI
+
+## The Gap
+
+The safety-utility trade-off in LLM alignment is usually described as if it were a tension between two objectives. The paper's framing is sharper: the problem is not that safety and utility conflict, it is that **safety tuning is applied globally**. Fine-tune a model to refuse harmful requests and you also change how it responds to benign ones, because the intervention is not conditioned on anything. The model does not get a safety module; it gets a slight, global shift in disposition, and that shift is paid for out of general capability.
+
+The evidence for this reading is familiar in practice: models that have been aggressively safety-tuned become terse, over-hedging, or worse at straightforward reasoning. The harm is not confined to refusals of harmless prompts — it shows up as degraded reasoning on tasks that have nothing to do with safety.
+
+So the target is not "balance safety against utility" but "make the safety intervention conditional". And the mechanism has to be cheap enough not to disturb the frozen backbone, because the moment you fine-tune the backbone you have reintroduced the global change you were trying to avoid.
+
+```
+   GLOBAL SAFETY TUNING (SFT / LoRA applied everywhere)
+   prompt ---> [model with one global disposition] ---> response
+                    |
+                    +-- harmful input  -> safer   (goal achieved)
+                    +-- benign input   -> ALSO changed
+                                          (collateral damage)
+                    |
+                    v
+   [GAP] the intervention is not conditioned on the input,
+         so utility is paid for out of general capability:
+         reasoning degrades on tasks unrelated to safety
+                    |
+                    v
+   TARGET: make safety CONDITIONAL, and keep the
+           backbone FROZEN so no global shift returns
+```
+
+## The Increment
+
+**One sentence**: Before this paper, making a model safe meant applying a global change that also dulled it everywhere else; after it, a hidden-state gate continuously controls how strongly a safety adapter fires, cutting attack success on HarmBench from 32.3% to 0.5% on Llama-3-8B-Instruct while giving up far less utility than global SFT or LoRA.
+
+### Core Mechanism
+
+The architecture has two moving parts, and the interaction between them is the idea.
+
+**A safety low-rank adapter.** Rather than fine-tuning the backbone, safety knowledge lives in a low-rank adapter — the standard parameter-efficient form, cheap to train and cheap to store. On its own this would still be a global intervention if it were always on.
+
+**A lightweight hidden-state gate.** A small gate reads the model's hidden state and produces a **continuous** control signal for the adapter's activation strength. This is the conditioning step, and the word "continuous" is doing real work: the gate is not a binary switch that either applies the safety adapter or bypasses it. It modulates how strongly the adapter acts, so a prompt that is ambiguous, or benign but adjacent to a sensitive topic, can receive a partial dose rather than a full one.
+
+Together these give the property the paper is after. The safety behaviour is available, but it is engaged in proportion to what the input calls for, and the frozen backbone is never rewritten — so general capability is not spent on the transaction. Because the gate reads a hidden state rather than an external classifier's verdict, the decision is made inside the model's own representation of the input.
+
+The numbers on Llama-3-8B-Instruct are the headline: HarmBench attack success rate falls from **32.3% to 0.5%**, which is close to eliminating the attack surface on that benchmark. The more interesting half is what it costs. CLEAR **retains most of the base model's utility** and achieves **up to 7.1 percentage points higher GSM8K accuracy** than globally applied SFT or LoRA. That last comparison is the argument: against two methods that are also trying to be safe, the conditional approach is measured better on a reasoning benchmark — so the utility cost of safety is not a fixed price, it depends on how the intervention is applied.
+
+```
+   CLEAR ARCHITECTURE
+
+   prompt
+     |
+     v
+   [ FROZEN BACKBONE ] -- hidden state h(t) ----+
+     |                                          |
+     |                                          v
+     |                            +----------------------------+
+     |                            | LIGHTWEIGHT GATE           |
+     |                            | h -> continuous strength   |
+     |                            |     in [0, 1]              |
+     |                            +-------------+--------------+
+     |                                          |
+     |                                          v
+     |                            +----------------------------+
+     |                            | SAFETY LOW-RANK ADAPTER    |
+     |                            | activation SCALED by gate  |
+     |                            +-------------+--------------+
+     |                                          |
+     +------------------------------------------+
+     |
+     v
+   response  (safety engaged in proportion to the input)
+
+   RESULT on Llama-3-8B-Instruct
+     HarmBench ASR:      32.3%  ->  0.5%
+     GSM8K vs global SFT / LoRA:  up to +7.1 points
+     Backbone: frozen
+```
+
+Think of it as **a car with a traction-control system rather than winter tyres fitted year-round**. The global approach is fitting winter tyres to be safe in snow: you are safer in the snow, and you pay for it in grip, noise and fuel economy on every dry road for the rest of the year, because the change is unconditional. CLEAR is the sensor-and-actuator version: the intervention is available, it reads the conditions continuously from the car's own state, and it engages proportionally — full authority when the surface is genuinely slippery, near-zero when it is not. The car itself is not modified. That is what the frozen backbone buys, and it is why the dry-road handling does not degrade.
+
+### Key Concepts
+
+- **Conditional versus global safety adaptation**: the paper's central distinction. Global adaptation changes disposition everywhere; conditional adaptation leaves the model as it was and adds a component that fires when warranted. The claim is that most of the reported safety-utility trade-off is a property of the *global* choice, not an inherent cost of safety.
+- **Continuous gating**: producing a graded rather than binary control signal for the adapter's strength. Continuous gating matters because harmful and benign inputs are not cleanly separable — the interesting cases are near the boundary, and a graded response is the appropriate tool for a graded problem.
+- **Frozen backbone as a utility guarantee**: keeping the backbone unchanged is not incidental to the method, it is the mechanism by which utility is preserved. Any approach that fine-tunes the backbone has, by construction, reopened the possibility of collateral degradation.
+
+## Framework Shift
+
+```
+Before (safety as a global edit):
+  base model -> fine-tune on safety data (SFT / LoRA)
+             -> ONE disposition for all inputs
+             -> refusal of harmful prompts improves
+                AND reasoning on benign tasks degrades
+  Safety and utility trade off because the edit is global
+
+After (safety as a routed component):
+  [frozen base] + [gate on hidden state] -> [LoRA strength]
+             -> safety engaged PER INPUT
+             -> HarmBench ASR 32.3% -> 0.5%
+             -> GSM8K up to +7.1 pts vs global SFT / LoRA
+```
+
+From editing the model's disposition to adding a component that reads the input and decides how much to intervene, the core shift is that the safety-utility trade-off was largely an artifact of making the intervention unconditional.
+
+## Expert Assessment
+
+**Problem choice**: Well aimed and the framing is the contribution. Refusing the usual "safety versus utility" framing in favour of "safety is applied globally, and that is the bug" is a genuinely useful reframing — it moves the problem from an unavoidable trade-off to an engineering choice about conditioning.
+
+**Method maturity**: The design is conservative in the right way. A low-rank adapter plus a gate is a small, standard, cheap apparatus, and the decision to freeze the backbone is the load-bearing one, since it removes by construction the mechanism by which utility normally leaks away. Reading the gate signal from hidden states rather than from an external harmfulness classifier is the more elegant choice, and it avoids adding a separate model whose own errors would need to be bounded.
+
+**Experimental integrity**: The utility comparison is where the paper earns its claim, and choosing SFT and standard LoRA as the baselines is fair — those are what people actually do. Landing up to 7.1 points better on GSM8K against them is a meaningful margin, and the HarmBench reduction is dramatic enough that the direction is not in question. The gap is in what is not shown: the gate's behaviour on adversarial inputs designed to suppress its activation. A continuous gate is a learned component and therefore an attack surface, and a method whose selling point is robustness should characterise how the gate can be fooled.
+
+**Writing quality**: The mechanism is stated compactly and the numbers are placed next to the claim they support, which makes the paper easy to evaluate quickly. The section that would improve most from expansion is the gate itself — a continuous gate has dynamics, and a reader wants to know whether it is stable across prompt lengths, languages and domains, or whether its calibration is itself something that needs maintenance.
+
+**Verdict**: **accept** — a clean, cheap conditional design with a strong utility result, leaving the robustness of the gate itself as the obvious next question.
+
+## Takeaways
+
+- When a tuning intervention hurts general capability, check whether it is applied globally before accepting the trade-off as inherent. Conditioning an intervention is often cheaper than balancing it.
+- Freeze what you are not trying to change. Keeping the backbone untouched is a structural utility guarantee, not just a parameter-efficiency trick.
+- Prefer a graded control signal for a graded problem. Binary gating on a classification of harmful versus benign forces a hard decision exactly where the interesting cases live.
+- Treat a learned gate as an attack surface. If your safety mechanism is conditionally activated, adversarially suppressing the activation is the natural attack, and it needs to be measured.
+:::
+
+:::zh
+**论文**: [2608.21278](https://arxiv.org/abs/2608.21278)
+**作者**: Chengxiao Wang, Enyi Jiang, Xiaojing Liao, Sanmi Koyejo
+**分类**: cs.AI
+
+## 缺口
+
+关于大模型对齐中的"安全—效用"取舍，通常的叙述方式，像是在描述两个目标之间的张力。
+而本文的提法更锋利：问题不在于安全与效用互相冲突，而在于**安全微调是全局施加的**。
+把一个模型微调到会拒绝有害请求，你同时也改变了它对**无害**请求的回应方式——因为这项干预不以任何东西为条件。
+模型并没有得到一个"安全模块"，它得到的是整体倾向上的一点点偏移，而这份偏移是用通用能力来支付的。
+
+支持这种解读的证据在实践中并不陌生：被激进地做过安全微调的模型，会变得干瘪、过度加限定、或者在最直白不过的推理上变差。损害并不止于"拒绝了无害提示"——它会以"在与安全毫无关系的任务上推理能力下降"的形式暴露出来。
+
+所以真正的目标不是"在安全与效用之间找平衡"，而是"**让安全干预变成有条件的**"。
+而且这个机制的代价必须足够低，低到不去扰动冻结的主干——因为一旦你开始微调主干，你就把那个想要避免的全局改变又请回来了。
+
+```
+   全局安全微调（SFT / LoRA 施加于所有位置）
+   提示 ---> [带有一套全局倾向的模型] ---> 回应
+                    |
+                    +-- 有害输入  -> 更安全   （目标达成）
+                    +-- 无害输入  -> 同样被改变
+                                      （附带损伤）
+                    |
+                    v
+   [缺口] 干预不以输入为条件，
+         于是效用是用通用能力支付的：
+         在与安全无关的任务上推理能力退化
+                    |
+                    v
+   目标：让安全变成「有条件的」，
+         并保持主干冻结，从而不引入任何全局偏移
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，让模型变安全意味着施加一个全局改动，而这个改动同时把模型在别处也弄钝了；在这篇论文之后，一个隐状态门控持续调节安全适配器的激活强度，使 Llama-3-8B-Instruct 在 HarmBench 上的攻击成功率从 32.3% 降到 0.5%，而付出的效用代价远小于全局 SFT 或 LoRA。
+
+### 核心机制
+
+架构只有两个运动部件，而它们之间的互动才是真正的想法。
+
+**一个安全低秩适配器。**
+安全知识不放在主干微调里，而是放在一个低秩适配器中——标准的高效参数形式，训练便宜、存储也便宜。但如果它一直处于开启状态，单靠它仍然是一次全局干预。
+
+**一个轻量的隐状态门控。**
+一个小门控读取模型的隐状态，为适配器的激活强度产生一个**连续**的控制信号。这就是"加上条件"的那一步，而"连续"这个词在承重：门控不是一个"要么启用安全适配器、要么绕过它"的二值开关。它调节的是适配器起作用的**强度**，因此一个含义模糊的提示、或者一个无害但紧邻敏感话题的提示，可以得到**部分剂量**而不是全量。
+
+两者合起来，给出了论文想要的那个性质：安全行为始终**可用**，但它是**按输入所需按比例启用**的，而冻结的主干从未被重写——因此通用能力没有被拿去支付这笔交易。
+由于门控读取的是隐状态、而不是某个外部判害分类器的判定结果，这个决策是在模型自身对输入的表示内部做出的。
+
+在 Llama-3-8B-Instruct 上的数字是标题级的：HarmBench 攻击成功率从 **32.3% 降到 0.5%**，几乎把该基准上的攻击面抹平了。
+更有意思的是另一半——它的代价。CLEAR **保留了基座模型的绝大部分效用**，并且在 GSM8K 上比全局施加的 SFT 或 LoRA **高出最多 7.1 个百分点**。
+最后这个对比就是整篇论文的论证：面对两个**同样以安全为目标**的方法，条件化方案在一个推理基准上被测得更好——所以"安全要付多少效用代价"并不是一个固定价格，它取决于这项干预是**怎么**施加的。
+
+```
+   CLEAR 架构
+
+   提示
+     |
+     v
+   [ 冻结的主干 ] -- 隐状态 h(t) ----+
+     |                                          |
+     |                                          v
+     |                            +----------------------------+
+     |                            | 轻量门控                    |
+     |                            | h -> 连续强度，取值 [0, 1]   |
+     |                            +-------------+--------------+
+     |                                          |
+     |                                          v
+     |                            +----------------------------+
+     |                            | 安全低秩适配器              |
+     |                            | 激活按门控强度缩放          |
+     |                            +-------------+--------------+
+     |                                          |
+     +------------------------------------------+
+     |
+     v
+   回应（安全强度与输入所需成比例）
+
+   在 Llama-3-8B-Instruct 上的结果
+     HarmBench 攻击成功率:  32.3%  ->  0.5%
+     GSM8K 相对全局 SFT / LoRA:  最高 +7.1 个点
+     主干：冻结
+```
+
+可以用**"装一套牵引力控制系统，而不是全年挂着冬季胎"**来理解这件事：
+全局做法就是为了在雪地里安全而换上冬季胎：你在雪地里更安全了，而在之后一整年的干燥路面上，你要为抓地力、噪音和油耗付账——因为这个改动是**无条件的**。
+CLEAR 则是"传感器加执行器"的版本：干预能力随时在，它持续地从车辆自身的状态里读取路况，并按比例介入——路面真滑时给出全部权限，不滑时接近为零。而车本身没有被改装。
+这正是"冻结主干"换来的东西，也是它在干燥路面上的操控性没有退化的原因。
+
+### 关键概念
+
+- **有条件的安全适配 vs 全局安全适配**: 本文的核心区分。全局适配在所有地方改变了模型倾向；有条件适配让模型保持原样，另加一个"该起作用时才起作用"的组件。论文的主张是：那些被反复报告的"安全—效用取舍"，大多是**全局**这一选择的属性，而不是安全本身固有的代价。
+- **连续门控（continuous gating）**: 为适配器强度产生**分级**而非二值的控制信号。连续门控之所以重要，是因为有害与无害输入并不是干净可分的——真正有意思的案例恰恰在边界附近，而一个分级的问题就应该用分级的工具。
+- **以冻结主干作为效用保证**: 保持主干不变并不是方法的附带产物，它正是效用得以保留的**机制**。任何去微调主干的方案，在构造上就重新打开了附带退化的可能性。
+
+## 框架转变
+
+```
+之前（把安全当作一次全局编辑）：
+  基座模型 -> 在安全数据上微调（SFT / LoRA）
+           -> 对所有输入只有一套倾向
+           -> 对有害提示的拒绝变好了
+              同时 在无害任务上的推理也退化了
+  安全与效用之所以取舍，是因为这次编辑是全局的
+
+之后（把安全当作一个被路由的组件）：
+  [冻结的基座] + [门控读取隐状态] -> [LoRA 强度]
+           -> 安全按「每个输入」分别启用
+           -> HarmBench 攻击成功率 32.3% -> 0.5%
+           -> GSM8K 相对全局 SFT / LoRA 最高 +7.1 个点
+```
+
+从"编辑模型的整体倾向"，转变为"增加一个读取输入、并决定该介入多少的组件"，核心转变在于：所谓的安全—效用取舍，在很大程度上是"把干预做成无条件"所导致的产物。
+
+## 专家评审
+
+**选题眼光**: 瞄得很准，而**框架本身就是贡献**。
+拒绝那种惯常的"安全 vs 效用"叙事、改为"安全是被全局施加的，而这才是 bug"，是一次真正有用的重构——它把问题从"不可避免的取舍"，挪到了"关于条件化的工程选择"。
+
+**方法成熟度**: 设计在正确的方向上是保守的。
+低秩适配器加门控，是一套小型、标准、廉价的装置；而"冻结主干"这个决定是承重的，因为它从构造上移除了效用通常流失的那条路径。让门控信号取自隐状态、而不是取自一个外部判害分类器，是更优雅的选择，也避免了引入一个其自身误差还需要被约束的额外模型。
+
+**实验诚意**: 效用对比是论文主张的落脚点，而选 SFT 与标准 LoRA 作基线是公平的——那正是人们实际在用的东西。相对它们在 GSM8K 上高出最多 7.1 个点是有分量的差距，而 HarmBench 的下降幅度大到方向性不成问题。
+欠缺之处在于**没有展示**的部分：面对那种专门设计来抑制门控激活的对抗性输入时，门控表现如何。连续门控是一个可学习组件，因此也是一个攻击面；而一个以稳健性为卖点的方法，本应刻画门控能被如何欺骗。
+
+**写作功力**: 机制表述紧凑，数字紧挨着它所支撑的主张摆放，这让论文能被快速评估。最该展开的是门控本身：连续门控是有动力学的，读者想知道它在不同提示长度、语言与领域之间是否稳定，还是说它的标定本身就需要持续维护。
+
+**判决**: **接收（Accept）** — 一个干净、廉价的条件化设计，配一项很强的效用结果；门控自身的稳健性则是显而易见的下一步问题。
+
+## 要点总结
+
+- 当某项微调干预损害了通用能力时，先检查它是否是**全局施加**的，再决定要不要接受这个取舍。给干预加上条件，通常比在两者之间找平衡更便宜。
+- 把你不打算改变的东西**冻结**掉。保持主干不动是一种结构性的效用保证，而不只是省参数的技巧。
+- 分级的问题就用分级的控制信号。对"有害/无害"做二值门控，等于恰好在最有意思的边界地带强制做出硬判断。
+- 把可学习门控视为攻击面。如果你的安全机制是条件激活的，那么"对抗性地抑制其激活"就是最自然的攻击方式，必须被测量。
+:::
