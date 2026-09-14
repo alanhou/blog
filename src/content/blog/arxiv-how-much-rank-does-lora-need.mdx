@@ -1,0 +1,286 @@
+---
+title:
+  en: "How Much Rank Does LoRA Need? A Task-Dependent Answer"
+  zh: "LoRA 到底需要多大的秩？一个依赖任务本身的答案"
+description:
+  en: "LoRA rank is normally chosen by sweeping. By fixing a pretrained attention head, a target attention function and the downstream input distribution, this paper bounds the smallest expected KL error achievable at rank r — and shows softmax saturation makes the rank needed to match the attention function strictly smaller than the rank needed to match the logits."
+  zh: "LoRA 的秩通常靠扫参选定。本文固定一个预训练注意力头、一个目标注意力函数以及下游任务的输入分布，给出了秩为 r 时可达到的最小期望 KL 误差的界——并证明 softmax 饱和会使得「匹配注意力函数」所需的秩严格小于「匹配有限 logits」所需的秩。"
+date: 2026-08-27
+tags: ["arxiv", "ai", "cs.ai", "cs.cl", "cs.lg"]
+image: "/arxiv-visuals/arxiv-how-much-rank-does-lora-need.png"
+---
+
+:::en
+**Paper**: [2608.26052](https://arxiv.org/abs/2608.26052)
+**Authors**: Gerard Conangla Planes
+**Categories**: cs.AI, cs.CL, cs.LG
+
+## The Gap
+
+LoRA rank is chosen empirically. You pick a value, train, evaluate, and try again — 8, 16, 32, 64 — until the returns flatten. That practice works and says nothing about why a given rank is enough, or whether the answer depends on the task. There is no task-dependent account of the approximation error achievable at each rank.
+
+The distinction matters because "rank" is doing two different jobs that are easy to conflate. A LoRA update has to approximate the **attention function** — the probability distribution over tokens it ultimately produces — and it also has to approximate the finite **attention scores** that give rise to it. These are not the same target, and the rank required for one need not equal the rank required for the other. Without a theory separating them, a rank sweep cannot tell you whether you are limited by capacity or by a mismatch between what you are matching and what you care about.
+
+```
+   HOW LORA RANK IS CHOSEN TODAY
+   pick r in {8, 16, 32, 64} -> train -> evaluate -> repeat
+        |
+        v
+   conclusion: "the returns flattened at r = X"
+        |
+        v
+   [UNANSWERED]
+     - is X task-dependent?
+     - what error is achievable at each r?
+     - are we limited by capacity, or by matching
+       the WRONG TARGET?
+        |
+        v
+   [TWO TARGETS, EASILY CONFLATED]
+     attention FUNCTION (the probabilities)   <- what you want
+     attention SCORES   (finite logits)       <- what you fit
+        |
+        v
+   [GAP] no task-dependent theory of the error
+         achievable at rank r
+```
+
+## The Increment
+
+**One sentence**: Before this paper, LoRA rank was a swept hyperparameter; after it, a task-dependent bound on the expected error at each rank separates the rank needed to match attention probabilities from the rank needed to match attention scores, and shows the first can be strictly smaller.
+
+### Core Mechanism
+
+The theory fixes three things and then bounds the error. A **pretrained attention head**, a **target attention function**, and a **distribution over inputs from the downstream task**. With those fixed, the question becomes concrete: what is the smallest expected KL error achievable by a rank-`r` query LoRA update? Note that the input distribution is part of the setup, which is what makes the result task-dependent rather than architecture-dependent.
+
+The bounds come in a matched pair, and their shape is informative.
+
+When the target attention probabilities are bounded away from zero, there is a **lower bound on the error proportional to** `psi(||d||_2)`, where `d` is the difference between candidate and target attention scores and `psi(t) = min{t^2, t}`. That function is doing real work: it is quadratic for small disagreement and linear for large disagreement. So the error is not simply quadratic in score error — once the scores are far enough apart, the relationship flattens. Matching it is an **unconditional upper bound** of `min{||d||_2^2 / 4, sqrt(2) * ||d||_2}`, the same two-regime shape.
+
+Under explicit realizability, geometry and moment conditions, the best rank-`r` error is then sandwiched between an explicit multiple of `psi(sqrt(T_r))` and `min{T_r / 4, sqrt(2 T_r)}`, where **`T_r` is the downstream-weighted tail energy of the target update.** That quantity is the practical heart of the result. `T_r` is not raw spectral energy — it is weighted by the downstream input distribution, so the rank you need depends on which parts of the spectrum the *task* actually exercises. A direction the task never probes costs no rank to neglect. This is the formal version of the intuition practitioners have been acting on without a justification.
+
+The paper then builds a case that separates the two targets. It constructs explicit families in which **softmax saturation makes the rank required to match the attention function strictly smaller than the rank required to match the finite logits.** The reasoning is intuitive once stated: logits can grow without bound while the resulting probabilities saturate, so above a certain scale, differences in logits stop changing the distribution. A rank budget spent matching logits faithfully can be partly wasted on distinctions the softmax erases. This is the concrete payoff of not conflating the two targets.
+
+Two extensions round it out. **Target-Fisher bounds** apply when candidate scores remain within a fixed range of the target scores — a local rather than global account. And there is an **unrestricted lower bound** when a subset of tokens carries most of the probability mass, which is the regime attention actually operates in. Finally, the analysis extends to **fused multi-head LoRA and joint query/key updates**, exposing the effects of rank sharing across heads and of the query/key factorization constraint.
+
+```
+   SETUP: fix three things, then bound the error
+     pretrained attention head
+     target attention function
+     input distribution from the DOWNSTREAM TASK
+        |
+        v
+   ERROR AT RANK r (expected KL)
+     lower bound ~ psi(||d||_2),   psi(t) = min{t^2, t}
+     upper bound   min{||d||_2^2 / 4, sqrt(2) ||d||_2}
+        |
+        v
+   UNDER REALIZABILITY / GEOMETRY / MOMENT CONDITIONS
+     best rank-r error between
+        multiple of psi(sqrt(T_r))  and  min{T_r/4, sqrt(2 T_r)}
+     T_r = DOWNSTREAM-WEIGHTED TAIL ENERGY of the target update
+        -> the task decides which spectral directions cost rank
+        |
+        v
+   SEPARATING THE TWO TARGETS
+     match attention FUNCTION  -> rank r1
+     match finite LOGITS       -> rank r2
+     softmax saturation can give  r1 STRICTLY SMALLER than r2
+        -> a faithful logit match can spend rank on
+           distinctions the softmax erases
+
+   EXTENSIONS: target-Fisher bounds (local), unrestricted lower
+   bound under concentrated probability mass, fused multi-head
+   LoRA, joint query/key updates
+```
+
+Think of it as **deciding how much detail a map needs by asking where you will actually drive**. A cartographer could try to reproduce the terrain exactly — every contour, every ditch — and spend enormous effort on fidelity. But the map only needs the detail that changes your route. A region you will never enter costs nothing to draw coarsely, no matter how complicated it is. `T_r` is precisely this: the tail energy of the target update *weighted by the downstream input distribution*, so complicated spectral directions your task never exercises are cheap to neglect. The softmax-saturation result is the second half of the same idea: below a certain point, extra precision in the coordinates changes nothing about which road you take, so paying for it is pure waste.
+
+### Key Concepts
+
+- **`T_r`, downstream-weighted tail energy**: the quantity that makes the bound task-dependent. It is what remains of the target update's spectrum after weighting by the input distribution, so it says which spectral directions the task actually uses — and therefore which ones cost rank to approximate.
+- **The two-regime `psi(t) = min{t^2, t}` shape**: quadratic for small score error, linear for large. The practical reading is that error grows more slowly than a naive quadratic argument would suggest once disagreements become large, and that bounds derived from a purely quadratic assumption will misstate the achievable error.
+- **Attention function versus finite logits**: two different approximation targets, and the softmax can make the first strictly cheaper to match. It means a rank sweep is measuring the cost of one target while a practitioner may care about the other.
+- **Rank sharing and query/key factorization**: the constraints that appear once the analysis moves from a single query update to fused multi-head LoRA and joint updates. These are where a per-head rank choice stops being independently optimizable.
+
+## Framework Shift
+
+```
+Before (rank as a swept hyperparameter):
+  try r = 8, 16, 32, 64 -> pick where returns flatten
+  -> no task dependence in the answer
+  -> no separation of "capacity" from "wrong target"
+
+After (rank bounded by a task-dependent quantity):
+  error at rank r bounded below by psi(||d||_2)
+  best rank-r error governed by T_r, the
+    DOWNSTREAM-WEIGHTED tail energy
+  -> directions the task does not exercise are cheap
+  -> softmax saturation can make the rank needed
+     to match the FUNCTION smaller than for the LOGITS
+```
+
+From treating rank as a knob to be swept, to bounding the error it can achieve given a task, the core shift is that the input distribution — not just the architecture — determines how much rank is enough.
+
+## Expert Assessment
+
+**Problem choice**: Good and genuinely useful. LoRA rank is one of the most-typed hyperparameters in applied work and one of the least theorised, and asking for a task-dependent bound rather than a universal rule is the right formulation — a universal answer would likely be useless.
+
+**Method maturity**: This is a theory paper and it is constructed carefully. Fixing the input distribution as part of the setup is the decision that makes the result task-dependent, and the two-regime `psi` shape from both sides (lower bound and matching upper bound) gives the result teeth rather than leaving it as an asymptotic remark. The softmax-saturation construction is the most interesting part, because it is a case where the theory says something a sweep cannot: two targets with genuinely different rank requirements, where the one you likely care about is the cheaper one.
+
+**Experimental integrity**: There are no experiments, and the claims are theorems under stated conditions. The relevant scrutiny is therefore the conditions — realizability, geometry, moment assumptions, and scores-remaining-within-a-range for the Fisher bounds. Each is stated rather than hidden, which is the right practice, but a practitioner needs to judge how far their fine-tuning setup sits from those assumptions before applying the bounds.
+
+**Writing quality**: The paper's structure — setup, bounds, `T_r`, the separation of targets, then extensions — is logical and the abstract states the bound shapes explicitly rather than gesturing at them. What would help a practical reader most is a worked numerical illustration: a plausible attention head, a computed `T_r`, and the implied rank, so that the theory can be compared against the sweep people run today.
+
+**Verdict**: **accept** — a careful task-dependent theory for a hyperparameter that is usually set by habit, with the finiteness of the score approximation properly accounted for rather than assumed away.
+
+## Takeaways
+
+- Judge LoRA rank against the task, not against the architecture. The quantity that governs the achievable error is the downstream-weighted tail energy, so ranks that are right for one task can be wasteful or insufficient for another on the same model.
+- Do not assume the rank needed to match attention probabilities equals the rank needed to match the logits. Softmax saturation can make the functional target strictly cheaper, so a rank sweep may be measuring the wrong thing.
+- Expect sub-quadratic error growth in large-disagreement regimes. Error scales as `min{t^2, t}` in the score gap, so quadratic intuitions will overstate the cost once the gap is wide.
+- Be explicit about which of the two targets you are evaluating. If your evaluation only checks logits, you may be paying rank to match distinctions that never reach the output distribution.
+:::
+
+:::zh
+**论文**: [2608.26052](https://arxiv.org/abs/2608.26052)
+**作者**: Gerard Conangla Planes
+**分类**: cs.AI, cs.CL, cs.LG
+
+## 缺口
+
+LoRA 的秩是靠经验选出来的。
+你挑一个值，训练、评测，再换一个——8、16、32、64——直到收益趋平。这种做法确实可行，却完全说不出"为什么某个秩就够了"，更说不出答案是否取决于任务。**对于每个秩可达到的近似误差，此前没有一份依赖任务的理论。**
+
+这个区分之所以重要，是因为"秩"同时在干两件容易被混为一谈的事。
+一个 LoRA 更新要去近似**注意力函数**——它最终产出的、关于 token 的概率分布；同时它也要去近似产生这个分布的有限**注意力分数（logits）**。这两个目标并不相同，而其中一个所需的秩，未必等于另一个所需的秩。没有一份把两者分开的理论，扫参就无法告诉你：你受限于的是**容量**，还是**"你在拟合的东西"与"你真正关心的东西"之间的错配**。
+
+```
+   今天如何选 LoRA 的秩
+   在 {8, 16, 32, 64} 中挑 -> 训练 -> 评测 -> 重复
+        |
+        v
+   结论："收益在 r = X 处趋平"
+        |
+        v
+   [未被回答]
+     - X 是否依赖任务？
+     - 每个 r 可达到的误差是多少？
+     - 我们受限的是容量，
+       还是在拟合「错误的目标」？
+        |
+        v
+   [两个目标，极易混淆]
+     注意力「函数」（概率分布）   <- 你想要的
+     注意力「分数」（有限 logits） <- 你在拟合的
+        |
+        v
+   [缺口] 缺少一份依赖任务的、关于秩 r 处
+         可达到误差的理论
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，LoRA 的秩只是一个被扫的超参数；在这篇论文之后，一个依赖任务的、关于各秩处期望误差的界，把"匹配注意力概率所需的秩"与"匹配注意力分数所需的秩"分离开来，并证明前者可以严格更小。
+
+### 核心机制
+
+这套理论先固定三样东西，再对误差给出界：一个**预训练注意力头**、一个**目标注意力函数**、以及一个**来自下游任务的输入分布**。三者固定之后，问题就变得具体了：一个秩为 `r` 的 query LoRA 更新，能达到的最小期望 KL 误差是多少？注意"输入分布"是设定的一部分——这正是该结果**依赖任务**、而非依赖架构的原因。
+
+上下界成对出现，而它们的**形状**本身就带信息。
+
+当目标注意力概率与零有界距离时，误差有一个**下界，与** `psi(||d||_2)` **成比例**，其中 `d` 是候选注意力分数与目标注意力分数之差，`psi(t) = min{t^2, t}`。这个函数在真干活：分歧小时它是二次的，分歧大时它是线性的。也就是说误差并非简单地随分数误差二次增长——一旦分数差得足够远，这段关系就变平了。与之匹配的是一个**无条件上界** `min{||d||_2^2 / 4, sqrt(2) * ||d||_2}`，同样是这种双区间形状。
+
+在显式的可实现性、几何与矩条件之下，最优的秩 `r` 误差被夹在 `psi(sqrt(T_r))` 的某个显式倍数与 `min{T_r / 4, sqrt(2 T_r)}` 之间，其中 **`T_r` 是目标更新的「下游加权尾能量」**。
+这个量才是结果的实用核心。`T_r` 不是原始的谱能量——它被**下游输入分布**加权过，因此你需要的秩，取决于**任务实际用到谱的哪些部分**。一个任务从不探测的方向，放弃它不需要付出任何秩的代价。这正是实践者一直在凭直觉行事、却没有依据的那件事的形式化版本。
+
+随后论文构造了把两个目标分离开的例证：它给出显式的族，其中**softmax 饱和使得「匹配注意力函数」所需的秩严格小于「匹配有限 logits」所需的秩**。
+一旦说破，道理很直观：logits 可以无界增长，而由此产生的概率会饱和；因此在某个尺度之上，logits 的差异不再改变分布。把秩预算花在忠实匹配 logits 上，其中一部分可能被浪费在那些**会被 softmax 抹掉**的区分上。这就是"不混淆两个目标"的具体回报。
+
+两个推广把结果补全。
+当候选分数始终落在目标分数的一个固定范围内时，有**目标 Fisher 界**——这是一个局部而非全局的刻画。而当**少数 token 承载了大部分概率质量**时，存在一个**无约束下界**——而这正是注意力实际运作的区间。最后，分析被推广到**融合多头 LoRA 与联合 query/key 更新**，暴露出跨头共享秩、以及 query/key 分解约束所带来的影响。
+
+```
+   设定：先固定三样东西，再对误差给出界
+     预训练注意力头
+     目标注意力函数
+     来自「下游任务」的输入分布
+        |
+        v
+   秩 r 处的误差（期望 KL）
+     下界 ~ psi(||d||_2)，   psi(t) = min{t^2, t}
+     上界   min{||d||_2^2 / 4, sqrt(2) ||d||_2}
+        |
+        v
+   在可实现性 / 几何 / 矩条件下
+     最优秩 r 误差夹在
+        psi(sqrt(T_r)) 的某显式倍数  与  min{T_r/4, sqrt(2 T_r)} 之间
+     T_r = 目标更新的「下游加权尾能量」
+        -> 任务决定了哪些谱方向需要花秩
+        |
+        v
+   把两个目标分开
+     匹配注意力「函数」 -> 所需秩 r1
+     匹配有限「logits」 -> 所需秩 r2
+     softmax 饱和可使  r1 严格小于 r2
+        -> 忠实地匹配 logits 可能把秩花在
+           会被 softmax 抹掉的区分上
+
+   推广：目标 Fisher 界（局部）、概率质量集中时的无约束下界、
+         融合多头 LoRA、联合 query/key 更新
+```
+
+可以用**"地图需要多细，取决于你到底要开到哪里去"**来理解这件事：
+制图师可以试图精确复刻地形——每条等高线、每条沟——并为此投入巨大精力。但地图只需要**足以改变你路线**的那些细节。
+一片你永远不会进入的区域，无论它多复杂，粗略画出来都不花任何代价。
+`T_r` 恰恰就是这个：目标更新的尾能量**按下游输入分布加权**，因此那些你的任务从不触及的复杂谱方向，可以廉价地忽略掉。
+而 softmax 饱和那一半是同一个想法的后半句：在某个点之下，坐标再精确也不会改变你走哪条路，为它付钱纯属浪费。
+
+### 关键概念
+
+- **`T_r`，下游加权尾能量**: 让这个界**依赖任务**的那个量。它是目标更新的谱在按输入分布加权之后剩下的部分，因此它说明了任务实际用到哪些谱方向——也就说明了近似哪些方向需要花秩。
+- **双区间形状 `psi(t) = min{t^2, t}`**: 分数误差小时是二次，大时是线性。实用读法是：一旦分歧变大，误差增长比朴素的二次论证所暗示的更慢；而只基于二次假设推导出的界，会错误陈述可达到的误差。
+- **注意力函数 vs 有限 logits**: 两个不同的近似目标，而 softmax 可以让前者严格更便宜。这意味着一次扫参测的可能是**其中一个目标**的成本，而实践者关心的可能是另一个。
+- **秩共享与 query/key 分解**: 当分析从单个 query 更新推进到融合多头 LoRA 与联合更新时出现的约束。正是在这里，"每个头各自选秩"不再能独立优化。
+
+## 框架转变
+
+```
+之前（把秩当作被扫的超参数）：
+  试 r = 8, 16, 32, 64 -> 取收益趋平的那个
+  -> 答案里没有任务依赖性
+  -> 也没有把「容量」与「目标选错」分开
+
+之后（秩由依赖任务的量给出界）：
+  秩 r 处误差下界 ~ psi(||d||_2)
+  最优秩 r 误差由 T_r 支配，
+    即「下游加权尾能量」
+  -> 任务不触及的方向很便宜
+  -> softmax 饱和可使「匹配函数」所需的秩
+     小于「匹配 logits」所需的秩
+```
+
+从"把秩当作一个待扫的旋钮"，转变为"在给定任务下对它可达到的误差给出界"，核心转变在于：决定"多少秩才够"的，**不只是架构，还有输入分布**。
+
+## 专家评审
+
+**选题眼光**: 好，而且真正有用。
+LoRA 的秩是应用工作中被改动最多的超参数之一，也是最少被理论化的之一；而要求一个**依赖任务**的界、而不是一条普适规则，是正确的提法——普适答案很可能毫无用处。
+
+**方法成熟度**: 这是一篇理论论文，构造得相当仔细。
+把输入分布放进设定，是让结果依赖任务的那个决定；而 `psi` 的双区间形状同时从上界与下界两侧出现，让结论有了力度，而不是停留在一句渐近式的评述。softmax 饱和的构造是最有意思的部分：它是一个"理论说出了扫参说不出的话"的案例——两个目标确有不同的秩需求，而你很可能真正关心的那个反而更便宜。
+
+**实验诚意**: 论文没有实验，主张是在明确条件下成立的定理。因此真正该审视的是那些条件——可实现性、几何与矩假设，以及 Fisher 界所要求的"分数保持在某范围内"。每一条都被写出来而非藏起来，这是正确做法；但实践者在套用这些界之前，需要自己判断其微调设定离这些假设有多远。
+
+**写作功力**: 论文的结构——设定、界、`T_r`、分离两个目标、推广——逻辑顺畅，摘要也把界的形状明确写出而不是含糊带过。
+对实用型读者帮助最大的补充，会是一个数值算例：一个合理的注意力头、算出的 `T_r`、以及由此推出的秩——这样理论就能与人们今天跑的扫参直接对照。
+
+**判决**: **接收（Accept）** — 为一个通常靠习惯设定的超参数给出了仔细的、依赖任务的理论，并且恰当地把"分数近似是有限的"这件事纳入考量，而不是一笔带过。
+
+## 要点总结
+
+- 用**任务**来评判 LoRA 的秩，而不是用架构。支配可达到误差的量是下游加权尾能量，因此在同一个模型上，"对某个任务合适的秩"对另一个任务可能既浪费又不足。
+- 不要假定"匹配注意力概率所需的秩"等于"匹配 logits 所需的秩"。softmax 饱和可以让函数层面的目标严格更便宜，因此一次扫参很可能测错了对象。
+- 在大分歧区间，预期误差呈**次二次**增长。误差按 `min{t^2, t}` 随分数差缩放，因此一旦差距拉宽，二次直觉会高估代价。
+- 明确说清你在评测两个目标中的哪一个。如果你的评测只看 logits，你可能正在花秩去匹配那些**从未进入输出分布**的区分。
+:::
