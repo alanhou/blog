@@ -1,0 +1,359 @@
+---
+title:
+  en: "SAS: Stop Distilling Attention, Optimise the Ranking Instead"
+  zh: "SAS：别再蒸馏注意力分布，去优化「上下文排序」"
+description:
+  en: "Trainable sparse attention usually scores context units then hard-selects Top-K, which blocks gradients and forces the selector to imitate dense attention instead of predicting what helps. Injecting the scores into the attention logits with a log-form gate lets the language-modeling loss train the ranking directly."
+  zh: "可训练的稀疏注意力通常先给上下文单元打分、再硬选 Top-K，这既阻断了梯度，又迫使选择器去模仿「稠密注意力」，而不是去预测「什么才有用」。把分数以对数形式的门控注入注意力 logits，就能让语言建模损失直接训练这个排序。"
+date: 2026-09-14
+tags: ["arxiv", "ai", "cs.cl"]
+image: "/arxiv-visuals/arxiv-sas-simple-attention-sparsification-via.png"
+---
+
+:::en
+**Paper**: [2609.13141](https://arxiv.org/abs/2609.13141)
+**Authors**: Zhiwei Li, Lei Zhu, Hao Gu, Xiang Hu, Yan Wang, Haitao Mi, Sirui Han, Leo Liang, Zhijiang Guo
+**Categories**: cs.CL
+
+## The Gap
+
+Post-training attention sparsification reduces the quadratic cost of a pretrained Transformer by **selecting a small set of context units for each query.** With a fixed attention budget — a set number of attended units per query — the objective is to spend it on the units that matter most for the prediction.
+
+Existing trainable methods create a mismatch with that objective in two connected steps. **A lightweight selector scores context units, and hard Top-K selection then blocks gradients from the language modeling loss.** So the loss cannot reach the selector. And the workaround is to **distill layer-wise dense attention distributions** — which does give the selector a training signal, but a signal aimed at the wrong target: **although this encourages the selector to rank context units by dense attention weights in the original model, the ranking is not directly aligned with their impact on predictions under a fixed attention budget, potentially wasting the limited budget on less useful units.**
+
+That is the crux. Dense attention weights are what the model attends to when it can attend to everything; with a budget, the question is what it should attend to instead — and those need not agree. Distilling the dense distribution optimises for agreement with a regime the deployed model is not in.
+
+```
+   POST-TRAINING ATTENTION SPARSIFICATION
+
+   reduces the QUADRATIC cost of a pretrained Transformer by
+     SELECTING A SMALL SET OF CONTEXT UNITS FOR EACH QUERY
+   with a FIXED ATTENTION BUDGET (a set number of attended units per
+   query), the objective is to SPEND IT ON THE UNITS THAT MATTER MOST
+   FOR THE PREDICTION
+        |
+        v
+   EXISTING TRAINABLE METHODS CREATE A MISMATCH, IN TWO CONNECTED STEPS
+     [1] a LIGHTWEIGHT SELECTOR SCORES context units
+     [2] HARD TOP-K SELECTION THEN BLOCKS GRADIENTS from the language
+         modeling loss
+         -> the LOSS CANNOT REACH THE SELECTOR
+        |
+        v
+   [THE WORKAROUND, AND WHY IT AIMS AT THE WRONG TARGET]
+     DISTILL LAYER-WISE DENSE ATTENTION DISTRIBUTIONS
+       <- this DOES give the selector a training signal
+       BUT the signal is aimed at the WRONG TARGET:
+         ALTHOUGH this encourages the selector to rank context units BY
+         DENSE ATTENTION WEIGHTS IN THE ORIGINAL MODEL,
+         THE RANKING IS NOT DIRECTLY ALIGNED WITH THEIR IMPACT ON
+         PREDICTIONS UNDER A FIXED ATTENTION BUDGET,
+         potentially WASTING THE LIMITED BUDGET ON LESS USEFUL UNITS
+        |
+        v
+   [THE CRUX]
+     DENSE attention weights are what the model attends to WHEN IT CAN
+     ATTEND TO EVERYTHING
+     with a BUDGET, the question is WHAT IT SHOULD ATTEND TO INSTEAD
+       -> and those NEED NOT AGREE
+     -> distilling the dense distribution OPTIMISES FOR AGREEMENT WITH A
+        REGIME THE DEPLOYED MODEL IS NOT IN
+```
+
+## The Increment
+
+**One sentence**: Before this paper, the selector was trained against dense attention because hard selection blocked the loss; after it, injecting continuous scores into the attention logits lets the language-modeling loss train the ranking end to end, with the largest gains at tight budgets.
+
+### Core Mechanism
+
+The fix is small and structural, and its smallness is the point: **inject the selector's continuous scores into attention logits during training, allowing the loss to update the selector through standard backpropagation.** Then hard selection can remain at inference — the deployed model still attends to a limited set — while training gradient reaches the selector because the soft scores participate in the forward pass. It removes the mismatch rather than compensating for it.
+
+Three implementation choices are then identified as **crucial for this simple design to work well in practice**, and each addresses a specific way a naive version would fail:
+
+- **Placing the gate inside the attention softmax in log form.** Adding in log space, before the softmax, rather than scaling after it — which is what makes the score an additive term competing with the attention logit rather than a separate multiplier.
+- **Using normalized softmax gates to calibrate historical context against the always-retained current block.** The current block is kept unconditionally, so the gate must express the historical units' scores *relative* to that baseline. Without normalisation, the always-present block would be an incomparable reference.
+- **Preserving continuous selector scores so the model learns relative priorities rather than only hard selections.** Keeping the scores soft for training is what allows the model to learn an ordering rather than a set — which is precisely the quantity the original method never optimised.
+
+**And a systems component is needed to make it trainable at all: a memory-efficient Triton kernel that integrates SAS into FlashAttention-style computation**, since long-sequence training is where the method has to be exercised.
+
+The evaluation spans the regimes where sparse attention matters: **reasoning, long-context understanding, and agentic tasks**, with **SAS consistently outperforming trainable sparse attention baselines across attention budgets, with especially large gains under tight budgets.**
+
+That last clause is the diagnostic one. If the claim is that the ranking is now aligned with impact-under-a-budget, then the advantage should *grow* as the budget tightens — because that is where ranking quality matters most and where spending on less useful units hurts most. Reporting the largest gains at tight budgets is what the mechanism predicts, and it is stronger evidence than a uniform improvement.
+
+```
+   THE FIX IS SMALL AND STRUCTURAL -- AND ITS SMALLNESS IS THE POINT
+     INJECT THE SELECTOR'S CONTINUOUS SCORES INTO ATTENTION LOGITS
+     DURING TRAINING, ALLOWING THE LOSS TO UPDATE THE SELECTOR THROUGH
+     STANDARD BACKPROPAGATION
+       -> HARD SELECTION can REMAIN AT INFERENCE: the deployed model
+          still attends to a limited set
+       -> while TRAINING GRADIENT REACHES THE SELECTOR, because the SOFT
+          SCORES PARTICIPATE IN THE FORWARD PASS
+     <- it REMOVES THE MISMATCH rather than COMPENSATING FOR IT
+
+   THREE IMPLEMENTATION CHOICES ARE CRUCIAL FOR THIS SIMPLE DESIGN TO
+   WORK WELL IN PRACTICE -- each addresses a way a NAIVE version fails
+
+     [1] PLACING THE GATE INSIDE THE ATTENTION SOFTMAX IN LOG FORM
+           <- adding IN LOG SPACE, BEFORE THE SOFTMAX, rather than
+              SCALING AFTER IT
+           -> makes the score an ADDITIVE TERM COMPETING WITH THE
+              ATTENTION LOGIT, not a separate MULTIPLIER
+
+     [2] USING NORMALIZED SOFTMAX GATES TO CALIBRATE HISTORICAL CONTEXT
+         AGAINST THE ALWAYS-RETAINED CURRENT BLOCK
+           <- the CURRENT BLOCK IS KEPT UNCONDITIONALLY, so the gate must
+              express the historical units' scores RELATIVE TO THAT
+              BASELINE
+           -> without normalisation the always-present block would be an
+              INCOMPARABLE REFERENCE
+
+     [3] PRESERVING CONTINUOUS SELECTOR SCORES so the model learns
+         RELATIVE PRIORITIES rather than only HARD SELECTIONS
+           <- keeping the scores SOFT FOR TRAINING is what lets the model
+              learn an ORDERING rather than a SET
+           <- precisely the quantity the ORIGINAL METHOD NEVER OPTIMISED
+
+   AND A SYSTEMS COMPONENT IS NEEDED TO MAKE IT TRAINABLE AT ALL
+     a MEMORY-EFFICIENT TRITON KERNEL integrating SAS into
+     FLASHATTENTION-STYLE COMPUTATION
+       <- LONG-SEQUENCE TRAINING is where the method HAS TO BE EXERCISED
+
+   THE EVALUATION SPANS WHERE SPARSE ATTENTION MATTERS
+     REASONING | LONG-CONTEXT UNDERSTANDING | AGENTIC TASKS
+     -> SAS CONSISTENTLY OUTPERFORMS trainable sparse attention
+        baselines ACROSS ATTENTION BUDGETS
+     -> WITH ESPECIALLY LARGE GAINS UNDER TIGHT BUDGETS
+       <- THE DIAGNOSTIC CLAUSE: if the ranking is now aligned with
+          IMPACT-UNDER-A-BUDGET, the advantage should GROW AS THE BUDGET
+          TIGHTENS
+          <- that is where RANKING QUALITY MATTERS MOST and where
+             SPENDING ON LESS USEFUL UNITS HURTS MOST
+       -> the pattern the MECHANISM predicts, STRONGER EVIDENCE than a
+          UNIFORM improvement
+```
+
+Think of it as **a packing list written by someone who has never had to travel light**. Ask for a full suitcase and you get a reasonable list. Ask for a carry-on and the list you get is the full one truncated — the order was never about weight, so cutting it keeps whatever happened to be first. What you want is to let the person *practice* with the constraint, so the ordering itself reflects what is worth the space. The paper's three implementation details are the equivalent of making that practice work: the item's value has to be weighed in the same units as everything else on the list (the log-form gate inside the softmax, not a separate multiplier), it has to be compared against the thing you are carrying regardless (normalised against the always-retained block), and it has to stay a *ranking* during practice rather than collapsing to a yes/no (continuous scores preserved). And the prediction that the benefit is largest for the smallest suitcase is exactly what you would expect if the ordering finally reflects the constraint.
+
+### Key Concepts
+
+- **The blocked-gradient mismatch**: hard Top-K prevents the loss from reaching the selector. It is why distillation was used, and why the target ended up wrong.
+- **Ranking under a budget versus matching dense attention**: density reflects a regime the deployed model is not in. Distilling it optimises agreement with something the model will not experience.
+- **Injecting scores into the logits**: soft scores in the forward pass let the loss train the selector while hard selection stays at inference. The mismatch is removed rather than offset.
+- **Log-form gating and normalisation**: adding before the softmax so the score competes with the attention logit, and normalising so the always-retained block is a comparable reference. Both are what a naive version gets wrong.
+- **Preserved continuous scores**: learning a relative ordering rather than a hard set, which is the quantity the original method never optimised.
+- **Budget-dependent gains as the confirmatory pattern**: the advantage growing as budgets tighten is what the alignment claim predicts, not merely a metric improvement.
+
+## Framework Shift
+
+```
+Before (distil the dense distribution):
+  selector scores units; hard Top-K blocks the loss
+  -> distill layer-wise dense attention as the training signal
+  -> optimises agreement with dense attention, which is a different
+     regime from the budgeted one
+  -> budget can be spent on units that matter less under the budget
+
+After (train the ranking with the task loss):
+  inject continuous scores into attention logits, gated in log form
+  normalise against the always-retained block
+  keep scores continuous so an ordering is learned
+  -> hard selection stays at inference
+  -> consistent gains across budgets, largest under tight budgets
+```
+
+From imitating what the model attends to when unconstrained, to optimising what it should attend to under the constraint, the core shift is that a budgeted decision needs its own training signal rather than a proxy from a different regime.
+
+## Expert Assessment
+
+**Problem choice**: Excellent, and the diagnosis is precise about a mistake that is easy to make. Distilling dense attention is a natural way to give a blocked selector a signal, and the paper's point — that it trains the model to imitate an unconstrained regime — identifies why the workaround was never going to be optimal rather than merely suboptimal in degree.
+
+**Method maturity**: The design's elegance is that it removes the blockage instead of compensating for it, which is why a small change suffices. The three implementation choices are noteworthy because each is a specific failure of a naive version: adding in log space, normalising against the unconditional baseline, and keeping scores continuous. Listing them, rather than presenting the technique as a single trick, is what makes it reproducible. Building a Triton kernel for FlashAttention-style integration is the necessary systems work for long-sequence training, and reporting the gain pattern by budget is the validation the mechanism predicts.
+
+**Experimental integrity**: Reporting that gains are largest under tight budgets is the right form of evidence, since a uniform improvement would be consistent with several explanations while a budget-dependent one matches the alignment story specifically. Spanning reasoning, long-context understanding and agentic tasks gives breadth across the regimes where sparse attention is actually used. The main limitation is that the mechanism's success depends on the selector learning a ranking that generalises across budgets — since a single ranking is trained and then evaluated across budgets, and whether the learned ordering is robust to budget variation at inference is the natural follow-up question.
+
+**Writing quality**: The abstract's structure — blockage, workaround, why the workaround aims wrong, then the fix — makes the reasoning followable, and the three implementation choices are stated as requirements rather than as details. Because the practical reader wants to know which of the three matters most, a short sensitivity note would help them prioritise when adapting the method.
+
+**Verdict**: **strong accept** — it identifies why distilling dense attention optimises the wrong regime, removes the gradient blockage with a minimal structural change, and validates the fix with a budget-dependent gain pattern the mechanism predicts.
+
+## Takeaways
+
+- Check whether your training signal teaches the regime you deploy in. Dense attention is what a model does when unconstrained, which is not the setting sparse inference creates.
+- Remove a blockage rather than compensating for it. Making the scores participate in the forward pass lets the task loss train the selector, where distillation was a substitute for a missing gradient.
+- Get the arithmetic of the gate right. Adding in log space before the softmax, and normalising against the always-retained block, are what make the score comparable to what it competes with.
+- Look for gains that grow with the constraint. An advantage that increases as budgets tighten is what an alignment claim predicts, and it is stronger than a uniform improvement.
+:::
+
+:::zh
+**论文**: [2609.13141](https://arxiv.org/abs/2609.13141)
+**作者**: Zhiwei Li, Lei Zhu, Hao Gu, Xiang Hu, Yan Wang, Haitao Mi, Sirui Han, Leo Liang, Zhijiang Guo
+**分类**: cs.CL
+
+## 缺口
+
+训练后的注意力稀疏化，是通过**为每个 query 选择一小组上下文单元**来降低预训练 Transformer 的二次复杂度。在**固定注意力预算**（每个 query 可关注的单元数固定）下，目标就是把它花在**对预测最要紧的那些单元**上。
+
+既有的可训练方法在两个相连的步骤上制造了与这个目标的不匹配。**一个轻量选择器给上下文单元打分，而硬 Top-K 选择随即阻断了来自语言建模损失的梯度。** 于是损失**无法抵达选择器**。而绕道做法是**蒸馏逐层的稠密注意力分布**——它确实给了选择器一个训练信号，但这是一个**瞄错目标**的信号：**尽管这促使选择器按"原模型中的稠密注意力权重"给上下文单元排序，但这个排序与"在固定注意力预算下它们对预测的影响"并不直接对齐，从而可能把有限的预算浪费在不太有用的单元上。**
+
+这就是关键所在。稠密注意力权重是模型**在能关注一切时**所关注的东西；而在有预算时，问题变成**它应该转而关注什么**——而这两者**不必一致**。蒸馏稠密分布，优化的是"与部署模型并不身处其中的那个区间保持一致"。
+
+```
+   训练后的注意力稀疏化
+
+   通过「为每个 QUERY 选择一小组上下文单元」
+     降低预训练 TRANSFORMER 的「二次复杂度」
+   在「固定注意力预算」（每个 QUERY 可关注的单元数固定）下，
+   目标就是把它「花在对预测最要紧的那些单元上」
+        |
+        v
+   既有可训练方法在两个相连的步骤上制造了「不匹配」
+     [1] 一个「轻量选择器」给上下文单元打分
+     [2] 「硬 TOP-K 选择」随即「阻断」了来自语言建模损失的梯度
+         -> 损失「无法抵达选择器」
+        |
+        v
+   [绕道做法，以及它为何瞄错目标]
+     蒸馏「逐层的稠密注意力分布」
+       <- 它「确实」给了选择器一个训练信号
+       但这是一个「瞄错目标」的信号：
+         「尽管这促使选择器按"原模型中的稠密注意力权重"
+           给上下文单元排序，
+           但这个排序与"在固定注意力预算下它们对预测的影响"
+           并不直接对齐，
+           从而可能把有限的预算浪费在不太有用的单元上」
+        |
+        v
+   [关键所在]
+     「稠密注意力权重」是模型「在能关注一切时」所关注的东西
+     而在有预算时，问题变成「它应该转而关注什么」
+       -> 而这两者「不必一致」
+     -> 蒸馏稠密分布，优化的是"与部署模型并不身处其中的
+        那个区间保持一致"
+```
+
+## 增量
+
+**一句话**: 在这篇论文之前，选择器是被"对着稠密注意力"训练的，因为硬选择阻断了损失；在这篇论文之后，把连续分数注入注意力 logits 让语言建模损失能端到端地训练这个排序，并在紧预算下取得最大增益。
+
+### 核心机制
+
+修法**小而结构性**，而它的"小"正是要点：**在训练期间把选择器的连续分数注入注意力 logits，从而使损失能通过标准反向传播更新选择器。** 于是硬选择可以**留在推理阶段**——部署的模型仍然只关注有限的集合——而训练梯度能抵达选择器，因为**软分数参与了前向计算**。它是在**移除**这个不匹配，而不是**补偿**它。
+
+接着论文指出有三项实现选择**对这个简单设计在实践中真正奏效至关重要**，而每一项都针对朴素版本的一种具体失败方式：
+
+- **把门控以「对数形式」放在注意力 softmax 内部。** 在 softmax **之前**的对数空间里相加，而不是在它**之后**做缩放——这才让分数成为一个**与注意力 logit 竞争的加性项**，而不是一个独立的**乘子**。
+- **使用归一化的 softmax 门控，把历史上下文相对那个「始终保留的当前块」做标定。** 当前块是被**无条件保留**的，所以门控必须表达历史单元相对那个基线的分数。没有归一化，"始终在场的那一块"就会成为一个**不可比的参照**。
+- **保留连续的分数，使模型学到「相对优先级」、而不只是「硬选择」。** 在训练时让分数保持"软"，才让模型学到一个**排序**而不是一个**集合**——而这恰恰是原方法**从未优化过**的那个量。
+
+**而且需要一个系统组件才让它可训练：一个内存高效的 Triton 内核**，把 SAS 集成进 FlashAttention 式的计算——因为**长序列训练**正是这个方法必须被施行的场合。
+
+评测覆盖了稀疏注意力真正要紧的区间：**推理、长上下文理解与智能体任务**；而 **SAS 在各种注意力预算上一致优于可训练稀疏注意力的基线，并在紧预算下增益尤其大。**
+
+最后这个从句才是诊断性的。如果主张是"这个排序如今与'预算下的影响'对齐了"，那么**优势应当随着预算收紧而变大**——因为那正是排序质量最要紧、而把预算花在不太有用单元上代价最大的地方。**报告"紧预算下增益最大"，正是该机制所预言的结果**，而它比一个"均匀的改善"是更强的证据。
+
+```
+   「修法小而结构性」——而它的"小"正是要点
+     「在训练期间把选择器的连续分数注入注意力 LOGITS，
+       从而使损失能通过标准反向传播更新选择器」
+       -> 「硬选择」可以「留在推理阶段」：
+          部署的模型仍然只关注有限的集合
+       -> 而「训练梯度能抵达选择器」，因为「软分数参与了前向计算」
+     <- 它是在「移除」这个不匹配，而不是「补偿」它
+
+   「三项实现选择，对这个简单设计在实践中奏效至关重要」
+   ——每一项都针对朴素版本的一种具体失败方式
+
+     [1] 把门控以「对数形式」放在注意力 SOFTMAX「内部」
+           <- 在 SOFTMAX「之前」的对数空间里相加，
+              而不是在它「之后」做缩放
+           -> 让分数成为一个「与注意力 LOGIT 竞争的加性项」，
+              而不是一个独立的「乘子」
+
+     [2] 使用「归一化的 SOFTMAX 门控」，把历史上下文相对那个
+         「始终保留的当前块」做标定
+           <- 当前块被「无条件保留」，所以门控必须表达历史单元
+              相对那个基线的分数
+           -> 没有归一化，"始终在场的那一块"就会成为一个
+              「不可比的参照」
+
+     [3] 「保留连续的分数」，使模型学到「相对优先级」、
+         而不只是「硬选择」
+           <- 训练时让分数保持"软"，才让模型学到一个「排序」
+              而不是一个「集合」
+           <- 而这恰恰是原方法「从未优化过」的那个量
+
+   「而且需要一个系统组件才让它可训练」
+     一个「内存高效的 TRITON 内核」，把 SAS 集成进
+     FLASHATTENTION 式的计算
+       <- 因为「长序列训练」正是这个方法必须被施行的场合
+
+   「评测覆盖了稀疏注意力真正要紧的区间」
+     推理 | 长上下文理解 | 智能体任务
+     -> SAS 在各种注意力预算上「一致优于」可训练稀疏注意力的基线
+     -> 并在「紧预算下增益尤其大」
+       <- 「诊断性从句」：如果这个排序如今与"预算下的影响"对齐了，
+          那么优势应当「随预算收紧而变大」
+          <- 那正是排序质量最要紧、而把预算花在不太有用单元上
+             代价最大的地方
+       -> 「该机制所预言的结果」，比"均匀的改善"是「更强」的证据
+```
+
+可以用**"一份由「从没被迫轻装出行过的人」写的打包清单"**来理解这件事：
+要一个装满的大箱子，他会给一份合理的清单。要一个登机箱，他会给你**把那份大清单截断**——因为那个顺序从来不是按重量排的，所以截断留下的是"恰好排在前面"的东西。
+你想要的，是让这个人**在约束之下练习**，从而让排序本身反映"什么值得占那份空间"。
+论文的三项实现细节，就是让这种练习奏效的对应物：物品的价值必须在与清单上其他东西**同一套单位**里被衡量（softmax 内部的对数形式门控，而不是单独的乘子）；它必须与"无论如何都会带着的东西"作比较（相对始终保留的块做归一化）；而且在练习期间它必须**保持是一个排序**、而不会塌缩成"是/否"（保留连续分数）。
+而"箱子越小收益越大"这个预测，正是**当排序终于反映了那个约束时**你会期待的结果。
+
+### 关键概念
+
+- **梯度被阻断的不匹配**: 硬 Top-K 使损失无法抵达选择器。这正是蒸馏被使用、也正因为此目标最终瞄错了。
+- **预算下的排序 vs 匹配稠密注意力**: 稠密反映的是部署模型**并不身处**的区间；蒸馏它，优化的是"与模型不会经历的东西保持一致"。
+- **把分数注入 LOGITS**: 前向计算里的软分数让损失能训练选择器，同时硬选择留在推理阶段。不匹配被**移除**，而不是被**抵消**。
+- **对数形式门控与归一化**: 在 softmax 之前相加，使分数与注意力 logit 竞争；做归一化，使"始终保留的块"成为可比参照。两者都是朴素版本会做错的地方。
+- **保留连续分数**: 学到**相对排序**而非**硬集合**——而这正是原方法从未优化的那个量。
+- **以"随预算变化的增益"作为确证模式**: 随预算收紧而增大的优势，正是"对齐"主张所预言的，而不只是一个指标改善。
+
+## 框架转变
+
+```
+之前（蒸馏稠密分布）：
+  选择器给单元打分；硬 TOP-K 阻断损失
+  -> 以逐层稠密注意力作为训练信号
+  -> 优化的是"与稠密注意力的一致"，而那是与"有预算"不同的区间
+  -> 预算可能被花在"在有预算时并不那么要紧"的单元上
+
+之后（用任务损失训练排序）：
+  把连续分数注入注意力 LOGITS，以对数形式门控
+  相对"始终保留的块"做归一化
+  保留连续分数，从而学到排序
+  -> 硬选择留在推理阶段
+  -> 在各种预算上一致增益，紧预算下最大
+```
+
+从"模仿模型在不受约束时所关注的东西"，转变为"优化它在约束之下**应当**关注什么"，核心转变在于：**一个有预算的决定需要自己的训练信号，而不是来自另一个区间的代理。**
+
+## 专家评审
+
+**选题眼光**: 极好，而这个诊断精确地针对了一个很容易犯的错。
+蒸馏稠密注意力是给"被阻断的选择器"提供信号的一种自然做法；而论文的要点——它训练模型去模仿一个**不受约束的区间**——指出了这个绕道做法为何从来不可能最优，而不只是"次优的程度问题"。
+
+**方法成熟度**: 设计的优雅之处在于它**移除**了阻断、而不是**补偿**它——这正是**小改动**就足够的原因。
+三项实现选择值得注意，因为每一项都是**朴素版本的一种具体失败**：在对数空间相加、相对无条件基线做归一化、保持分数连续。把它们**列出来**而不是把这个技术呈现为一个招数，才让它可复现。
+为 FlashAttention 式集成构建 Triton 内核，是长序列训练所必需的系统工作；而按预算报告增益模式，正是该机制所预言的验证。
+
+**实验诚意**: 报告"紧预算下增益最大"是正确的证据形态——因为"均匀改善"与多种解释都相容，而"依赖预算的改善"**特定地**吻合那个对齐说法。
+覆盖推理、长上下文理解与智能体任务，给出了稀疏注意力实际被使用的那些区间上的广度。
+主要局限是：该机制的成功取决于选择器学到一个**能跨预算泛化**的排序——因为训练的是**一个**排序、然后在各种预算上评估它；而"学到的排序在推理时对预算变化有多稳健"，是自然的后续问题。
+
+**写作功力**: 摘要的结构——阻断、绕道、绕道为何瞄错、然后是修法——让推理可以跟得上；三项实现选择被作为**要求**而不是**细节**陈述。
+由于实践型读者想知道三项里哪一项最要紧，若能补一段简短的敏感性说明，会帮他们在适配这个方法时排出优先级。
+
+**判决**: **强接收（Strong Accept）** — 它指出蒸馏稠密注意力优化的是**错误的区间**，用一个最小的结构性改动**移除了梯度阻断**，并用一个该机制所预言的、随预算变化的增益模式验证了这个修法。
+
+## 要点总结
+
+- 检查你的训练信号**是否在教你"你所部署的那个区间"**。稠密注意力是模型在不受约束时的做法，而那并不是稀疏推理所创造的设定。
+- **移除阻断**，而不是**补偿**它。让分数参与前向计算，就能让任务损失训练选择器——而蒸馏不过是"梯度缺失"的替代品。
+- 把门控的**算术**做对。在 softmax 之前于对数空间相加、以及相对"始终保留的块"做归一化，才让分数与它所竞争的对象可比。
+- 找那些**随约束收紧而增大**的增益。随预算收紧而增大的优势，正是"对齐"主张所预言的，而且它比均匀改善更强。
+:::
