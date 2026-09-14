@@ -37,7 +37,7 @@ from manim_prompts import (
 from render_manim import VISUALS_DIR, render_scene, validate_scene_code
 
 BLOG_DIR = Path(__file__).resolve().parent.parent / "src" / "content" / "blog"
-LAST_FETCH_FILE = Path(__file__).resolve().parent / ".last_fetch"
+CURSOR_FILE = Path(__file__).resolve().parent / ".last_fetch"
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 ARXIV_RSS_URL = "https://rss.arxiv.org/rss/{category}"
 ARXIV_REQUEST_HEADERS = {
@@ -45,6 +45,15 @@ ARXIV_REQUEST_HEADERS = {
     "Accept": "application/atom+xml",
 }
 CATEGORIES = ["cs.AI", "cs.LG", "cs.CL", "cs.CV"]
+# The OAI-PMH endpoint is the only arXiv metadata source that accepts an
+# explicit date range and is not throttled the way export.arxiv.org is. That
+# range is what lets a run reach backwards into an outage instead of only ever
+# seeing the newest papers.
+ARXIV_OAI_URL = "https://oaipmh.arxiv.org/oai"
+OAI_MAX_PAGES = 5
+# Announcements trail submissions by a couple of days (longer over a weekend),
+# so a day's batch is made of papers first submitted shortly before it.
+ANNOUNCE_LAG_DAYS = 4
 ARXIV_IMAGE = "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
 
 
@@ -80,16 +89,46 @@ def get_llm_client():
         return OpenAI(api_key=api_key, base_url=base_url), model, "openai"
 
 
-def load_last_fetch():
-    if LAST_FETCH_FILE.exists():
-        text = LAST_FETCH_FILE.read_text().strip()
+def load_cursor():
+    """The first day of announcements the blog has not covered yet.
+
+    This used to record when the previous run happened, and nothing read it
+    back. As a cursor it is what makes a backfill possible: each run walks it
+    forward, so a gap gets closed one day at a time instead of being skipped
+    because the newest 20 papers had already moved on.
+    """
+    if CURSOR_FILE.exists():
+        text = CURSOR_FILE.read_text().strip()
         if text:
             return datetime.fromisoformat(text)
     return datetime.now(timezone.utc) - timedelta(hours=24)
 
 
-def save_last_fetch():
-    LAST_FETCH_FILE.write_text(datetime.now(timezone.utc).isoformat())
+def save_cursor(cursor):
+    CURSOR_FILE.write_text(cursor.isoformat())
+
+
+def _parse_env_date(name):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        print(f"Ignoring {name}: {raw!r} is not an ISO date")
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _env_count(default):
+    raw = os.environ.get("ARXIV_COUNT", "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        print(f"Ignoring ARXIV_COUNT: {raw!r} is not an integer")
+        return default
 
 
 def _request_arxiv(url, *, params=None, accept="application/atom+xml", max_retries=3):
@@ -195,6 +234,76 @@ def _parse_rss_papers(xml_text):
     return papers
 
 
+def _merge_paper(papers_by_id, paper):
+    """Fold a duplicate into the copy already collected.
+
+    A cross-listed paper is returned once per matching set, so the same arXiv
+    ID arrives several times with a different category list each time.
+    """
+    existing = papers_by_id.get(paper["id"])
+    if existing:
+        existing["categories"] = sorted(set(existing["categories"] + paper["categories"]))
+    else:
+        papers_by_id[paper["id"]] = paper
+
+
+def _parse_oai_papers(xml_text):
+    """Parse an OAI-PMH ListRecords page into (papers, resumption_token).
+
+    Uses the arXivRaw format because it carries the version history, and the
+    first version's date is what tells a genuinely new paper apart from a
+    2024 paper whose v4 happens to be announced today. That date is the same
+    thing the Atom API used to sort by, so it keeps the archive consistent.
+    """
+    ns = {
+        "oai": "http://www.openarchives.org/OAI/2.0/",
+        "raw": "http://arxiv.org/OAI/arXivRaw/",
+    }
+    root = ET.fromstring(xml_text)
+    papers = []
+
+    for record in root.findall(".//oai:record", ns):
+        metadata = record.find("oai:metadata/raw:arXivRaw", ns)
+        if metadata is None:
+            continue  # withdrawn records carry a header but no metadata
+
+        arxiv_id = (metadata.findtext("raw:id", default="", namespaces=ns) or "").strip()
+        if not arxiv_id:
+            continue
+
+        first_version = metadata.find("raw:version", ns)
+        try:
+            published = parsedate_to_datetime(
+                (first_version.findtext("raw:date", default="", namespaces=ns) or "").strip()
+            ).isoformat()
+        except (AttributeError, TypeError, ValueError):
+            published = ""
+
+        papers.append({
+            "id": re.sub(r"v\d+$", "", arxiv_id),
+            "title": re.sub(
+                r"\s+",
+                " ",
+                (metadata.findtext("raw:title", default="", namespaces=ns) or "").strip(),
+            ),
+            "summary": (metadata.findtext("raw:abstract", default="", namespaces=ns) or "").strip(),
+            "authors": [
+                author.strip()
+                for author in (metadata.findtext("raw:authors", default="", namespaces=ns) or "").split(",")
+                if author.strip()
+            ],
+            "categories": (metadata.findtext("raw:categories", default="", namespaces=ns) or "").split(),
+            "published": published,
+            "announced": (
+                record.findtext("oai:header/oai:datestamp", default="", namespaces=ns) or ""
+            ).strip(),
+        })
+
+    token = root.find(".//oai:resumptionToken", ns)
+    token_text = (token.text or "").strip() if token is not None else ""
+    return papers, token_text or None
+
+
 def _fetch_rss_papers(categories, max_results):
     """Fetch category RSS feeds as a fallback for the rate-limited Atom API."""
     papers_by_id = {}
@@ -215,11 +324,7 @@ def _fetch_rss_papers(categories, max_results):
             continue
 
         for paper in category_papers:
-            existing = papers_by_id.get(paper["id"])
-            if existing:
-                existing["categories"] = sorted(set(existing["categories"] + paper["categories"]))
-            else:
-                papers_by_id[paper["id"]] = paper
+            _merge_paper(papers_by_id, paper)
 
     if not papers_by_id and last_error:
         raise last_error
@@ -232,11 +337,67 @@ def _fetch_rss_papers(categories, max_results):
     return papers[:max_results]
 
 
-def fetch_recent_papers(categories, max_results=20):
-    """Query arXiv for recent papers, falling back to category RSS feeds."""
+def _oai_sets(categories):
+    """Map `cs.AI`-style category names onto arXiv's OAI set specs."""
+    sets = [f"cs:cs:{category.split('.', 1)[1]}" for category in categories if "." in category]
+    return sets or [f"cs:cs:{category}" for category in CATEGORIES]
+
+
+def _fetch_oai_papers(categories, since, until):
+    """Harvest the papers announced in a date range, newest submission first.
+
+    Paging follows the resumptionToken, which is a cursor into the result set
+    rather than an offset, and expires after a day.
+
+    The datestamp range is by announcement, but a record's datestamp also moves
+    when an old paper is re-versioned, so the range alone drags in years-old
+    papers. Filtering on the first version's date keeps only what was actually
+    submitted for this window.
+    """
+    papers_by_id = {}
+    submitted_after = since - timedelta(days=ANNOUNCE_LAG_DAYS)
+
+    for index, oai_set in enumerate(_oai_sets(categories)):
+        if index:
+            time.sleep(3)  # arXiv asks clients to leave 3s between requests
+        token = None
+
+        for _ in range(OAI_MAX_PAGES):
+            params = (
+                {"verb": "ListRecords", "resumptionToken": token}
+                if token
+                else {
+                    "verb": "ListRecords",
+                    "metadataPrefix": "arXivRaw",
+                    "set": oai_set,
+                    "from": f"{since:%Y-%m-%d}",
+                    "until": f"{until:%Y-%m-%d}",
+                }
+            )
+            time.sleep(3)
+            response = _request_arxiv(ARXIV_OAI_URL, params=params, accept="application/xml")
+            page, token = _parse_oai_papers(response.text)
+
+            for paper in page:
+                if paper["published"] >= submitted_after.isoformat():
+                    _merge_paper(papers_by_id, paper)
+
+            if not token:
+                break
+
+    return list(papers_by_id.values())
+
+
+def _fetch_atom_papers(categories, max_results, window=None):
+    """Query the Atom API, optionally restricted to an announced-date window."""
     cat_query = " OR ".join(f"cat:{category}" for category in categories)
+    search_query = f"({cat_query})"
+    if window:
+        since, until = window
+        search_query += f" AND submittedDate:[{since:%Y%m%d%H%M} TO {until:%Y%m%d%H%M}]"
+
     params = {
-        "search_query": f"({cat_query})",
+        "search_query": search_query,
         "start": 0,
         "max_results": max_results,
         "sortBy": "submittedDate",
@@ -245,12 +406,69 @@ def fetch_recent_papers(categories, max_results=20):
 
     # arXiv asks API clients to leave at least three seconds between requests.
     time.sleep(3)
+    response = _request_arxiv(ARXIV_API_URL, params=params)
+    return _parse_atom_papers(response.text)
+
+
+def _announced_within(paper, since, until):
+    """Whether a paper's announcement date falls inside the window."""
+    for key in ("announced", "published"):
+        raw = (paper.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            announced = datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+        except ValueError:
+            continue
+        return since.date() <= announced <= until.date()
+    return False
+
+
+def _freshest_first(papers, max_results):
+    """Newest submission first, which is how the Atom query used to rank, so a
+    run keeps sampling the most recent work rather than the tail of the day."""
+    return sorted(
+        papers,
+        key=lambda paper: (paper.get("published") or "", paper["id"]),
+        reverse=True,
+    )[:max_results]
+
+
+def fetch_papers_between(categories, since, until, max_results=20):
+    """Return the papers announced between two dates, newest submission first.
+
+    Raises when no source could serve the window, so the caller can leave its
+    cursor where it is and retry the same day instead of recording it as
+    covered.
+    """
     try:
-        response = _request_arxiv(ARXIV_API_URL, params=params)
-        return _parse_atom_papers(response.text)
+        papers = _fetch_oai_papers(categories, since, until)
     except (requests.exceptions.RequestException, ET.ParseError) as exc:
-        print(f"Atom API unavailable ({exc}); falling back to arXiv RSS feeds")
-        return _fetch_rss_papers(categories, max_results)
+        print(f"OAI harvest unavailable ({exc}); falling back to the Atom API")
+    else:
+        return _freshest_first(papers, max_results)
+
+    try:
+        papers = _fetch_atom_papers(categories, max_results, window=(since, until))
+    except (requests.exceptions.RequestException, ET.ParseError) as exc:
+        print(f"Atom API unavailable ({exc})")
+    else:
+        return _freshest_first(papers, max_results)
+
+    # RSS carries no date range, so it can only ever describe the current day.
+    # Offering it for an older window would silently mark that day as covered.
+    if until.date() >= datetime.now(timezone.utc).date():
+        try:
+            papers = _fetch_rss_papers(categories, max_results)
+        except (requests.exceptions.RequestException, ET.ParseError) as exc:
+            print(f"RSS fallback unavailable ({exc})")
+        else:
+            return _freshest_first(
+                [paper for paper in papers if _announced_within(paper, since, until)],
+                max_results,
+            )
+
+    raise RuntimeError(f"no arXiv source could serve {since:%Y-%m-%d}..{until:%Y-%m-%d}")
 
 
 def get_existing_arxiv_ids():
@@ -967,6 +1185,17 @@ def patch_frontmatter_image(mdx: str, image_url: str) -> str:
     )
 
 
+def patch_frontmatter_date(mdx: str, date: str) -> str:
+    """Replace the frontmatter date: field."""
+    return re.sub(
+        r"^(date:\s*).*$",
+        f"\\g<1>{date}",
+        mdx,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+
 def insert_after_frontmatter(mdx: str, content: str) -> str:
     """Insert content after the closing --- of frontmatter."""
     parts = mdx.split("---", 2)
@@ -977,19 +1206,37 @@ def insert_after_frontmatter(mdx: str, content: str) -> str:
 
 def main():
     client, model, provider = get_llm_client()
-    last_fetch = load_last_fetch()
-    print(f"Last fetch: {last_fetch.isoformat()}")
+
+    today = datetime.now(timezone.utc).date()
+    cursor = _parse_env_date("ARXIV_SINCE") or load_cursor()
+    if cursor.date() < today:
+        print(f"Cursor is behind ({cursor.date().isoformat()}); backfilling")
+    # One announcement day per run, clamped so it never starts in the future.
+    # A cursor already ahead of today -- the 2nd and 3rd cron run of a day --
+    # falls back onto today, which re-offers the day but never skips one.
+    start_date = min(cursor.date(), today)
+    start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
+    next_cursor = start + timedelta(days=1)
+    max_results = _env_count(20)
+
+    print(f"Cursor: {cursor.date().isoformat()}")
     print(f"Using {provider} provider with model: {model}")
 
-    # Fetch recent papers
-    print("Fetching recent papers from arxiv...")
-    papers = fetch_recent_papers(CATEGORIES, max_results=20)
+    print(f"Fetching papers announced on {start:%Y-%m-%d} from arxiv...")
+    try:
+        papers = fetch_papers_between(CATEGORIES, start, start, max_results=max_results)
+    except Exception as exc:
+        # The cursor is only ever persisted by a committed run, so failing here
+        # means this day stays uncovered and the next run comes back for it.
+        print(f"Error: no arXiv source could serve this window ({exc})")
+        sys.exit(1)
     print(f"Found {len(papers)} papers")
 
-    if not papers:
-        print("No papers found, exiting")
-        save_last_fetch()
-        return
+    # Advance the cursor even when the window turns out empty or fully covered:
+    # arXiv announces nothing at weekends, and leaving the cursor on a covered
+    # day would stall the walk forward for good.
+    save_cursor(next_cursor)
+    print(f"Cursor advanced to {next_cursor.date().isoformat()}")
 
     # Filter out already-covered papers
     existing_ids = get_existing_arxiv_ids()
@@ -999,7 +1246,6 @@ def main():
 
     if not papers:
         print("No new papers to process")
-        save_last_fetch()
         return
 
     # Select most interesting papers
@@ -1043,6 +1289,12 @@ def main():
 
         content = sanitize_mdx(content)
 
+        # The prompt hands the LLM today's date, which is wrong for a backfilled
+        # paper: the archive would show weeks of posts as if they were all
+        # written on the day the backfill ran. Stamp the announce day instead.
+        if paper.get("announced"):
+            content = patch_frontmatter_date(content, paper["announced"])
+
         # Generate visuals (never blocks text post)
         try:
             print(f"  Generating visuals for: {paper['title']}...")
@@ -1074,11 +1326,10 @@ def main():
         written += 1
         print(f"Wrote {filepath}")
 
-    save_last_fetch()
     print(f"Done! Wrote {written} post(s).")
 
     # A run that picked papers and produced nothing means every generation call
-    # failed. Exiting 0 there commits only .last_fetch, which looks like a
+    # failed. Exiting 0 there commits only the cursor, which looks like a
     # healthy no-op run -- that is how the endpoint outage went unnoticed for a
     # week. Fail loudly instead.
     if written == 0 and skipped_existing < len(selected):
