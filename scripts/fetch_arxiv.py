@@ -611,7 +611,18 @@ def generate_blog_post(client, model, provider, paper):
     cats_str = ", ".join(paper["categories"][:5])
 
     tags_list = ', '.join('"{}"'.format(c.lower()) for c in paper['categories'][:5])
-    prompt = """You are reading an academic paper and explaining it to a smart colleague over coffee. Your goal: help them understand what gap this paper fills, what's actually new, and whether it's worth their attention.
+    prompt = """You are reading an academic paper and explaining it to a smart colleague over coffee.
+
+Three goals, checked separately:
+1. Say clearly what the paper did: research question, main contribution, how the method or relation works, and the scope of the key evidence.
+2. Show why the reader's prior understanding needs correction — not always a dramatic reversal. The change may be a correction, a supplement, a distinction, or a narrowed scope.
+3. Leave the reader able to explain the results themselves. If there is a unifying mechanism, use it to explain at least two different findings. If there is not, say so and show how the findings still fit together.
+
+Contribution-type emphasis:
+- Method / intervention: which action changed, how input moves through steps, why results can differ.
+- Theory / explanation: which factors act how, which findings it explains, where it stops holding.
+- Measurement / evaluation: what the old metric missed, what the new one measures, and the remaining gap between measured and explained.
+- Resource / system: what capability is provided, which cost/speed/scale limit is reduced, what constraints remain.
 
 Paper ID: {paper_id}
 Title: {paper_title}
@@ -640,7 +651,7 @@ image: "{ARXIV_IMAGE}"
 
 ## The Gap
 
-[Where has existing research reached? What specific boundary or limitation does this paper address? Be precise — name the prior approaches and their shortcomings. Then show the logical path from gap → method → evidence → conclusion using a simple ASCII diagram.]
+[Where has existing research reached? What specific boundary or limitation does this paper address? Be precise — name the prior approaches and their shortcomings. Then show the logical path from gap → method → evidence → conclusion using a simple ASCII diagram. First two sections must already make the research question and main contribution clear.]
 
 ```
 [ASCII logic topology showing: Problem → Assumption → Method → Evidence → Conclusion]
@@ -650,15 +661,15 @@ image: "{ARXIV_IMAGE}"
 
 ## The Increment
 
-**One sentence**: [Before this paper vs after this paper — what changed in the world?]
+**One sentence**: [What does this paper add, narrow, correct, or distinguish? Do not force a dramatic before/after if the paper only supplements or narrows scope — say what actually changed.]
 
 ### Core Mechanism
 
-[Explain the method's internal structure in 2-3 paragraphs. What are the components? How does data flow? What operations happen?]
+[Explain the method's internal structure in 2-3 paragraphs. What are the components? How does data flow? What operations happen? Name the paper's contribution type (method / theory / measurement / resource) and explain along that axis.]
 
 ```
-[ASCII diagram of method internals: components, data flow, operations]
-[This is the X-ray of how it works inside]
+[ASCII diagram of method internals: components, data flow, operations — include only if it reduces mental assembly; otherwise omit this diagram]
+[Use only pure ASCII: + - | / \\ > < v ^ * = ~ . : # [ ] ( ) _]
 ```
 
 [Now explain using a **structural metaphor**: find something familiar where each part of the method maps to a part of the analogy. Walk through the method using this metaphor so the reader can retell it in their own words. The metaphor must be load-bearing — without it, the reader is back to staring at diagrams.]
@@ -670,7 +681,7 @@ image: "{ARXIV_IMAGE}"
 
 ## Framework Shift
 
-[Draw a "napkin sketch" comparing the old way vs this paper's way. The goal: let the reader see the gestalt shift at a glance.]
+[Draw a "napkin sketch" comparing the old way vs this paper's way. The goal: let the reader see the structural change at a glance — a correction, a narrowed scope, or a genuine shift, not an inflated reversal.]
 
 ```
 Before (mainstream approach):        After (this paper):
@@ -686,9 +697,9 @@ Before (mainstream approach):        After (this paper):
 
 **Problem choice**: [Is this a real gap or manufactured? Where does it sit in the field's trajectory?]
 
-**Method maturity**: [Clever insight or brute force? Are there simpler approaches being overlooked?]
+**Method maturity**: [Clever insight or brute force? Are there simpler approaches being overlooked? Name at least one unexamined assumption if one exists — this matters more than "scale is small".]
 
-**Experimental integrity**: [Are baselines fair? Do the numbers hold up under scrutiny? Any red flags?]
+**Experimental integrity**: [What did the central experiment ask, fix, change, and compare against? Are baselines fair? Do the numbers hold up under scrutiny? Any red flags?]
 
 **Writing quality**: [Where did the authors cut corners? Which section, if rewritten, would elevate the whole paper?]
 
@@ -706,7 +717,7 @@ Before (mainstream approach):        After (this paper):
 
 ## 缺口
 
-[现有研究到达了什么边界？这篇论文要解决什么具体的局限或问题？要精准——指出此前的方法及其不足。然后用简单的 ASCII 图展示从缺口到方法到证据到结论的逻辑路径。]
+[现有研究到达了什么边界？这篇论文要解决什么具体的局限或问题？要精准——指出此前的方法及其不足。然后用简单的 ASCII 图展示从缺口到方法到证据到结论的逻辑路径。前两节必须已让读者知道研究问题与主要贡献。]
 
 ```
 [ASCII 逻辑拓扑图：问题 → 假设 → 方法 → 证据 → 结论]
@@ -716,15 +727,15 @@ Before (mainstream approach):        After (this paper):
 
 ## 增量
 
-**一句话**: [这篇论文之前 vs 之后——世界多了什么？]
+**一句话**: [这篇论文实际增加了什么、收窄了什么、纠正了什么或区分了什么？不要硬造戏剧性的前后反转——若只是补充或缩小适用范围，就如实写。]
 
 ### 核心机制
 
-[用2-3段解释方法的内部结构。有哪些组件？数据如何流动？发生了什么操作？]
+[用2-3段解释方法的内部结构。有哪些组件？数据如何流动？发生了什么操作？点明贡献类型（方法／理论／评测／资源）并沿该轴展开。]
 
 ```
-[方法内部的 ASCII 图：组件、数据流、操作]
-[这是方法内部运作的X光片]
+[方法内部的 ASCII 图：组件、数据流、操作——仅在能减少脑内拼装负担时保留，否则省略]
+[只用纯 ASCII：+ - | / \\ > < v ^ * = ~ . : # [ ] ( ) _]
 ```
 
 [现在用**核喻**（结构性比喻）来解释：找一个熟悉的事物，方法的每个部分都能映射到比喻的某个部分。沿着这个比喻把方法走一遍，让读者能用自己的话复述。核喻必须承重——没有它，读者就回到盯着图发呆的状态。]
@@ -736,7 +747,7 @@ Before (mainstream approach):        After (this paper):
 
 ## 框架转变
 
-[画一张"餐巾纸速写"对比旧方法和本文方法。目标：让读者一眼看出思维方式的转变。]
+[画一张"餐巾纸速写"对比旧方法和本文方法。目标：让读者一眼看出结构上的位移——纠正、收窄或真正的转变，而不是夸大反转。]
 
 ```
 之前（主流方法）：                之后（本文方法）：
@@ -752,9 +763,9 @@ Before (mainstream approach):        After (this paper):
 
 **选题眼光**: [这是真缺口还是人造缺口？在该领域的发展轨迹中处于什么位置？]
 
-**方法成熟度**: [巧劲还是蛮力？有没有被忽略的更简单方法？]
+**方法成熟度**: [巧劲还是蛮力？有没有被忽略的更简单方法？若有未被讨论的根本预设，必须点出——这比「scale 不够」重要。]
 
-**实验诚意**: [基线公平吗？数字经得起推敲吗？有无值得警惕之处？]
+**实验诚意**: [中心实验问了什么、固定了什么、改了什么、和谁比？基线公平吗？数字经得起推敲吗？有无值得警惕之处？]
 
 **写作功力**: [作者在哪里偷懒了？哪一段重写能让整篇论文升一个档次？]
 
@@ -766,11 +777,18 @@ Before (mainstream approach):        After (this paper):
 :::
 
 CRITICAL CONSTRAINTS:
+- Three goals: (1) what the paper did is clear, (2) why understanding needed correction (not forced drama), (3) reader can explain results — use a unifying mechanism for 2+ findings when one exists, otherwise say so
+- Numbers: before stating a number, say what the experiment asked, fixed, changed, and compared against; after the number, say what judgment it updates
+- Do not claim a unified mechanism if the paper does not provide one; do not invent causal claims from correlational evidence
+- Do not overstate: name what the paper does NOT claim when that boundary matters
+- Evidence: lead with the most representative results; supplementary results only when they add a different limit, exception, or check — do not average across every experiment
+- Example switching: prefer one concrete anchor; you may switch examples when one cannot hold a research line, but say what the new example adds
 - ASCII diagrams: ONLY use + - | / \\ > < v ^ * = ~ . : # [ ] ( ) _ and spaces
 - NEVER use Unicode box drawing: ─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼ ═ ║ ╔ ╗ ╚ ╝ ● ○ ■ □ ◆ ◇ ▼ ▲ ► ◄ → ← ↑ ↓
+- Diagrams only when they reduce mental assembly; keep the Gap topology and Framework Shift napkin; Core Mechanism diagram is optional
 - Chinese paragraphs: Add line breaks after periods (。) to prevent horizontal scrolling
 - Structural metaphor: Must be load-bearing (method components map to analogy parts), not decorative
-- Expert assessment: Be honest and calibrated, not uniformly positive
+- Expert assessment: Be honest and calibrated, not uniformly positive; method maturity should surface at least one unexamined assumption when one exists
 - Tone: Like explaining to a colleague over coffee, not writing a review
 - Chinese content: Parallel composition, NOT translation
 - MDX safety: Escape curly braces in mathematical notation (use \\{{ and \\}} instead of {{ and }}) to prevent JSX parsing errors. Examples: \\{{-1,1\\}}^n, \\{{1,...,n\\}}, f: X \\to \\{{0,1\\}}
