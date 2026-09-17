@@ -2,6 +2,19 @@
 
 Based on the ljg-skill-paper approach, we've upgraded the arxiv blog post generation to create more insightful, readable content.
 
+## 2026-09-17 — folded in ljg-paper v1.17.110
+
+Source: [lijigang/ljg-skills](https://github.com/lijigang/ljg-skills) `skills/ljg-paper` (rewrite away from the archived Gap/Increment-only skill). Useful pieces adopted into `generate_blog_post()`:
+
+1. **Three goals** — say what the paper did; show why understanding needed correction (may be a supplement or narrowed scope, not a forced reversal); leave the reader able to explain results (unifying mechanism for 2+ findings when one exists).
+2. **Contribution-type routing** — method / theory / measurement / resource each get a different explanation axis.
+3. **No forced drama** — the one-sentence increment no longer requires a dramatic before/after.
+4. **Numbers with context** — state what the experiment asked/fixed/changed/compared before the number, and which judgment it updates after.
+5. **Unexamined assumptions** — Expert Assessment method maturity must surface at least one when one exists.
+6. **Optional core-mechanism diagram** — Gap topology and Framework Shift napkin stay; the X-ray diagram is included only when it reduces mental assembly.
+
+Not adopted (wrong surface for an automated blog): paper-map + validate_note.ts, Denote/Emacs packaging, independent-reading-check workflow, `~/Context/` output.
+
 ## Key Changes
 
 ### 1. **Added "The Gap" Section with Logic Topology**

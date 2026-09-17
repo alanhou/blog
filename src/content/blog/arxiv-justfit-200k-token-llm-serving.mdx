@@ -1,0 +1,344 @@
+---
+title:
+  en: "JustFit: 200K-Token LLM Serving on a 24 GiB Laptop with Just-in-Time State Management"
+  zh: "JustFit：用即时状态管理在 24 GiB 笔记本上跑 20 万 token"
+description:
+  en: "Compressed KV execution, component residency, and state-preserving transitions push a 24 GiB M4 Pro laptop from 30K to 213K completed context on a 27B model -- 6.93x -- while still answering 29/30 AIME problems."
+  zh: "压缩 KV 执行、组件驻留与保状态切换，把 24 GiB 的 M4 Pro 笔记本在 27B 模型上的可完成上下文从 3 万推到 21.3 万——6.93 倍——同时仍答对 29/30 道 AIME 题。"
+date: 2026-09-17
+tags: ["arxiv", "ai", "cs.ai", "cs.pf"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2609.17475](https://arxiv.org/abs/2609.17475)
+**Authors**: Yuhua Chen
+**Categories**: cs.AI, cs.PF
+
+## The Gap
+
+Capable open-weight models make local coding and reasoning attractive: no cloud round-trip, no data leaves the machine, latency is yours. The blocker is not the weights alone. **Context and execution state strain laptop memory.**
+
+That is the honest bottleneck. A quantized 27B model can fit; a long coding session, a full repo map, or an extended reasoning trace may not. Existing runtimes either cap context well below the model's advertised window, thrash when state grows, or lose state across transitions.
+
+The paper's framing of the gap is systems-correct: you need mechanisms that **fuse reconstruction and coordinate just-in-time materialization and release, independently of model-weight quantization.** Quantizing weights harder is not the same as managing KV and component residency.
+
+```
+   THE LOCAL SERVING BOTTLENECK
+
+   capable open-weight models
+     local coding + reasoning is attractive
+     no cloud round-trip, data stays on device
+         |
+         v
+   blocker is not weights alone
+     CONTEXT + EXECUTION STATE strain laptop memory
+         |
+         v
+   a quantized 27B may FIT
+   a long session / repo map / long reasoning trace may NOT
+         |
+         v
+   existing runtimes
+     cap context far below advertised window
+     OR thrash as state grows
+     OR lose state across transitions
+         |
+         v
+   what is actually needed
+     fuse reconstruction
+     coordinate just-in-time materialization AND release
+     independent of weight quantization
+     (harder weight quant != state management)
+```
+
+## The Increment
+
+**One sentence**: Before JustFit, a 24 GiB laptop serving a 27B open-weight model completed about 30K context positions; after it, compressed KV execution plus residency and state-preserving transitions complete 212,992 positions -- 6.93x -- without giving up AIME-level reasoning.
+
+### Core Mechanism
+
+**Three mechanisms, one runtime (MLX-based).**
+
+**KVExec: compressed KV execution.** Rather than keeping a full-precision, fully materialized key-value cache for the entire context, JustFit compresses and executes against a managed KV state. The abstract is careful that this is **independent of model-weight quantization** -- the weights can already be MXFP4; the win is in the activation/state path.
+
+**PhaseSwap: component residency.** Not every runtime component needs to be resident at every moment. PhaseSwap decides what stays in memory by phase, trading compute for footprint in a coordinated way.
+
+**StateTrans: state-preserving serving transitions.** This is the piece that turns "can run once" into "can serve." Transitions between modes (or phases of a request) preserve state instead of discarding and rebuilding it, which is what usually collapses long sessions.
+
+**These mechanisms fuse reconstruction and coordinate just-in-time materialization and release.** The design principle is materialize what you need when you need it, release it when you do not, and never lose the logical session across that churn.
+
+```
+   JustFit = KVExec + PhaseSwap + StateTrans
+
+   [KVExec] compressed KV execution
+     do not keep full-precision full-length KV always resident
+     execute against a managed/compressed KV state
+     independent of weight quantization
+     (weights may already be MXFP4)
+         |
+         v
+   [PhaseSwap] component residency
+     not every component resident in every phase
+     decide residency by phase
+     trade compute for footprint in a coordinated way
+         |
+         v
+   [StateTrans] state-preserving transitions
+     mode/phase transitions PRESERVE state
+     do not discard-and-rebuild
+     this is what usually kills long sessions
+         |
+         v
+   design principle
+     materialize what you need WHEN you need it
+     release when you do not
+     never lose the logical session across that churn
+```
+
+**The headline capacity test is unusually concrete.** Full-execution capacity tests on a **24 GiB M4 Pro MacBook** running **Qwen3.8-27B MXFP4**: three independent runs complete **196,608 input and 16,384 output tokens**, increasing completed single-request context from the **mlx-vlm baseline's 30,720 positions to 212,992 (6.93x)**. A separate two-request run retains **229,376 positions in aggregate**.
+
+Performance is reported separately, which is the right hygiene: a **32K-input, 64-output probe reaches 19.11 tokens/s**, and a repeated **32K+6K workload has a median peak process footprint of 16,374 MiB**. That peak is what makes the 24 GiB claim credible rather than promotional.
+
+**And the quality check that prevents a pure systems paper from becoming a "long context that forgets" paper:** the integrated runtime answers **29 of 30 AIME 2026 problems correctly**, showing compact state and lifetime-aware execution still support extended generated reasoning.
+
+```
+   MEASURED RESULTS
+
+   hardware: 24 GiB M4 Pro MacBook
+   model:    Qwen3.8-27B MXFP4
+   baseline: mlx-vlm
+
+   capacity (full execution, 3 independent runs)
+     completed single-request context
+       baseline:  30,720 positions
+       JustFit:   212,992 positions   = 6.93x
+     work completed: 196,608 input + 16,384 output tokens
+     two-request run: 229,376 positions aggregate
+
+   performance (separate tests)
+     32K in / 64 out probe: 19.11 tokens/s
+     repeated 32K+6K workload:
+       median peak process footprint 16,374 MiB
+       (this is what makes "fits in 24 GiB" credible)
+
+   quality
+     AIME 2026: 29 / 30 correct
+     long state did not mean broken reasoning
+```
+
+Think of it as **a chef with a small counter who stops laying out every ingredient at once**. The recipe (model) is unchanged. What changes is that ingredients (KV, components) are pulled from the pantry just in time, used, and returned -- and the dish (the logical session) is never thrown away when the counter is cleared. The AIME score is the taste test: the meal still has to be good.
+
+### Key Concepts
+
+- **State, not just weights, is the laptop bottleneck**: quantizing the model does not manage the KV cache or component residency.
+- **Just-in-time materialization and release**: coordinate bring-in and tear-down so peak footprint is what matters, not theoretical maximum.
+- **Preserve state across transitions**: discard-and-rebuild is what collapses serving; StateTrans is the fix.
+- **Separate capacity from performance from quality**: 6.93x context, 19 tok/s, 29/30 AIME are three different claims, correctly measured separately.
+- **Independence from weight quantization**: the techniques compose with MXFP4 rather than replacing it.
+
+## Framework Shift
+
+```
+Before (local serving limited by resident state):
+  quantized weights fit on a laptop
+  -> full KV + components still blow the budget
+  -> completed context ~30K on 24 GiB
+  -> transitions drop state; long sessions fail
+
+After (just-in-time state management):
+  KVExec + PhaseSwap + StateTrans
+  -> completed context ~213K (6.93x)
+  -> peak process footprint ~16.4 GiB on a 24 GiB machine
+  -> transitions preserve the logical session
+  -> AIME 29/30: long state still reasons
+```
+
+From "local LLM means a small model and a short window," to "local LLM means aggressive, quality-checked state lifetime management on the machine you already own," the core shift is that context length stops being a fixed property of the weights and becomes a property of the runtime.
+
+## Expert Assessment
+
+**Problem choice**: Excellent and under-discussed. The open-weight community celebrates parameter counts and quantization formats; the real ceiling on a laptop is often **state**. Naming KV execution, residency, and transitions as separate mechanisms is the right systems decomposition.
+
+**Method maturity**: Three named mechanisms with a fused design principle is good architecture talk. The abstract is a systems contribution: it will live or die on implementation detail, interaction with MLX kernels, and whether the compression is quality-neutral across tasks. The AIME result is a strong attempt to answer the obvious quality objection, but one benchmark family is not a general quality guarantee -- long-context retrieval and agentic tool traces would be the next natural stress tests.
+
+**Experimental integrity**: Strong for a systems abstract. Three independent capacity runs; baseline named (mlx-vlm); a separate two-request aggregate; performance reported apart from capacity; **median peak process footprint** rather than a vanity average; and a quality end-check. The 6.93x is credible because the baseline and the peak memory are both stated. Residual questions: how much of the win is compression vs residency policy; thermal/throttling on sustained laptop load; behavior past the measured ~213K.
+
+**Writing quality**: Numbers are specific (positions, tokens/s, MiB, AIME count) and the independence-from-weight-quant claim is stated early, which prevents a common misreading. 13 pages, 4 figures, 9 tables is a reasonable packing for this claim set.
+
+**Verdict**: **weak accept** -- a concrete, well-instrumented local-serving result that treats state lifetime as the product, with quality checked rather than assumed. Not a universal MLX silver bullet, but exactly the kind of systems work laptop inference needs.
+
+## Takeaways
+
+- When weights already fit, profile state. KV and component residency are often the real ceiling.
+- Materialize and release just in time; measure **peak** footprint, not average comfort.
+- Preserve logical session state across transitions. Serving breaks at the seams, not in the forward pass.
+- Systems papers that only measure capacity are incomplete. Check that the model still reasons after the memory tricks.
+
+:::
+
+:::zh
+**论文**: [2609.17475](https://arxiv.org/abs/2609.17475)
+**作者**: Yuhua Chen
+**分类**: cs.AI, cs.PF
+
+## 缺口
+
+够强的开源权重模型让本地编码与推理变得诱人：不用云端往返、数据不出机器、延迟自己说了算。卡点不只是权重。**上下文与执行状态在挤压笔记本内存。**
+
+这才是诚实的瓶颈。一个量化后的 27B 模型可能装得下；一场长编码会话、一张完整仓库地图、或一条很长的推理轨迹，可能装不下。现有运行时要么把上下文卡在模型宣称窗口之下，要么在状态膨胀时颠来倒去，要么在切换时丢状态。
+
+论文对缺口的框定在系统上是对的：你需要的是**把重建融合起来、协调即时物化与释放、且与权重量化无关**的机制。把权重压得更狠，并不等于管理 KV 与组件驻留。
+
+```
+   本地推理的真正卡点
+
+   够强的开源权重模型
+     本地编码 + 推理很有吸引力
+     无云端往返，数据留在设备上
+         |
+         v
+   卡点不只是权重
+     「上下文 + 执行状态」在挤压笔记本内存
+         |
+         v
+   量化后的 27B 可能「装得下」
+   长会话 / 仓库地图 / 长推理轨迹可能「装不下」
+         |
+         v
+   现有运行时
+     把上下文卡在宣称窗口之下
+     「或者」在状态膨胀时颠簸
+     「或者」在切换时丢状态
+         |
+         v
+   真正需要的
+     融合重建
+     协调「即时物化」与「释放」
+     与权重量化「无关」
+     （权重压得更狠 != 状态管理）
+```
+
+## 增量
+
+**一句话**: 在 JustFit 之前，24 GiB 笔记本跑 27B 开源模型大约只能完成 3 万上下文位置；在这之后，压缩 KV 执行加上驻留与保状态切换，完成 212,992 个位置——6.93 倍——且不牺牲 AIME 级推理。
+
+### 核心机制
+
+**三个机制，一个运行时（基于 MLX）。**
+
+**KVExec：压缩 KV 执行。** 不再为整个上下文常驻一份全精度、完全物化的 KV 缓存，JustFit 压缩并基于受管理的 KV 状态执行。摘要很谨慎地写明：这**与权重量化无关**——权重本来就可以是 MXFP4；收益在激活/状态路径上。
+
+**PhaseSwap：组件驻留。** 不是每个运行时组件在每一刻都需要驻留。PhaseSwap 按阶段决定什么留在内存里，以协调的方式用算力换足迹。
+
+**StateTrans：保状态的推理切换。** 这是把「能跑一次」变成「能持续服务」的那一块。模式（或请求阶段）之间的切换**保留状态**，而不是丢弃再重建——后者正是长会话通常塌掉的原因。
+
+**这些机制融合重建，并协调即时物化与释放。** 设计原则是：需要时才物化，不需要就释放，并且在这种搅动中从不丢失逻辑会话。
+
+```
+   JustFit = KVExec + PhaseSwap + StateTrans
+
+   [KVExec] 压缩 KV 执行
+     不全时长、全精度地常驻 KV
+     基于受管理/压缩的 KV 状态执行
+     与权重量化无关
+     （权重本来就可以是 MXFP4）
+         |
+         v
+   [PhaseSwap] 组件驻留
+     并非每个组件在每个阶段都驻留
+     按阶段决定驻留
+     以协调方式用算力换足迹
+         |
+         v
+   [StateTrans] 保状态切换
+     模式/阶段切换「保留」状态
+     不要丢弃再重建
+     这通常才是杀死长会话的东西
+         |
+         v
+   设计原则
+     需要时才物化
+     不需要就释放
+     在这种搅动中「从不丢失逻辑会话」
+```
+
+**主打的容量测试异常具体。** 在 **24 GiB M4 Pro MacBook** 上、运行 **Qwen3.8-27B MXFP4** 的完整执行容量测试：三次独立运行完成 **196,608 输入与 16,384 输出 token**，把单请求可完成上下文从 **mlx-vlm 基线的 30,720 个位置提高到 212,992（6.93 倍）**。另一次双请求运行合计保留 **229,376 个位置**。
+
+性能单独报告，这是正确的卫生习惯：**32K 输入 / 64 输出探针达到 19.11 token/s**；重复的 **32K+6K 负载，进程峰值足迹中位数 16,374 MiB**。这个峰值才是「塞进 24 GiB」可信、而非宣传的原因。
+
+**而防止一篇纯系统论文变成「长上下文但失忆」论文的质量检查：** 集成运行时**答对 30 道 AIME 2026 题中的 29 道**，说明紧凑状态与生命周期感知执行仍支持较长的生成式推理。
+
+```
+   实测结果
+
+   硬件：24 GiB M4 Pro MacBook
+   模型：Qwen3.8-27B MXFP4
+   基线：mlx-vlm
+
+   容量（完整执行，3 次独立运行）
+     单请求可完成上下文
+       基线：  30,720 个位置
+       JustFit：212,992 个位置   = 6.93x
+     完成工作量：196,608 输入 + 16,384 输出 token
+     双请求运行：合计 229,376 个位置
+
+   性能（单独测试）
+     32K 进 / 64 出探针：19.11 token/s
+     重复 32K+6K 负载：
+       进程峰值足迹中位数 16,374 MiB
+       （这才让「装进 24 GiB」可信）
+
+   质量
+     AIME 2026：29 / 30 正确
+     长状态并不等于坏掉的推理
+```
+
+可以理解为：**台面很小的厨师，不再把所有食材一次性摊开。** 菜谱（模型）没变。变的是食材（KV、组件）按需从备料间取出、用完归位——而菜品（逻辑会话）在台面清空时从不被扔掉。AIME 分数是试吃：饭菜仍然得好吃。
+
+### 关键概念
+
+- **瓶颈是状态，不只是权重**: 量化模型并不能管理 KV 缓存或组件驻留。
+- **即时物化与释放**: 协调取入与拆除，让**峰值**足迹成为关键量，而不是理论最大值。
+- **跨切换保留状态**: 丢弃再重建才是压垮服务的东西；StateTrans 是修法。
+- **把容量、性能、质量分开**: 6.93 倍上下文、19 tok/s、29/30 AIME 是三个不同主张，被正确地分别测量。
+- **与权重量化正交**: 这些技术与 MXFP4 组合，而不是取代它。
+
+## 框架转变
+
+```
+之前（本地推理受限于常驻状态）：
+  量化权重能装进笔记本
+  -> 全量 KV + 组件仍然爆预算
+  -> 24 GiB 上可完成上下文约 3 万
+  -> 切换丢状态；长会话失败
+
+之后（即时状态管理）：
+  KVExec + PhaseSwap + StateTrans
+  -> 可完成上下文约 21.3 万（6.93 倍）
+  -> 24 GiB 机器上进程峰值足迹约 16.4 GiB
+  -> 切换保留逻辑会话
+  -> AIME 29/30：长状态仍能推理
+```
+
+从「本地 LLM 意味着小模型、短窗口」，到「本地 LLM 意味着在你已有的机器上做激进的、经质量检验的状态生命周期管理」，核心转变是：上下文长度不再是权重的固定属性，而成为运行时的属性。
+
+## 专家评审
+
+**选题眼光**: 极好，而且讨论不足。开源社区庆祝参数量与量化格式；笔记本上真正的天花板往往是**状态**。把 KV 执行、驻留、切换点成三个机制，是正确的系统分解。
+
+**方法成熟度**: 三个有名字的机制、加上一条融合的设计原则，是好的架构表述。摘要是一项系统贡献：它将取决于实现细节、与 MLX kernel 的交互，以及压缩在多种任务上是否质量中性。AIME 结果是对「质量」这一显然质疑的有力回应，但单一 benchmark 家族不是普适的质量保证——长上下文检索与智能体工具轨迹会是自然的下一步压力测试。
+
+**实验诚意**: 对系统摘要而言很强。三次独立容量运行；基线有名有姓（mlx-vlm）；另有一次双请求合计；性能与容量分开报告；用**峰值进程足迹中位数**而不是虚荣均值；并且有质量终检。6.93 倍之所以可信，是因为基线与峰值内存都被写明了。残留问题：收益里多少来自压缩、多少来自驻留策略；笔记本持续负载下的热与降频；超过约 21.3 万测点后的行为。
+
+**写作功力**: 数字具体（位置数、token/s、MiB、AIME 题数），且「与权重量化无关」这一主张被提前写明，避免了常见误读。13 页、4 图、9 表对这组主张是合理密度。
+
+**判决**: **弱接收（Weak Accept）** — 一个具体、仪表齐全的本地推理结果，把状态生命周期当作产品本体，并且检查了质量而不是假定质量。它不是 MLX 的万灵药，但正是笔记本推理需要的那类系统工作。
+
+## 要点总结
+
+- 权重已经装得下时，去 profile 状态。KV 与组件驻留往往才是真天花板。
+- 即时物化与释放；度量**峰值**足迹，而不是平均舒适度。
+- 跨切换保留逻辑会话状态。服务裂在接缝处，不在前向里。
+- 只测容量的系统论文是不完整的。检查模型在内存技巧之后是否仍会推理。
+:::

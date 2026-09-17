@@ -1,0 +1,241 @@
+---
+title:
+  en: "Where Post-Training Quantization Breaks Text Embedders"
+  zh: "训练后量化在文本嵌入模型上会从哪里断"
+description:
+  en: "Weight-only PTQ advice from LLMs — protect the embedding table, allocate bits by module sensitivity — fails to transfer to retrieval embedders. A measured map across four architecture families shows family-dependent breakage and a 109M INT3 student that only wins inside its distillation task."
+  zh: "从大模型那边照搬的仅权重量化建议——护住嵌入表、按模块敏感度分配比特——在检索嵌入模型上并不成立。对四类架构的实测地图显示：崩坏方式依架构而异；一个 109M 的 INT3 学生模型只在它被蒸馏进去的那个任务里占优。"
+date: 2026-09-16
+tags: ["arxiv", "ai", "cs.ir", "cs.cl"]
+image: "https://arxiv.org/static/browse/0.3.4/images/arxiv-logo-fb.png"
+---
+
+:::en
+**Paper**: [2609.16391](https://arxiv.org/abs/2609.16391)
+**Authors**: Hyojung Han
+**Categories**: cs.IR, cs.CL
+
+## The Gap
+
+**Weight-only post-training quantization is the cheapest way to shrink a retrieval embedder.** The playbook that people actually use was **carried into LLM quantization largely intact**: **protect the embedding table, allocate bits by module sensitivity, prefer a ranking-aware objective over weight reconstruction.**
+
+The paper tests that advice **on retrieval embedders directly**, not on generative LMs. The gap is not "nobody quantized embedders"; it is that **every heuristic fails to transfer as stated.** Advice that sounds universal is, under measurement, architecture- and bit-width-specific — and sometimes inverted.
+
+```
+   RECEIVED PTQ ADVICE VS RETRIEVAL REALITY
+
+   advice (from LLM practice)
+     1. protect the embedding table
+     2. allocate bits by module sensitivity
+     3. ranking-aware objective > reconstruction
+         |
+         v
+   test on 5 checkpoints / 4 embedder families
+     grid of bit widths and group sizes
+     isolate embedding, attention, FFN at each width
+         |
+         v
+   EVERY HEURISTIC FAILS TO TRANSFER AS STATED
+     embedding table never the top isolated priority
+     module ordering family-dependent
+     joint damage is not the sum of parts at INT3
+```
+
+## The Increment
+
+**One sentence**: Before this paper, PTQ for embedders reused LLM heuristics; after it, a measured map shows those heuristics do not transfer as stated, and a 109M INT3 student dominates its 0.6B teacher on size and quality — but only inside the distillation task.
+
+### Core Mechanism
+
+This is a **measurement paper**, so the mechanism is the experimental design. The authors quantize **five checkpoints from four architecture families** across a **grid of bit widths and group sizes**, and **isolate the embedding, attention and feed-forward blocks at each width.** That isolation is what turns anecdotes into a map.
+
+Three results carry the weight. **The embedding table never emerges as the dominant isolated protection priority in any family**, despite being the largest tensor in several of them. **Module sensitivity does not survive as a transferable ordering**: at INT4/g16 the spread between modules is too small to allocate against; at INT3 the ordering becomes family-dependent and **joint damage stops being the sum of its parts**; at INT2, **comparable reconstruction error accompanies retention ranging from 1.3 to 65.9 percent of full precision.** A cheap reconstruction proxy helps screen uniform bit widths but is **substantially less reliable for choosing which tensors to protect** — its apparent grid-wide strength is a **range-extension artifact.**
+
+The constructive arm is a **distilled 109M student at INT3 holding 78.04 NDCG@10 in 68.4 MB**, which **dominates the extreme-PTQ arm of its own 0.6B teacher, 297.9 MB at 64.46, on both size and quality — but only inside the task it was distilled for.** Sizes are **byte counts of files that exist**, not arithmetic estimates.
+
+```
+   WHAT THE MAP ACTUALLY SHOWS
+
+   uniform PTQ grid
+     bit width x group size
+     modules isolated per width
+         |
+         +-- embedding table: NOT the top priority
+         |
+         +-- module ordering: FAMILY-DEPENDENT
+         |     INT4/g16: spread too small to allocate
+         |     INT3: joint damage != sum of parts
+         |     INT2: same recon error, retention 1.3% .. 65.9%
+         |
+         +-- recon proxy: OK for width screening
+         |     WEAK for choosing which tensors to protect
+         |
+         v
+   distilled 109M @ INT3
+     78.04 NDCG@10 in 68.4 MB
+     beats 0.6B teacher PTQ (64.46 / 297.9 MB)
+     ONLY on the distillation task
+```
+
+Think of it as **shrinking a filing system with a photocopier checklist designed for a different building.** The checklist says "the index drawer is sacred" and "score cabinets by how dusty they look." On the new building, the index drawer is not what breaks service; dust scores do not order cabinets across floors; and two cabinets that each look fine alone fail together when the elevator is smaller. The paper is the building survey that makes the checklist's assumptions visible — and shows a purpose-built annex (the distilled student) only serves its own department.
+
+### Key Concepts
+
+- **Heuristic transfer failure**: rules that work for generative LMs need not order modules the same way in embedders.
+- **Non-additive damage at low bits**: protecting modules independently can miss joint failure at INT3.
+- **Task-bounded distillation win**: a small student can beat a PTQ'd teacher only on the distribution it was distilled for.
+
+## Framework Shift
+
+```
+Before (borrowed LLM advice):         After (measured embedder map):
+  protect embedding table first       table is not top isolated priority
+  bits by module sensitivity          ordering is family- and width-dependent
+  recon proxy as allocation guide     proxy screens widths, not protection sets
+  teacher PTQ as default shrink       distilled INT3 student wins in-task only
+```
+
+From reusing LLM quantization folklore on retrieval models, to **measuring where each rule breaks by architecture and bit width**, the core shift is from advice to a map.
+
+## Expert Assessment
+
+**Problem choice**: Excellent practical gap. Retrieval stacks are full of embedders being PTQ'd with rules that were never validated on ranking losses.
+
+**Method maturity**: The isolation grid is the right instrument. An unexamined assumption worth naming: that NDCG@10 retention is the production objective that matters — latency, embedding dimension stability, and cross-encoder rerank coupling are out of scope, and a "safe" module choice under NDCG may still break a downstream reranker.
+
+**Experimental integrity**: Best part of the paper: reporting **non-transfer** rather than inventing a new universal rule, and insisting sizes are real file bytes. The 1.3–65.9% retention band at matched reconstruction error is the kind of uncomfortable number that prevents bad defaults.
+
+**Writing quality**: Dense but honest. The student-vs-teacher comparison would land harder with a second, held-out retrieval task showing where the student falls over.
+
+**Verdict**: **weak accept** — a useful production map and a negative result about folklore; contribution is measurement, not a new quantizer.
+
+## Takeaways
+
+- Do not allocate PTQ protection bits for embedders using LLM module-sensitivity folklore without re-measuring on your architecture.
+- At INT3, audit **joint** module damage; independent per-module scores can lie.
+- If you need aggressive shrink, consider task-specific distillation — but treat the student as task-bound, not a drop-in general embedder.
+
+:::
+
+:::zh
+**论文**: [2609.16391](https://arxiv.org/abs/2609.16391)
+**作者**: Hyojung Han
+**分类**: cs.IR, cs.CL
+
+## 缺口
+
+**仅权重量化是缩小检索嵌入模型最便宜的办法。**  
+人们真正照着做的那套操作，**大多是从大模型量化原样搬过来的**：**护住嵌入表、按模块敏感度分配比特、宁要排序感知目标也不要权重重建。**
+
+论文**直接在检索嵌入模型上**检验这套建议，而不是在生成式大模型上。  
+缺口不是「没人量化过嵌入模型」，而是**每条启发式都无法按原样迁移。**  
+听起来普适的建议，一经实测就变成依架构、依比特宽而变——有时甚至反过来。
+
+```
+   照搬的 PTQ 建议 vs 检索现实
+
+   建议（来自大模型实践）
+     1. 护住嵌入表
+     2. 按模块敏感度分配比特
+     3. 排序感知目标 > 重建目标
+         |
+         v
+   在 5 个检查点 / 4 类嵌入架构上测试
+     比特宽 x 组大小网格
+     每个宽度上隔离 embedding / attention / FFN
+         |
+         v
+   每条启发式都无法按原样迁移
+     嵌入表从不是孤立保护的第一优先级
+     模块排序依架构而变
+     INT3 下联合损坏不是各部分之和
+```
+
+## 增量
+
+**一句话**: 这篇论文之前，嵌入模型 PTQ 照搬大模型启发式；之后，实测地图显示这些启发式并不按原样成立，且一个 109M INT3 学生在尺寸与质量上压过自己的 0.6B 教师——但只限蒸馏任务内。
+
+### 核心机制
+
+这是一篇**测量论文**，机制在实验设计。  
+作者在**四类架构的五个检查点**上，沿**比特宽与组大小网格**做量化，并在每个宽度上**隔离 embedding、attention 与 FFN 块。**  
+正是这种隔离，把轶事变成地图。
+
+三条结果撑起全文。  
+**在任何架构族里，嵌入表都从未成为孤立保护的第一优先级**，尽管它在若干模型里是最大的张量。  
+**模块敏感度撑不起可迁移的排序**：INT4/g16 下模块间差距太小，无法据此分配；INT3 下排序随架构而变，且**联合损坏不再是各部分之和**；INT2 下，**相近的重建误差对应从全精度的 1.3% 到 65.9% 不等的保持率。**  
+便宜的重建代理适合筛查统一比特宽，但**用来决定该保护哪些张量就明显不可靠**——它在整张网格上的强势是**取值范围拉伸造成的假象。**
+
+建设性一侧是一个**蒸馏出的 109M INT3 学生：68.4 MB 上 78.04 NDCG@10**，**在尺寸与质量上同时压过其 0.6B 教师的极端 PTQ 版（297.9 MB、64.46）——但只限它被蒸馏进去的那个任务。**  
+尺寸是**真实文件的字节数**，不是算术估计。
+
+```
+   地图真正画出的东西
+
+   统一 PTQ 网格
+     比特宽 x 组大小
+     各宽度隔离模块
+         |
+         +-- 嵌入表：不是第一优先级
+         |
+         +-- 模块排序：依架构而变
+         |     INT4/g16：差距太小，无法分配
+         |     INT3：联合损坏 != 各部分之和
+         |     INT2：同样重建误差，保持率 1.3% .. 65.9%
+         |
+         +-- 重建代理：适合筛宽度
+         |     不适合决定保护集合
+         |
+         v
+   蒸馏 109M @ INT3
+     68.4 MB 上 78.04 NDCG@10
+     压过 0.6B 教师 PTQ（64.46 / 297.9 MB）
+     仅限蒸馏任务
+```
+
+可以想成**用为另一栋楼写的复印机清单，来压缩这栋楼的档案系统。**  
+清单说「索引抽屉神圣不可侵犯」「按柜子看起来有多灰来打分」。  
+到了新楼：弄坏服务的未必是索引抽屉；灰尘分排不出跨楼层的柜子次序；电梯变小时，两个各自看起来都没事的柜子会一起卡死。  
+论文就是那栋楼的测绘——让清单的假设露出来，并证明一栋按需新建的附楼（蒸馏学生）只服务自己的科室。
+
+### 关键概念
+
+- **启发式迁移失败**：对生成式大模型成立的规则，在嵌入模型上未必以同样方式给模块排序。
+- **低位宽下损坏不可加**：按模块独立保护，会在 INT3 漏掉联合失效。
+- **有任务边界的蒸馏胜利**：小学生模型只在它被蒸馏的分布上赢过 PTQ 教师。
+
+## 框架转变
+
+```
+之前（照搬大模型建议）：              之后（实测嵌入模型地图）：
+  先保护嵌入表                       表不是孤立第一优先级
+  按模块敏感度分比特                 排序依架构与比特宽而变
+  重建代理当分配指南                 代理筛宽度，不筛保护集合
+  默认缩小 = 教师 PTQ                蒸馏 INT3 学生只在任务内赢
+```
+
+从把大模型量化民俗套到检索模型，到**按架构与比特宽测量每条规则在哪里断**，核心转变是：从建议变成地图。
+
+## 专家评审
+
+**选题眼光**: 极好的实践缺口。  
+检索栈里到处是用从未在排序损失上验证过的规则做 PTQ 的嵌入模型。
+
+**方法成熟度**: 隔离网格是正确仪器。  
+值得点名的未讨论预设：把 NDCG@10 保持率当作生产唯一目标——时延、嵌入维度稳定性、与重排器的耦合都不在范围内；NDCG 下「安全」的模块选择，仍可能弄坏下游重排。
+
+**实验诚意**: 全文最好的地方：报告的是**不迁移**，而不是发明新的普适规则；并坚持尺寸必须是真实文件字节。  
+在相同重建误差下 1.3%–65.9% 的保持率带，是那种能阻止坏默认值的、令人不舒服的数字。
+
+**写作功力**: 密但诚实。  
+学生 vs 教师的对比若再加一个留出检索任务、写明学生在哪里垮掉，会更有力。
+
+**判决**: **弱接收** — 有用的地图 + 对民俗的否定结果；贡献在测量，不在新量化器。
+
+## 要点总结
+
+- 不要在未按自己的架构重测之前，用大模型模块敏感度民俗给嵌入模型分配 PTQ 保护比特。
+- 在 INT3 上审计**联合**模块损坏；按模块独立打分会说谎。
+- 若必须激进缩小，考虑任务特化蒸馏——但把学生当有任务边界的模型，而不是通用嵌入模型的即插即用替身。
+
+:::
