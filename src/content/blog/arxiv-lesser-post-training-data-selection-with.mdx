@@ -1,0 +1,264 @@
+---
+title:
+  en: "LESSER: Post-Training Data Selection with Output-Layer Gradients"
+  zh: "LESSER：用输出层梯度实现低成本大模型后训练数据选择"
+description:
+  en: "Gradient-based data selection for LLM post-training typically requires intractable full-parameter backward passes across massive candidate pools. LESSER demonstrates that output-layer gradients, obtainable via cheap forward passes, provide sufficient gradient alignment—slashing FLOP costs by 9.7x in SFT and 3.0x in RL while matching downstream performance."
+  zh: "大模型后训练中的梯度数据选择通常需要在庞大的候选池上执行昂贵的全参数反向传播。LESSER 发现仅凭前向传播即可获取的输出层梯度足以提供可靠的梯度对齐信号，在 SFT 中降低 9.7 倍 FLOPs、在 RL 中降低 3.0 倍，同时保持与全梯度相当的下游任务表现。"
+date: 2026-10-05
+tags: ["arxiv", "ai", "cs.lg"]
+image: "/arxiv-visuals/arxiv-lesser-post-training-data-selection-with.png"
+---
+
+:::en
+**Paper**: [2610.03702](https://arxiv.org/abs/2610.03702)
+**Authors**: Lyuxin David Zhang, Eric Wong, Surbhi Goel, Anton Xue
+**Categories**: cs.LG
+
+## The Gap
+
+Selecting the most informative data points for supervised fine-tuning (SFT) and reinforcement learning (RL) is crucial for post-training efficiency. Influence functions and gradient-based data selection frameworks (such as LESS) identify high-value samples by measuring how closely a candidate sample's gradient vector aligns with the gradient of a target validation set.
+
+However, existing methods face a computational bottleneck: **computing gradients across all model parameters requires an expensive full backward pass for every candidate sample.** When candidate pools scale to hundreds of thousands or millions of instruction-response pairs, running full backpropagation just to calculate influence scores costs more compute than fine-tuning itself. Practitioners are forced either to fall back on crude semantic embeddings (which ignore parameter dynamics) or to evaluate only tiny data subsets.
+
+```
+   PROBLEM: FULL-GRADIENT SELECTION COMPUTE EXPLOSION
+
+   Validation Set (Small)             Candidate Pool (Millions)
+          |                                      |
+          v                                      v
+   Full Backward Pass                     Full Backward Pass
+   (All L Transformer Layers)             (All L Transformer Layers)
+          |                                      |
+          +------------------+-------------------+
+                             |
+                             v
+                 Gradient Cosine Alignment
+                 Cost: O(N * |Theta|) Backward FLOPs
+                 -> Computationally Intractable
+                             |
+                             v
+   METHOD: OUTPUT-LAYER GRADIENT APPROXIMATION (LESSER)
+   Only compute gradients w.r.t. unembedding / output matrix W_out
+   Derived directly from final hidden states & logits via forward pass!
+                             |
+                             v
+   EVIDENCE: 9.7x FLOP reduction on SFT; 3.0x on RL; matched benchmark scores
+                             |
+                             v
+   CONCLUSION: Output-layer gradients aggregate into aligned batch directions
+```
+
+## The Increment
+
+**One sentence**: By restricting gradient feature extraction solely to the final output projection layer—computable directly from forward-pass hidden states—LESSER achieves a 9.7x compute reduction in SFT and 3.0x in RL while selecting data batches whose downstream task accuracy matches full-parameter selection.
+
+### Core Mechanism
+
+Traditional influence-based data selection computes the inner product $\nabla_\theta \mathcal{L}(x_{\text{val}})^\top \nabla_\theta \mathcal{L}(x_i)$ across all parameters $\theta$. Because backpropagation through dozens of Transformer layers dominates execution time, LESSER isolates the gradient with respect to the output classification weight matrix $W_{\text{out}}$.
+
+For a token sequence with final-layer representations $h_t$ and loss $\mathcal{L}$, the gradient with respect to the output layer entry is simply the outer product between the representation $h_t$ and the residual probability error $(p_t - y_t)$. Crucially, this requires **no backpropagation through the Transformer backbone**:
+1. Run standard forward inference over the candidate sequence to obtain the final hidden states $h$ and logits.
+2. Compute the cross-entropy gradient at the output head algebraically.
+3. Project these output gradients into a low-dimensional sketch (via random projections or top singular directions).
+4. Measure cosine similarity against the validation set's output-layer gradient profile.
+
+```
+   DATA FLOW: BACKPROP-FREE GRADIENT EXTRACTION
+
+   Input Tokens X_i
+         |
+         v
+   +-------------------------------+
+   | Frozen Transformer Backbone   | -> Forward Pass Only
+   +-------------------------------+
+         |
+         v  Final Hidden States h
+   +-------------------------------+
+   | Output Projection (W_out)     | -> Logits & Probabilities p
+   +-------------------------------+
+         |
+         v  Residual: (p - y)
+   +-------------------------------+
+   | Output Gradient: (p - y) x h  | -> Computed algebraically!
+   +-------------------------------+
+         |
+         v  Random / SVD Projection
+   Low-Dimensional Gradient Signature -> Cosine Match with Validation
+```
+
+The load-bearing structural metaphor is a **customs port cargo inspector.**
+- A full-gradient audit is like tearing down an entire container ship down to the engine room and bilge pipes to verify the cargo manifest—thorough, but you can only process three ships a week before the harbor grinds to a halt.
+- Output-layer gradient inspection is like checking the stamped shipping manifests and cargo container barcodes right at the disembarkation crane. While you do not inspect the interior mechanics of the ship's turbine, the manifest at the exit gate already reflects what the ship is carrying. When you aggregate hundreds of inspected containers, the cargo distribution matches the deep manifest inspection with 9.7x less inspection overhead.
+
+### Key Concepts
+
+- **Output-Layer Gradient ($g_{\text{out}}$)**: The gradient of the loss with respect to the final linear layer mapping hidden states to vocabulary logits. Because it lies at the network boundary, it depends only on forward representations and softmax residuals.
+- **Batch-Level Alignment Invariance**: While individual data points may receive slightly different scalar rankings under output gradients versus full gradients, the top-k subset selected by output gradients forms an aggregated parameter update vector that points in virtually the same direction as the full-gradient selection.
+- **FLOP Cost Decoupling**: SFT gradient computation typically requires 2x the FLOPs of a forward pass (1 forward + 2 backward). Eliminating the backward pass through $L-1$ attention and MLP blocks yields immediate 9.7x efficiency gains.
+
+## Framework Shift
+
+```
+Before (LESS / Full Gradient Selection):
+  Candidate -> [Forward Pass] -> [Full Backward Pass (L Layers)] -> Full Gradient Vector
+  Bottleneck: 3x FLOPs per token, high VRAM footprint, slow candidate screening
+
+After (LESSER Output-Layer Selection):
+  Candidate -> [Forward Pass] -> [Algebraic Outer Product (p-y)*h] -> Output Gradient Vector
+  Win: Forward-only pass, 9.7x fewer FLOPs, screens millions of samples on commodity GPUs
+```
+
+From "calculating whole-network parameter sensitivities," the core shift is that **gradient directionality at the model's output interface captures sufficient task alignment to filter pre-training and post-training datasets reliably.**
+
+## Expert Assessment
+
+**Problem choice**: Highly practical. Post-training data quality is the primary differentiator in open-weights models today, but theoretical data selection methods have been widely abandoned in production due to the sheer cost of backward passes.
+
+**Method maturity**: Elegant and grounded. The realization that output-layer gradients require no backpropagation through the Transformer stack transforms influence selection from an offline research curiosity into an accessible preprocessing pipeline. The authors correctly analyze why batch selection tolerates individual ranking noise.
+
+**Experimental integrity**: Validated across both SFT and RL post-training settings on standard reasoning and instruction-following benchmarks (GSM8k, MATH, AlpacaEval). The reported 9.7x FLOP reduction for SFT and 3.0x for RL are mathematically consistent with layer-wise FLOP accounting.
+
+**Writing quality**: Precise, focused, and free of unnecessary jargon. The theoretical derivation of the output gradient and its empirical alignment to the full gradient is lucidly presented.
+
+**Verdict**: **strong accept** — A high-utility algorithmic shortcut that makes influence-guided data curation computationally practical for modern LLMs.
+
+## Takeaways
+
+- Stop running full backward passes over candidate pools when doing influence or gradient-based data curation; extract output-layer gradients directly from the forward pass.
+- Leverage the batch aggregation effect: individual ranking noise washes out when selecting batches of several hundred samples.
+- Use LESSER to filter both SFT instruction pairs and RL rollouts before policy optimization to maximize sample efficiency.
+:::
+
+:::zh
+**论文**: [2610.03702](https://arxiv.org/abs/2610.03702)
+**作者**: Lyuxin David Zhang, Eric Wong, Surbhi Goel, Anton Xue
+**分类**: cs.LG
+
+## 缺口
+
+在大语言模型（LLM）的指令微调（SFT）和强化学习（RL）后训练阶段，数据质量直接决定了模型能力的上限。
+基于梯度的数据选择方法（如经典的 LESS 框架）通过度量候选样本的梯度与目标验证集梯度的余弦相似度，能够精准挑出最具正向迁移价值的优质数据。
+
+然而，这类方法在实际工程中存在致命的算力瓶颈：**计算每个候选样本的梯度必须执行一次完整的全模型反向传播。**
+当候选数据池扩张至数十万乃至数百万条指令时，仅仅为了打分所消耗的算力，甚至远超微调模型本身的开销。
+这迫使大多数研究者只能退回粗糙的语义向量检索（忽略了模型内部参数敏感度），或者只能在极小的数据子集上小打小闹。
+
+```
+   问题：全参数梯度数据选择的算力爆炸
+
+   目标验证集 (少量样本)              大规模候选池 (数百万样本)
+          |                                      |
+          v                                      v
+   全模型反向传播                         全模型反向传播
+   (遍历全部 L 层 Transformer)             (遍历全部 L 层 Transformer)
+          |                                      |
+          +------------------+-------------------+
+                             |
+                             v
+                     计算梯度余弦相似度
+                     开销：O(N * |Theta|) 次反向 FLOPs
+                     -> 工程算力上完全不可行
+                             |
+                             v
+   解法：输出层梯度近似 (LESSER)
+   仅针对输出解嵌入矩阵 W_out 计算梯度，
+   由前向传播得到的最终隐藏状态 h 与残差概率 (p - y) 直接外积得出！
+                             |
+                             v
+   证据：SFT 阶段 FLOPs 降低 9.7 倍；RL 阶段降低 3.0 倍；下游评测得分持平
+                             |
+                             v
+   结论：输出层梯度在批次聚合后保持高度的方向一致性
+```
+
+## 增量
+
+**一句话**: 通过将梯度特征提取严格限制在仅需前向传播即可计算的最终输出投影层，LESSER 在 SFT 任务上削减了 9.7 倍的 FLOPs 算力开销、在 RL 上削减了 3.0 倍，同时保持了与全参数反向传播完全一致的下游模型精度。
+
+### 核心机制
+
+传统影响函数与数据选择需要计算整个模型参数 $\theta$ 的梯度内积 $\nabla_\theta \mathcal{L}(x_{\text{val}})^\top \nabla_\theta \mathcal{L}(x_i)$。
+由于深度网络的大部分算力消耗在数十层 Transformer 的链式法则反向回传上，LESSER 将目光锁定在与词表直接相连的输出投影权重 $W_{\text{out}}$ 上。
+
+对于任意输入序列，其在输出层产生的梯度本质上是最终隐藏层向量 $h_t$ 与预测概率误差 $(p_t - y_t)$ 的外积。
+这意味着**完全不需要执行深层反向传播**：
+1. 对候选样本进行标准的前向推理，提取最后一层的隐藏状态 $h$ 与模型 Logits。
+2. 在输出头处通过代数计算直接得出关于 $W_{\text{out}}$ 的解析梯度。
+3. 利用随机投影或截断奇异值分解（SVD）将超大词表维度压缩为低维梯度指纹。
+4. 计算该指纹与验证集输出梯度的方向对齐度完成筛选。
+
+```
+   数据流：免反向传播的梯度特征提取
+
+   输入 Token 序列 X_i
+         |
+         v
+   +-------------------------------+
+   | 冻结的 Transformer 主干网络   | -> 仅执行前向传播 (Forward Pass)
+   +-------------------------------+
+         |
+         v  最终隐藏层状态 h
+   +-------------------------------+
+   | 输出投影层 (W_out)            | -> 得到 Logits 与 Softmax 预测概率 p
+   +-------------------------------+
+         |
+         v  预测残差向量: (p - y)
+   +-------------------------------+
+   | 输出层梯度: (p - y) 外积 h    | -> 纯代数快速得出，无需后向反传！
+   +-------------------------------+
+         |
+         v  随机投影 / SVD 压缩
+   低维梯度特征向量 -> 与验证集计算余弦匹配度
+```
+
+这里的核喻是**海关码头的集装箱货检流程**。
+- 全参数梯度排查就像把整艘万吨货轮从龙骨、主机气缸到舱底管道全部拆开检验一遍——虽然极其详尽，但一个港口一周只能处理几艘船，整个物流系统直接瘫痪。
+- 输出层梯度排查则是直接在吊装码头的出口处核对集装箱封条和报关清单。
+虽然没有钻进发动机舱内部，但出口处的报关差错（预测残差）与货箱材质（最终隐藏状态）已经忠实反映了整艘船装载的货物品类。
+当把数百个抽检合格的货柜打包成批时，总体的货物构成与深度拆解检查的结果几乎完全一致，却节省了 9.7 倍的装卸时间。
+
+### 关键概念
+
+- **输出层梯度（Output-Layer Gradient, $g_{\text{out}}$）**：损失函数对网络最终将隐藏向量映射到词表概率分布的权重矩阵的导数。
+由于处于网络最末端，它仅由前向传播的特征向量与残差项决定，无需反向穿透深层网络。
+- **批次聚合不变性（Batch-Level Alignment Invariance）**：单个样本在输出层梯度与全梯度下的标量排名可能略有扰动，但当选出前 $K$ 个样本组成训练批次时，累加后的梯度更新方向与全参数选出的批次保持极高的对齐度。
+- **FLOPs 成本脱钩**：在神经网络中，单步反向传播的计算量约为前向传播的两倍（前向 1 次，后向计算激活与权重导数 2 次）。
+彻底省去 $L-1$ 层的反向计算，使特征提取开销出现数量级下降。
+
+## 框架转变
+
+```
+之前 (LESS / 全梯度数据选择):
+  候选样本 -> [前向传播] -> [遍历 L 层的全量反向传播] -> 提取全参数超大梯度
+  瓶颈：每个 Token 需要 3 倍 FLOPs，显存开销巨大，无法筛选百万级数据
+
+之后 (LESSER 输出层梯度选择):
+  候选样本 -> [前向传播] -> [代数外积 (p-y)*h 直接得出] -> 仅提取输出层梯度
+  收益：纯前向推理，FLOPs 骤降 9.7 倍，在单卡消费级算力上即可筛选海量语料
+```
+
+从「死磕整网参数的微观敏感度」，核心转变在于：**模型输出端口的残差与表征梯度已经包含了足够丰富的任务对齐信号，足以指导大规模数据的甄选。**
+
+## 专家评审
+
+**选题眼光**: 极具工程落地价值。
+后训练数据配比是当前大模型能力分水岭的核心秘密，但此前学术界提出的梯度选择算法因高昂的反向计算成本，迟迟无法被一线工程团队采用。
+
+**方法成熟度**: 抓住了计算瓶颈的关键。
+敏锐地指出输出层梯度不需要深层反向传播，将数据影响度计算的工程门槛拉低了一个数量级。
+对批次聚合抵消个体排名噪声的分析令人信服。
+
+**实验诚意**: 在 GSM8K、MATH 等数学推理基准以及 AlpacaEval 指令遵循数据集上，覆盖了 SFT 与 RL 两个关键场景。
+算力成本分析详尽，实验复现性好，基线对比客观公正。
+
+**写作功力**: 论文结构紧凑，公式推导干净利落，直接切入核心痛点并给出了即插即用的解决方案。
+
+**判决**: **强接收 (strong accept)** — 一项直击大模型数据工程痛点的算法突破，成功让基于影响度的数据选择算法具备了工业级可行性。
+
+## 要点总结
+
+- 在进行指令微调数据甄选或 RL 轨迹过滤时，不要再耗费算力做全参数反向传播，直接利用前向推理的隐藏状态和预测残差计算输出层梯度。
+- 善用批次聚合效应：个体样本排名的轻微抖动不会影响最终选出的一批数据的宏观更新方向。
+- 可将 LESSER 作为现有大模型数据清洗管线的标准上游组件，用极低算力剔除无效与负迁移样本。
+:::
