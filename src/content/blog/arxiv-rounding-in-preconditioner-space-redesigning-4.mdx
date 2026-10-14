@@ -1,0 +1,255 @@
+---
+title:
+  en: "Rounding in Preconditioner Space: Redesigning 4-bit AdamW Optimizer-State Quantization"
+  zh: "预条件子空间舍入：重塑 4-bit AdamW 优化器状态量化"
+description:
+  en: "Standard 4-bit AdamW quantizers minimize error in state space, but AdamW updates are scaled by the preconditioner 1/(sqrt(v) + eps)—where near-zero errors explode catastrophically. This paper redesigns quantization in preconditioner space via ZIP-SR and ZE-EDEN, reducing TorchAO 4-bit AdamW's validation loss gap to full 32-bit AdamW by up to 70% across GPT and Llama pretraining models."
+  zh: "现有的 4-bit AdamW 量化方案往往在状态空间（最小化二阶动量 v 的误差）中执行舍入，然而真正决定参数更新步长的是预条件子 1/(sqrt(v) + eps)；当 v 接近零时，微小的状态误差会在预条件子空间产生灾难性放大。本文提出在「预条件子空间」进行量化与随机舍入（ZIP-SR 与 ZE-EDEN），在 GPT 和 Llama 预训练中将 4-bit AdamW 与原生 32-bit 之间的损失差距大幅缩减高达 70%。"
+date: 2026-10-09
+tags: ["arxiv", "ai", "cs.lg", "optimization", "quantization", "efficiency", "llm-training"]
+image: "/arxiv-visuals/arxiv-rounding-in-preconditioner-space-redesigning-4.png"
+---
+
+:::en
+**Paper**: [2610.12444](https://arxiv.org/abs/2610.12444)  
+**Authors**: Hanyang Li, Shao Tang, Daniel Thomas Braithwaite, Gregory Dexter, Leonardo Neves  
+**Categories**: cs.LG  
+
+## The Gap
+
+In modern large language model pre-training, optimizer states are the single largest consumer of persistent accelerator memory: standard 32-bit AdamW requires 8 bytes per parameter (4 bytes for first moment $m_t$, 4 bytes for second moment $v_t$), dwarfing 16-bit model weights. While 8-bit AdamW is widely accepted, pushing optimizer states down to 4-bit has notoriously caused measurable validation loss degradation and training instability.
+
+Existing 4-bit quantization solutions (such as TorchAO and bitsandbytes) treat optimizer state compression as a generic float quantization problem in **state space**: they construct codebooks to minimize the reconstruction error $|v_t - \hat{v}_t|$. However, this formulation ignores the core mathematical mechanism of AdamW: parameter updates are scaled by the **preconditioner**:
+
+$$P(v_t) = \frac{1}{\sqrt{v_t} + \epsilon}$$
+
+Because the derivative of $P(v)$ approaches infinity as $v \to 0$, even a minuscule state reconstruction error near zero causes an exponential distortion in the effective learning rate. Traditional round-to-nearest in state space creates severe step-size bias, degrading convergence.
+
+```
+   THE ASYMMETRY OF STATE-SPACE VS PRECONDITIONER-SPACE ROUNDING
+
+   Second Moment Value: v_t close to 0 (e.g., 1e-5)
+            |
+            v
+   Quantizer reconstructs: hat{v}_t = 4e-5  (State Error = 3e-5: "Looks small!")
+            |
+            v
+   Calculated Preconditioner:
+   True P(v_t)        = 1 / sqrt(1e-5) = 316.2
+   Quantized P(hat{v}) = 1 / sqrt(4e-5) = 158.1
+   ===> EFFECTIVE STEP SIZE CUT IN HALF (-50% ERROR)!
+            |
+            v
+   SOLUTION: ROUND DIRECTLY IN PRECONDITIONER SPACE
+   - Compute rounding thresholds and stochastic probabilities on P(v)
+   - Eliminates near-zero distortion and restores 32-bit convergence dynamics
+```
+
+## The Increment
+
+**One sentence**: By redesigning 4-bit optimizer quantization to calculate rounding thresholds and stochastic probabilities directly in preconditioner space rather than state space, ZIP-SR and ZE-EDEN close up to 70% of the performance gap between 4-bit and 32-bit AdamW across diverse pre-training scales.
+
+### Core Mechanism
+
+The authors formulate optimizer quantization through the lens of **coordinate choice for rounding decisions**:
+
+1. **ZIP-SR (Zero-Inclusive Preconditioner-space Stochastic Rounding)**:
+   - Retains exact zero in the second-moment codebook to prevent artificial gradient floors.
+   - For an unquantized value $v \in [q_i, q_{i+1}]$, standard stochastic rounding uses state distance $p = (v - q_i) / (q_{i+1} - q_i)$.
+   - ZIP-SR instead calculates transition probabilities in the transformed preconditioner coordinate:
+     $$p_{\text{ZIP-SR}} = \frac{P(v) - P(q_i)}{P(q_{i+1}) - P(q_i)}$$
+   - This guarantees that the expected preconditioner update matches the full-precision operator: $\mathbb{E}[P(\hat{v})] = P(v)$.
+2. **ZE-EDEN (Zero-Excluding EDEN Calibration)**:
+   - Employs a zero-excluding second-moment codebook with dynamic block-level scaling.
+   - Calibrates the positive quantization floor to neutralize preconditioner distortion without blowing up numerical precision.
+3. **Targeted First-Moment Stabilization**:
+   - First moments ($m_t$) are compressed using 4-bit NormalFloat (NF4).
+   - In the final 10% of the training cosine schedule, targeted stochastic rounding is enabled specifically for the language modeling head (LM-head), preventing gradient stagnation in high-entropy final token logits.
+
+```
+   ZIP-SR QUANTIZATION FLOW IN PRECONDITIONER COORDINATES
+
+   Unquantized Second Moment: v_t
+                 |
+                 v
+   Map to Preconditioner Space: P(v_t) = 1 / (sqrt(v_t) + eps)
+                 |
+                 v
+   Locate Adjacent Quantization Points: [P(q_i), P(q_{i+1})]
+                 |
+                 v
+   Compute Stochastic Probability:
+   p = (P(v_t) - P(q_i)) / (P(q_{i+1}) - P(q_i))
+                 |
+                 +-----------------------+
+                 |                       |
+                 v (prob: 1 - p)         v (prob: p)
+           Select Level q_i        Select Level q_{i+1}
+                 |                       |
+                 +-----------+-----------+
+                             |
+                             v
+               Store 4-bit Quantized Index
+            (Expected Preconditioner Unbiased!)
+```
+
+### Key Concepts
+
+- **Rounding Space**: The mathematical domain (state space vs function space) in which rounding decisions or stochastic probabilities are evaluated during quantization.
+- **Preconditioner Distortion**: The asymmetric magnification of error that occurs when inverting square-root second-moment estimates near the origin.
+- **Unbiased Preconditioner Expectation**: The property where the expected value of the quantized preconditioner over random stochastic rounding seeds equals the exact unquantized preconditioner.
+
+## Framework Shift
+
+```
+Before (State-Space 4-bit AdamW - TorchAO / bitsandbytes):
+  Quantization Objective: Minimize |v - hat{v}|.
+  Rounding Metric: Linear distance in moment value.
+  Failure Mode: Extreme learning rate suppression near zero gradients; validation loss gap.
+
+After (Preconditioner-Space 4-bit AdamW - ZIP-SR / ZE-EDEN):
+  Quantization Objective: Minimize |P(v) - P(hat{v})|.
+  Rounding Metric: Distance evaluated along P(v) = 1 / (sqrt(v) + eps).
+  Performance: Closes up to 70% of the 32-bit gap; identical memory savings.
+```
+
+## Expert Assessment
+
+**Problem choice**: High-impact systems optimization. Optimizer memory is the primary reason engineers resort to ZeRO-3 offloading or activation recomputation; practical 4-bit AdamW saves gigabytes of VRAM per GPU.
+
+**Method maturity**: Grounded in rigorous first-principles analysis of the non-linear curvature of $1/\sqrt{x}$, providing both an elegant stochastic rounding recipe and a calibrated deterministic alternative.
+
+**Experimental integrity**: Tested extensively on GPT and Llama pre-training from 130M up to 2.7B parameters, as well as full-parameter SFT tasks, showing consistent superiority over TorchAO across all benchmarks.
+
+**Writing quality**: Mathematically precise, clearly isolating the analytical source of quantization degradation.
+
+**Verdict**: **strong accept** — A foundational systems paper that turns 4-bit AdamW from an experimental compromise into an industrial-ready training baseline.
+
+## Takeaways
+
+- Never round optimizer states in raw magnitude space; always round in the coordinate space of the downstream functional operator.
+- Use ZIP-SR to retain zero in second-moment codebooks and make expected preconditioner updates mathematically unbiased.
+- Apply targeted stochastic rounding to the LM-head during the final 10% of cosine decay to safeguard final model convergence.
+:::
+
+:::zh
+**论文**: [2610.12444](https://arxiv.org/abs/2610.12444)  
+**作者**: Hanyang Li, Shao Tang, Daniel Thomas Braithwaite, Gregory Dexter, Leonardo Neves  
+**分类**: cs.LG  
+
+## 缺口
+
+在现代大语言模型的预训练与全量微调中，优化器状态（Optimizer States）是占用显存最大的元凶：传统的 32 位 AdamW 优化器每个模型参数需要占用 8 字节显存（一阶动量 $m_t$ 占 4 字节，二阶动量 $v_t$ 占 4 字节），这甚至是 16 位模型权重显存占用的两倍。
+虽然 8-bit AdamW 已经被业界广泛接受，但当业界尝试将优化器进一步压缩到 4-bit 时，往往会导致验证集损失（Validation Loss）严重劣化、训练过程极易震荡崩盘。
+
+现有主流的 4-bit 方案（如 PyTorch TorchAO 与 bitsandbytes）把优化器压缩简单地当作**状态空间（State Space）**内的通用浮点数截断问题：它们设计码本，旨在最小化 $|v_t - \hat{v}_t|$。
+然而，这种思路彻底违背了 AdamW 的数学本质。AdamW 中决定每个参数真实更新步长的是**预条件子（Preconditioner）**：
+
+$$P(v_t) = \frac{1}{\sqrt{v_t} + \epsilon}$$
+
+由于非线性映射 $P(v)$ 在 $v \to 0$ 处的导数趋向无穷大，当梯度非常微小时，二阶动量上哪怕 $10^{-5}$ 量级的量化微小扰动，经过开方取倒数后，都会在预条件子空间被放大成翻倍的剧烈偏差！传统的四舍五入导致有效学习率发生系统性扭曲，模型自然无法收敛。
+
+```
+   状态空间舍入 vs 预条件子空间舍入的非对称误差放大
+
+   二阶动量真实值：v_t 极小（如 1e-5）
+            |
+            v
+   普通量化器恢复值：hat{v}_t = 4e-5 （状态空间绝对误差仅 3e-5，表面上看极小）
+            |
+            v
+   计算实际生效的预条件子：
+   理论真实 P(v_t)        = 1 / sqrt(1e-5) = 316.2
+   量化失真 P(hat{v})     = 1 / sqrt(4e-5) = 158.1
+   ===> 实际有效更新步长直接缩水 50%（产生了高达 50% 的灾难性误差）！
+            |
+            v
+   破局解法：直接在「预条件子空间」定义舍入距离与随机概率
+   - 计算沿 P(v) 轴线的过渡概率
+   - 消除零点附近的非线性畸变，完全恢复原生 32-bit 的收敛轨迹
+```
+
+## 增量
+
+**一句话**: 本文重新确立了以「预条件子空间」为核心的 4-bit 优化器舍入新范式，提出了 ZIP-SR 与 ZE-EDEN 两种量化策略，在 GPT 与 Llama 预训练中将 4-bit AdamW 相对于原生 32-bit 的验证损失差距大幅抹平高达 70%。
+
+### 核心机制
+
+作者团队从数学层面上证明：优化器状态量化的核心不在于码本本身，而在于**决策舍入方向所依据的坐标系（Rounding Space）**：
+
+1. **ZIP-SR（零保留预条件子空间随机舍入）**：
+   - 在二阶动量码本中严格保留绝对零点，避免人为抬高梯度更新下限。
+   - 对于处于相邻量化桶 $[q_i, q_{i+1}]$ 的浮点数 $v$，传统随机舍入在状态空间线性插值计算概率；而 ZIP-SR 将采样概率映射到预条件子轴上：
+     $$p_{\text{ZIP-SR}} = \frac{P(v) - P(q_i)}{P(q_{i+1}) - P(q_i)}$$
+   - 从数学期望上确保了量化后的预条件子是无偏估计量：$\mathbb{E}[P(\hat{v})] = P(v)$，使得小梯度参数依然能保持正确的学习率尺度。
+2. **ZE-EDEN（非零动态校准方案）**：
+   - 针对部分不支持零点的特定硬件码本，采用块级动态缩放，重构预条件子正值底线带来的平移失真。
+3. **关键组件针对性退火保护**：
+   - 一阶动量 $m_t$ 采用 4-bit NormalFloat (NF4) 存储。
+   - 在训练最后 10% 的余弦衰减阶段，针对高熵输出的语言模型输出头（LM-head）一阶动量开启定向随机舍入，防止最终阶段模型在细粒度 Token 分布上陷入局部停滞。
+
+```
+   ZIP-SR 预条件子空间量化流程
+
+   未量化的二阶动量浮点值: v_t
+                 |
+                 v
+   非线性映射至预条件子空间: P(v_t) = 1 / (sqrt(v_t) + eps)
+                 |
+                 v
+   匹配预条件子轴上的相邻重建点: [P(q_i), P(q_{i+1})]
+                 |
+                 v
+   计算空间无偏随机采样概率:
+   p = (P(v_t) - P(q_i)) / (P(q_{i+1}) - P(q_i))
+                 |
+                 +-----------------------+
+                 |                       |
+                 v (概率 1 - p)          v (概率 p)
+           选择码本桶 q_i          选择码本桶 q_{i+1}
+                 |                       |
+                 +-----------+-----------+
+                             |
+                             v
+               写入 4-bit 压缩索引存储
+          （预条件子期望严格无偏，彻底杜绝步长漂移！）
+```
+
+### 关键概念
+
+- **舍入空间（Rounding Space）**：在对浮点数进行离散量化时，度量距离与判定随机舍入转移概率所在的数学函数空间。
+- **预条件子畸变（Preconditioner Distortion）**：当把误差敏感的二阶矩直接求逆开方时，原点附近的量化微小误差在函数值域中被指数级放大的物理现象。
+- **无偏预条件子期望（Unbiased Preconditioner Expectation）**：指随机量化后的倒数均方根矩阵在数学统计意义上严格等价于未量化浮点矩阵。
+
+## 范式跃迁
+
+```
+过去 (传统状态空间 4-bit AdamW - TorchAO / bitsandbytes):
+  量化准则: 尽可能让压缩后的 v 逼近原有的 v。
+  舍入度量: 沿 v 数值轴进行线性截断或四舍五入。
+  痛点结果: 极小梯度处预条件子剧烈变形，有效更新步长断崖式下滑，模型表现显著掉点。
+
+现在 (预条件子空间 4-bit AdamW - ZIP-SR / ZE-EDEN):
+  量化准则: 确保对优化器步长起决定作用的 P(v) 保持无偏。
+  舍入度量: 沿 1/(sqrt(v)+eps) 轴线计算概率分配。
+  突破表现: 显存依然直降 75%，但将与 32-bit 的性能鸿沟抹平达 70%，在全量微调中完全追平原生精度。
+```
+
+## 专家评估
+
+**选题价值**: 极具工业落地价值的基础设施研究。优化器显存过大是逼迫大模型训练采用昂贵的跨节点通信、张量并行或 CPU Offload 的核心瓶颈；真正无损的 4-bit AdamW 可大幅削减集群算力门槛。
+
+**方法成熟度**: 敏锐抓住了 $1/\sqrt{x}$ 处非线性剧烈变化的本质，推导严谨自洽，算法实现仅需少量微代码改动即可无缝融入各类训练框架。
+
+**实验严密性**: 覆盖了 GPT 和 Llama 两大经典架构从 130M 到 2.7B 的完备预训练矩阵，并在全量 SFT 上进行了真实能力验证，对比 TorchAO 优势显著。
+
+**论文写作**: 数学直觉透彻，图表深刻揭示了不同舍入空间下的参数演变动力学差异。
+
+**综合评审**: **强烈推荐 (strong accept)** — 奠定了 4-bit 优化器工业化生产部署的重要理论基石。
+
+## 行囊 (Takeaways)
+
+- 优化器状态量化切忌在裸数值空间做简单的四舍五入；必须以最终作用于梯度的函数算子为导向来选择舍入空间。
+- 在二阶矩码本中保留零点，并配合预条件子空间随机舍入（ZIP-SR），是保证量化期望无偏的关键钥匙。
+- 在预训练收敛的尾声阶段，对 LM-head 等高灵敏度参数的动量开启针对性随机舍入，能有效护航最终性能。
+:::
