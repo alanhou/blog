@@ -1,0 +1,291 @@
+---
+title:
+  en: "Designing Transformers for Continuous Diffusion Language Models"
+  zh: "为连续扩散大模型重塑 Transformer：LangDiT 架构解析"
+description:
+  en: "Continuous Diffusion Language Models (CDLMs) promise parallel, non-autoregressive text generation, but have historically borrowed architectures from vision DiTs or causal LLMs. This paper introduces LangDiT, tailored specifically for text diffusion via QK/feature normalization, expanded noise conditioning, likelihood-shortcut gradient routing, and confidence-gated self-conditioning—establishing a massive new SOTA generation perplexity of 21.72 on OpenWebText."
+  zh: "连续扩散大语言模型（CDLM）被寄予非自回归并行文本生成的厚望，但以往研究大多生搬硬套自回归因果模型或视觉图像 DiT 架构。本文推出了首个专门针对文本连续扩散特异性定制的 Language Diffusion Transformer（LangDiT）：融合 QK/特征归一化、加宽噪声条件注入、似然捷径梯度路由与置信度门控自条件，在 OpenWebText 上刷出 21.72 的全新 SOTA 生成困惑度纪录。"
+date: 2026-10-16
+tags: ["arxiv", "ai", "cs.ai", "diffusion", "dllm", "continuous-diffusion", "transformer-architecture"]
+image: "/arxiv-visuals/arxiv-designing-transformers-for-continuous-diffusion-language.png"
+---
+
+:::en
+**Paper**: [2610.22330](https://arxiv.org/abs/2610.22330)  
+**Authors**: Weijian Luo, Yujian Chen, Hao Jiang, Guang Cheng, Tianyang Hu  
+**Categories**: cs.AI  
+
+## The Gap
+
+Autoregressive language models generate text one token at a time, enforcing an $O(N)$ sequential latency bottleneck that severely bounds throughput during extended generation. **Continuous Diffusion Language Models (CDLMs)**—also known as diffusion LLMs (dLLMs)—represent the premier alternative: by mapping discrete tokens into continuous latent embeddings and reversing a forward Ornstein-Uhlenbeck or Gaussian diffusion process, CDLMs can generate entire paragraphs or code blocks in parallel within a constant number of denoising steps.
+
+Despite their theoretical promise, CDLMs have persistently lagged behind autoregressive models in generation quality and linguistic fluency (measured by generation perplexity, GenPPL). The authors identify the root cause: **architectural borrowing**.
+
+Prior CDLM works (such as Diffusion-LM, Plaid, and LangFlow) directly transplanted existing transformer architectures without modification:
+1. They either stripped the causal triangular mask from standard **Causal LLMs** (e.g., LLaMA or GPT-2).
+2. Or they lifted **Vision Diffusion Transformers (DiTs)** developed for 2D pixel grids.
+
+Neither architecture is suited for the unique mathematical dynamics of text diffusion: discrete text embeddings embedded in continuous Euclidean space exhibit extreme gradient dispersion, high-entropy semantic clusters, and delicate timestep dependencies that standard transformer blocks fail to stabilize.
+
+```
+   THE ARCHITECTURAL MISMATCH IN CONTINUOUS TEXT DIFFUSION
+
+   Continuous Text Diffusion Process: Continuous noisy latents x_t
+                                |
+                                v
+   +-----------------------------------------------------------+
+   | The Borrowed Architecture Trap:                           |
+   | - Causal LLMs (LLaMA style): Lacks bidirectional noise    |
+   |   conditioning mechanisms; attention scales explode.      |
+   | - Vision DiTs (FLUX style): Tuned for continuous pixels;  |
+   |   fails on discrete semantic boundaries of text latents.  |
+   +-----------------------------------------------------------+
+                                |
+                                v
+   Result: High generation perplexity (GenPPL > 50), repetitive jargon,
+   and training divergence under low NFE sampling.
+                                |
+                                v
+   LangDiT SOLUTION: PURPOSE-BUILT TEXT DIFFUSION TRANSFORMER
+   1. Feature & Query-Key Normalization (Prevents attention logit blowup)
+   2. Wider Noise Conditioning across high-dimensional projection channels
+   3. Likelihood-Shortcut Gradient Routing (Direct semantic feedback)
+   4. Confidence-Gated Self-Conditioning (Filters noisy early estimates)
+```
+
+## The Increment
+
+**One sentence**: LangDiT provides the first ground-up transformer architecture engineered specifically for continuous text diffusion, integrating QK-normalization, expanded noise projection, likelihood-shortcut gradient routing, and confidence-gated self-conditioning to shatter prior generation perplexity records (achieving 21.72 GenPPL on OpenWebText).
+
+### Core Mechanism
+
+The LangDiT architecture redesigns the internal dataflow of the diffusion backbone across four critical axes:
+
+1. **Feature & Query-Key Normalization (QK-Norm)**:
+   - In continuous text diffusion, high noise levels $t \approx 1$ induce extreme variance in intermediate activation norms. Standard dot-product attention $\mathbf{q} \mathbf{k}^T / \sqrt{d}$ frequently saturates the softmax operator, resulting in one-hot degenerate attention distributions.
+   - LangDiT enforces RMSNorm on both queries and keys prior to dot-product calculation, alongside pre-layer feature normalization, stabilizing attention entropy across all timesteps $t \in [0, 1]$.
+2. **Wider Noise Conditioning**:
+   - Rather than compressing the continuous scalar timestep $t$ into a narrow low-dimensional projection vector, LangDiT maps $t$ into a wide multi-frequency sinusoidal basis and expands the conditioning MLP channels by $4\times$.
+   - Adaptive layer-norm (adaLN) modulations dynamically re-scale both attention weights and feed-forward activations based on continuous noise intensity.
+3. **Likelihood-Shortcut Gradient Routing & Calibration**:
+   - Discrete language token recovery requires optimizing categorical log-likelihoods, while diffusion intermediate steps optimize score matching (MSE in latent space).
+   - LangDiT introduces an explicit gradient routing bypass: an auxiliary prediction head connects the intermediate representations directly to vocabulary classification logits, providing dense, immediate linguistic guidance to early transformer layers.
+4. **Confidence-Gated Self-Conditioning**:
+   - Self-conditioning—feeding the model's estimate of the clean text $\hat{\mathbf{x}}_0$ back into the next forward pass—is vital for text diffusion. However, unconfident early estimates inject severe hallucinations.
+   - LangDiT computes an in-situ confidence scalar based on latent norm stability: when confidence is low ($t$ is high), the self-conditioning signal is smoothly gated out; when confidence matures, it is amplified.
+
+```
+   LangDiT INTERNAL BLOCK ARCHITECTURE
+
+   Noisy Text Latents x_t + Clean Estimate hat{x}_0
+                           |
+                           v
+   [Confidence Gate: alpha(t) * hat{x}_0] ---> Merged Input
+                           |
+                           v
+   +-----------------------------------------------------------+
+   | Wide Noise Projection MLP (adaLN Modulation Parameters)    |
+   +-----------------------------------------------------------+
+                           |
+                           v
+   [RMSNorm Feature Scaling]
+                           |
+                           v
+   [Bidirectional Self-Attention with QK-Norm]
+   (Q and K normalized to unit sphere before dot-product)
+                           |
+                           v
+   [Feed-Forward Network (Gated MLP)]
+                           |
+                           +-----------------------------------+
+                           |                                   |
+                           v                                   v
+             Denoised Latent Velocity v_t          [Likelihood Shortcut Head]
+                           |                       Provides direct vocabulary
+                           |                       cross-entropy gradients!
+                           v                                   |
+              Next Diffusion Step x_{t-1} <--------------------+
+```
+
+### Key Concepts
+
+- **Continuous Diffusion Language Model (CDLM)**: A generative model that synthesizes natural language by running reverse continuous diffusion over continuous token embedding spaces.
+- **QK-Normalization in Diffusion**: Constraining query and key vectors with root-mean-square normalization to prevent softmax saturation in high-noise regimes.
+- **Likelihood-Shortcut Routing**: An architectural bypass that routes categorical vocabulary classification loss directly into intermediate hidden layers during continuous diffusion training.
+
+## Framework Shift
+
+```
+Before (Off-the-Shelf Architectural Borrowing):
+  Backbone: Causal LLM minus triangular mask, or vision DiT (UViT/FLUX).
+  Assumptions: "A transformer is a transformer; any backbone can learn diffusion."
+  Failure Mode: Attention saturation under noise; high generation perplexity (GenPPL > 50).
+
+After (LangDiT Custom Continuous Text Diffusion Architecture):
+  Backbone: Tailored with QK-norm, wide noise adaLN, and likelihood shortcut routing.
+  Insight: Text latents require active attention stabilization and direct vocabulary guidance.
+  Empirical Breakthrough:
+    - LangFlow + LangDiT: GenPPL drops to 21.72 (1024 NFEs) and 44.72 (128 NFEs).
+    - Plaid + LangDiT: New world-record GenPPL of 11.33 (1024 NFEs).
+    - Constant FLOPs: Exact same training objective, sampler, and latent representation!
+```
+
+## Expert Assessment
+
+**Problem choice**: Paramount architectural puzzle. Non-autoregressive generation cannot dethrone autoregressive transformers until diffusion backbones are explicitly optimized for text mathematics.
+
+**Method maturity**: Principled ablation methodology. By holding the latent representation, loss function, and inference sampler constant, the authors unequivocally isolate transformer architecture as the root source of prior CDLM underperformance.
+
+**Experimental integrity**: Validated across two distinct continuous diffusion frameworks (LangFlow and Plaid) on standard OpenWebText benchmarks, reporting dramatic improvements in perplexity and sample diversity.
+
+**Writing quality**: Highly lucid, with thorough diagnostic heatmaps demonstrating the mitigation of softmax attention saturation across diffusion timesteps.
+
+**Verdict**: **strong accept** — The definitive architectural reference for modern continuous diffusion language models.
+
+## Takeaways
+
+- Do not use causal LLM backbones or vision DiTs for text diffusion; text embeddings require dedicated stabilization.
+- Always apply QK-normalization to bidirectional diffusion attention to prevent high-noise softmax saturation.
+- Implement likelihood-shortcut gradient routing to directly anchor continuous latent trajectories to discrete vocabulary semantics.
+:::
+
+:::zh
+**论文**: [2610.22330](https://arxiv.org/abs/2610.22330)  
+**作者**: Weijian Luo, Yujian Chen, Hao Jiang, Guang Cheng, Tianyang Hu  
+**分类**: cs.AI  
+
+## 缺口
+
+以 GPT 和 Llama 为代表的自回归因果语言模型（Autoregressive LLMs）只能严格按照从左到右、一个 Token 接一个 Token 地串行生成。这种机制给长文本与复杂代码推理带来了不可逾越的 $O(N)$ 时延瓶颈。
+作为非自回归（Non-Autoregressive）文本生成的最强潜力选手，**连续扩散大语言模型（Continuous Diffusion Language Models, CDLM / dLLM）**提供了一种颠覆性的全新范式：将离散 Token 投射至高维连续欧氏空间，通过反向扩散去噪，仅需固定步数（如数十步）即可实现整段文本、甚至整篇长文的**毫秒级全并行一次性生成**。
+
+然而，CDLM 长期以来在文本生成的连贯性、逻辑深度与困惑度（Perplexity, PPL）上，始终明显落后于传统自回归模型。
+作者团队经过系统的消融溯源，一针见血地指出了整个领域的阿喀琉斯之踵——**架构生搬硬套（Architectural Borrowing）**。
+
+此前所有的连续扩散文本模型（如 Diffusion-LM、Plaid、LangFlow 等），其底层骨干网络完全依赖于现成架构的拼凑：
+1. 要么直接借用传统的**自回归因果模型**（如 LLaMA 或 GPT-2），仅仅移除了因果因果下三角掩码；
+2. 要么生硬照搬为 2D 连续图像像素设计的**视觉扩散 Transformer（Vision DiT）**。
+
+这两种架构根本无法适配离散文本扩散独特的数学特性：离散语言词向量在连续流形中具有极度陡峭的语义边界，高时间步下的强高斯噪声会导致传统注意力的方差急剧发散，引发 Softmax 饱和瘫痪。生搬硬套的骨干网络使得模型生成质量极度粗糙。
+
+```
+   连续文本扩散中的「架构错位」之痛
+
+   文本连续高维扩散过程：连续噪声潜变量 x_t
+                                |
+                                v
+   +-----------------------------------------------------------+
+   | 沿用现成架构的致命内伤：                                  |
+   | - 自回归底座（LLaMA 改版）：缺乏对连续时间步 t 的深层注入 |
+   |   机制；强噪声下注意力权重极易数值爆炸。                  |
+   | - 图像 DiT（FLUX 移植版）：专为平滑连续像素设计，无法处理 |
+   |   文本嵌入空间中极其陡峭脆弱的离散分类拓扑边界。          |
+   +-----------------------------------------------------------+
+                                |
+                                v
+   灾难后果：生成困惑度（GenPPL）居高不下（>50），文本充斥胡话复读；
+   低步数采样下模型直接崩盘。
+                                |
+                                v
+   LangDiT 破局解法：首个专为文本连续扩散定制的 Transformer 架构
+   1. 特征与 QK 归一化（彻底根治强噪声下的注意力饱和）
+   2. 加宽时间步噪声条件注入（adaLN 全局高维调制）
+   3. 似然捷径梯度路由（直接为底层注入离散词表监督）
+   4. 置信度门控自条件（自适应过滤早期不成熟幻觉）
+```
+
+## 增量
+
+**一句话**: 本文推出了首个专门针对连续文本扩散数学特性定制的骨干网络——语言扩散 Transformer（LangDiT）：通过引入 QK 归一化、加宽噪声调制、似然捷径梯度路由与置信度门控自条件，在完全不改变训练目标与表征的前提下，在 OpenWebText 数据集上将生成困惑度大幅刷新至 21.72 的全新世界纪录。
+
+### 核心机制
+
+LangDiT 对文本扩散内部的张量数据流与梯度通路进行了深度的特异性重构：
+
+1. **特征与 Query-Key 归一化（QK-Norm）**：
+   - 在连续文本扩散的高噪声区（$t \approx 1$），潜变量的模长方差极其剧烈。标准点积注意力 $\mathbf{q} \mathbf{k}^T / \sqrt{d}$ 会使得指数项极大，导致 Softmax 呈现退化的 One-hot 尖峰分布。
+   - LangDiT 在计算点积前强制对 Query 和 Key 向量实施 RMSNorm 归一化，将其约束在超球面上，确保在从高斯纯噪声到纯净文本的全时间步内，注意力分布始终保持平滑健康的熵值。
+2. **加宽噪声条件注入通道（Wider Noise Conditioning）**：
+   - 传统方案将一维标量时间步 $t$ 粗暴映射到狭窄向量，导致深层网络无法感知去噪进程。
+   - LangDiT 将时间步投射至超宽的多频正弦基底，将自适应层归一化（adaLN）通道宽度放大 4 倍，精细调制每个隐层的增益与偏置。
+3. **似然捷径梯度路由（Likelihood-Shortcut Gradient Routing）**：
+   - 文本生成终究要在离散词表中进行分类判定，而传统扩散仅靠潜空间的均方误差（MSE）得分匹配，梯度反馈极为迟缓。
+   - LangDiT 在中前层显式挂载轻量预测头，将词表交叉熵损失的梯度以捷径直通方式回传给浅层隐变量，使模型早期层快速建立对离散语言结构的微观感知。
+4. **置信度门控自条件（Confidence-Gated Self-Conditioning）**：
+   - 自条件机制（将上一步预测的干净文本估计值 $\hat{\mathbf{x}}_0$ 重新送入网络）是 CDLM 成功的关键。但前期 $t$ 极大时，预测的 $\hat{\mathbf{x}}_0$ 充满了荒唐的幻觉，盲目输入只会污染特征。
+   - LangDiT 构建了基于潜变量稳定度的置信度门控标量：前期动态压制自条件信号，中后期信心充沛时全面放行，大幅提升了采样效率。
+
+```
+   LangDiT 内部架构与梯度路由全景图
+
+   当前含噪文本潜变量 x_t + 干净估计值 hat{x}_0
+                           |
+                           v
+   [动态置信度门控: alpha(t) * hat{x}_0] ---> 融合输入
+                           |
+                           v
+   +-----------------------------------------------------------+
+   | 超宽时间步噪声投影网络（生成高维 adaLN 仿射调制参数）     |
+   +-----------------------------------------------------------+
+                           |
+                           v
+   [RMSNorm 动态特征归一化]
+                           |
+                           v
+   [带 QK-Norm 的全双向自注意力机制]
+   （Q 与 K 在计算内积前严格投影至单位球面，彻底根除注意尖峰）
+                           |
+                           v
+   [门控前馈神经网络（SwiGLU FFN）]
+                           |
+                           +-----------------------------------+
+                           |                                   |
+                           v                                   v
+             输出去噪速度向量 v_t                  [似然捷径预测头]
+                           |                       直接计算离散词表交叉熵，
+                           |                       梯度光速回流底层！
+                           v                                   |
+              输出下一时间步潜变量 x_{t-1} <-------------------+
+```
+
+### 关键概念
+
+- **连续扩散语言模型（CDLM）**：在连续嵌入空间中通过逆向随机微分方程或流动匹配（Flow Matching）实现全并行非自回归文本生成的新范式。
+- **QK 归一化（QK-Norm）**：在计算注意力相关矩阵前，对 Query 与 Key 施加层归一化，专治强噪声条件下的数值溢出与注意力退化。
+- **似然捷径路由（Likelihood-Shortcut Routing）**：在连续潜空间扩散更新的同时，开辟辅助分支直接连接离散词表概率，以直通梯度强化语言先验。
+
+## 范式跃迁
+
+```
+过去 (对现成 LLM / DiT 架构的机械照搬):
+  技术路线: 粗暴套用去掉掩码的 LLaMA 或移值图像 FLUX 骨干网络。
+  设计误区: 误以为"只要是 Transformer 就能学好文本扩散"。
+  痛点结果: 强噪声下注意力饱和，生成困惑度居高不下（GenPPL > 50）。
+
+现在 (为文本连续扩散量身定制的 LangDiT 架构):
+  技术路线: 引入 QK-Norm、高维噪声注入与似然捷径直通。
+  本质突破: 严格对齐文本离散边界与扩散连续过程之间的数学张力。
+  辉煌战绩:
+    - LangFlow 底座: 在 1024 步下将 GenPPL 暴拉至 21.72，128 步下达到 44.72。
+    - Plaid 底座: 刷出 11.33 的全新世界顶格纪录。
+    - 绝对纯正: 在保持原有数据、损失与采样算法完全不变的前提下，纯靠架构改进解锁质变！
+```
+
+## 专家评估
+
+**选题价值**: 破局之作。非自回归大模型如果想要真正颠覆自回归的统治地位，必须走出机械照搬视觉 DiT 的舒适区，建立专属的文本扩散网络体系。
+
+**方法成熟度**: 典型的控制变量式高水平研究。研究团队严格锁定了底层的嵌入表征、扩散训练目标和推理采样器，毫无争议地证明了「架构设计正是此前 CDLM 性能拉垮的罪魁祸首」。
+
+**实验严密性**: 在 LangFlow 和 Plaid 两个完全异构的连续扩散基准上同时取得巨幅突破，详尽的注意力热力图消融极具技术说服力。
+
+**写作水准**: 公式严整，机理阐述透彻，对连续潜空间与离散词表之间的桥接难题给出了教科书级的解答。
+
+**综合评审**: **强烈推荐 (strong accept)** — 连续扩散大语言模型发展史上的关键架构转折点。
+
+## 行囊 (Takeaways)
+
+- 绝不要直接拿自回归大模型或图像生成 DiT 去跑文本连续扩散；文本潜变量在强噪声下具有独特的注意力退化特征。
+- 在双向扩散注意力中强制引入 QK-Norm，是避免 Softmax 饱和瘫痪、保证全时间步健康梯度的必选项。
+- 引入似然捷径梯度路由，能以极小开销让连续隐变量直接受到离散词表几何的指引，大幅加速模型收敛与语言自然度。
+:::
