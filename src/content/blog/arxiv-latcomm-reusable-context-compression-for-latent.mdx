@@ -1,0 +1,285 @@
+---
+title:
+  en: "LatComm: Reusable Context Compression for Latent Communication between Large Language Models"
+  zh: "LatComm：大模型间潜空间通信的重用型上下文压缩"
+description:
+  en: "Compound LLM systems frequently query the same massive document across hundreds of tasks, forcing downstream models to re-encode identical text repeatedly. LatComm solves this via a reusable latent packet: a frozen encoder compresses long context into a fixed-size representation once, which a frozen receiver queries dynamically through prompt-gated cross-attention—slashing input tokens by 57x and accelerating multi-turn QA by 3x."
+  zh: "在多智能体与复合大模型系统中，往往需要围绕同一份庞大背景文档并发回答海量问题，然而将纯文本反复在模型间传递会导致接收端对相同上下文执行极其昂贵的重复 Prefill 编码。LatComm 提出了可重用的潜空间通信接口：由冻结的编码器一次性将超长上下文压缩为固定大小的神经数据包，下游冻结的接收模型通过提示词门控 Cross-Attention 按需动态读取，将接收端输入 Token 数量暴降 57 倍，端到端问答速度飙升 3 倍。"
+date: 2026-10-20
+tags: ["arxiv", "ai", "cs.ai", "cs.cl", "multi-agent", "context-compression", "latent-communication", "efficiency"]
+image: "/arxiv-visuals/arxiv-latcomm-reusable-context-compression-for-latent.png"
+---
+
+:::en
+**Paper**: [2610.26840](https://arxiv.org/abs/2610.26840)  
+**Authors**: Huawei Lin, Jinting Liu, Tan Yu, Weijie Zhao  
+**Categories**: cs.AI, cs.CL  
+
+## The Gap
+
+In compound AI systems, collaborative multi-agent swarms, and enterprise retrieval pipelines, a single massive context—such as an extensive API specification, a medical case file, a legal contract, or a full code repository—frequently serves as the shared reference for dozens or hundreds of downstream questions.
+
+Under current serving paradigms, communication between disparate LLMs relies on **natural language text transmission**: the sender dumps raw text into the receiver's prompt. This introduces a devastating computational redundancy:
+- **Redundant Prefill Overhead**: The receiver LLM must process and re-encode the entire multi-thousand-token document from scratch for *every single question*, consuming vast GPU FLOPs and saturating KV cache memory.
+- **The Failure of Existing Compression**: Prior latent communication and context compression approaches suffer from crippling structural limits:
+  1. *Single-Vector Pooling (e.g., dense embeddings)*: Destroys granular token-level evidence, collapsing accuracy on detailed reading comprehension.
+  2. *Query-Dependent Compression (e.g., soft prompting / TTT)*: Compresses the context specifically for *one* query, destroying reusability across future questions.
+  3. *Homogeneous Weight Binding*: Requires the sender and receiver to be identical model checkpoints sharing the exact same vocabulary and hidden dimensions.
+
+```
+   THE REDUNDANT TEXT PREFILL TRAP IN MULTI-AGENT PIPELINES
+
+   100k-Token Long Legal Contract
+          |
+          +-----------------------+-----------------------+
+          |                       |                       |
+          v                       v                       v
+   [Question 1]            [Question 2]            [Question 50]
+   "Liability clause?"     "Governing law?"        "Termination dates?"
+          |                       |                       |
+          v                       v                       v
+   +-----------------------------------------------------------+
+   | Receiver LLM must run full forward prefill pass over     |
+   | the SAME 100k tokens 50 CONSECUTIVE TIMES!                |
+   | Total Tokens Processed: 5,000,000 tokens!                 |
+   | VRAM Choked; Prefill Latency Dominates Serving Costs.     |
+   +-----------------------------------------------------------+
+          |
+          v
+   LatComm SOLUTION: ONE ENCODING, UNLIMITED REUSABLE READS
+   - Frozen Encoder compresses 100k tokens ONCE into a fixed Latent Packet
+   - Frozen Receiver reads relevant packet slices via Prompt-Gated Cross-Attention
+   - Receiver input slashed 57x; Multi-query answering runs 3x faster!
+```
+
+## The Increment
+
+**One sentence**: LatComm establishes an asynchronous latent communication interface that encodes long textual contexts once into a compact, query-agnostic neural packet, allowing a separate frozen receiver LLM to selectively query the packet via prompt-gated cross-attention—reducing receiver input tokens by 57x and achieving 3x faster end-to-end question answering.
+
+### Core Mechanism
+
+LatComm decouples context digestion into **asymmetric, one-time encoding and query-conditioned selective reading**:
+
+1. **One-Time Query-Agnostic Packetization**:
+   - A frozen sender LLM processes the long context document without access to downstream questions.
+   - Intermediate activations across landmark positions are downsampled and projected into a fixed-size **Latent Packet** $\mathcal{P} \in \mathbb{R}^{M \times d}$ (where $M \ll N$, typically achieving a $16\times$ to $64\times$ token reduction).
+   - This packet is cached in GPU memory or transmitted across nodes as a lightweight tensor payload.
+2. **Prompt-Gated Cross-Attention Reading**:
+   - The receiver LLM can be a completely different frozen model architecture.
+   - When a specific question $\mathbf{q}$ arrives, the receiver generates query vectors that attend to the latent packet through lightweight, trainable cross-attention bridge layers.
+   - An in-situ gating module $\mathbf{g}(\mathbf{q})$ computes prompt-dependent attention masks, allowing the receiver to selectively extract needle-level evidence from the packet while ignoring irrelevant background regions.
+3. **Completely Frozen Foundation Models**:
+   - Neither the sender LLM nor the receiver LLM undergoes weight updates.
+   - Only the compact projection adapters and cross-attention gating parameters are optimized, preserving the broad reasoning priors and conversational alignment of both models.
+4. **Spectacular Throughput and Accuracy**:
+   - Evaluated across 12 demanding multiple-choice QA benchmarks.
+   - Outperforms conventional dense single-vector baselines by up to **10.2 percentage points**.
+   - On the QuALITY long-context benchmark, LatComm cuts receiver input tokens by **$57\times$**, speeding up document-level question answering by **$3\times$ in wall-clock time**.
+
+```
+   LatComm LATENT COMMUNICATION ARCHITECTURE
+
+   Long Background Document Context (N Tokens)
+                    |
+                    v
+   [Frozen Sender LLM] (Runs ONCE per document)
+                    |
+                    v
+   [Compressor Projection Module]
+                    |
+                    v
+   ===>> CACHED LATENT PACKET P (M Tokens, M = N / 57) <<===
+                    |
+         +----------+----------+
+         |                     |
+         v (Question 1)        v (Question 2)
+   "What is statute X?"  "What are damages in clause Y?"
+         |                     |
+         +----------+----------+
+                    |
+                    v
+   [Prompt-Gated Cross-Attention Bridge]
+   (Dynamically extracts relevant packet slices based on query prompt)
+                    |
+                    v
+   [Frozen Receiver LLM]
+                    |
+                    v
+   Fast Sub-Second Answers (3x Faster Wall-Clock Serving!)
+```
+
+### Key Concepts
+
+- **Latent Communication**: Passing internal continuous activation tensors between distinct neural models rather than translating into discrete natural language text tokens.
+- **Query-Agnostic Context Packet**: A dense neural representation of a document that retains sufficient entropy to answer arbitrary future questions without being conditioned on a specific query prompt.
+- **Prompt-Gated Reading**: An attention mechanism where the incoming question modulates cross-attention weights over pre-computed latent memory slots.
+
+## Framework Shift
+
+```
+Before (Text-Based Context Transmission in Multi-Agent Loops):
+  Protocol: Serialize full context as text; dump into every downstream agent's prompt.
+  Computation: N tokens re-encoded across Q questions = N * Q prefill complexity.
+  Cost: Enormous redundant compute; saturates memory bandwidth and blows up serving costs.
+
+After (LatComm Reusable Latent Interface):
+  Protocol: Encode context once into a compact latent packet P; query P via gated cross-attention.
+  Computation: N tokens encoded ONCE + (N / 57) tokens read across Q questions.
+  Efficiency: 57x fewer receiver input tokens; 3x faster wall-clock serving; zero loss in QA fidelity.
+```
+
+## Expert Assessment
+
+**Problem choice**: Immediate architectural relevance for multi-agent systems and enterprise knowledge retrieval. Re-encoding identical long contexts for every user query is one of the most egregious compute wastes in modern cloud AI.
+
+**Method maturity**: Decoupling the encoder from the reader while keeping both foundational models frozen is a masterclass in practical systems design, avoiding the need for multi-billion parameter end-to-end retraining.
+
+**Experimental integrity**: Validated across 12 diverse question-answering benchmarks, complete with rigorous ablations comparing single-vector, pooling, and multi-vector cross-attention topologies.
+
+**Writing quality**: Highly lucid, with clear systems-level diagrams and compelling latency profiling on long-context datasets.
+
+**Verdict**: **strong accept** — A groundbreaking systems paper that provides the blueprints for scalable latent communication in compound AI architectures.
+
+## Takeaways
+
+- Stop re-encoding identical static contexts as raw text for every query; encode the document once into a reusable latent packet.
+- Keep sender and receiver foundation models frozen and use lightweight prompt-gated cross-attention to bridge latent representations.
+- In multi-agent pipelines and enterprise document chat, deploy latent packets to achieve up to 57x input compression and 3x end-to-end speedups.
+:::
+
+:::zh
+**论文**: [2610.26840](https://arxiv.org/abs/2610.26840)  
+**作者**: Huawei Lin, Jinting Liu, Tan Yu, Weijie Zhao  
+**分类**: cs.AI, cs.CL  
+
+## 缺口
+
+在现代复合 AI 系统（Compound AI Systems）、协同多智能体工作流以及企业级知识库问答中，一个非常普遍的业务场景是：**围绕同一份庞大且结构复杂的长背景文档（例如数十页的行业规范、代码仓库索引、法律合同或临床病历），在短时间内连续向大模型提出数十甚至上百个不同的具体问题**。
+
+在现有的服务与通信架构中，不同模型或智能体之间依然原始地依赖**纯文本字符串传输（Text-based Transmission）**：
+发送端将数万 Token 的原始长文本，一次次生硬地拼接在每一个问题的开头，打成 Prompt 喂给接收端大模型。这种做法在底层造成了灾难性的算力黑洞：
+- **极其昂贵的重复 Prefill 冗余**：接收端大模型必须针对这 50 个问题，将同一份长达数万 Token 的文档**从头到尾重复执行 50 次前向 Prefill 计算**！显存带宽被彻底吃光，KV Cache 瞬间撑爆，算力成本居高不下。
+- **现有上下文压缩技术的局限性**：
+  1. *单向量池化压缩（如 Dense Embedding）*：将长文本强行压缩成一个单一向量，微观语义信息严重丢失，面对需要精准定量的细粒度问答完全失灵；
+  2. *强依赖具体问题的动态压缩（如 TTT 或特定 Soft-Prompt）*：压缩过程必须提前获知具体问题，无法在后续未见问题上重复使用；
+  3. *同源权重强绑定*：往往要求发送端与接收端必须是同一款模型、共享相同的词表与隐层维度。
+
+```
+   多智能体协作中纯文本重复 Prefill 的算力黑洞
+
+   一份 10 万 Token 的企业长文档
+          |
+          +-----------------------+-----------------------+
+          |                       |                       |
+          v                       v                       v
+   [下游问题 1]            [下游问题 2]            [下游问题 50]
+   "责任归属条款细节？"    "管辖法律与仲裁地？"    "终止服务违约金？"
+          |                       |                       |
+          v                       v                       v
+   +-----------------------------------------------------------+
+   | 接收端大模型必须对同一份 10 万 Token 的文档执行 50 次     |
+   | 完全重复且极其昂贵的前向 Prefill 编码！                   |
+   | 累计处理 Token 总量高达 5,000,000！显存带宽全线打爆！     |
+   +-----------------------------------------------------------+
+          |
+          v
+   LatComm 破局解法：一次编码，无限重用
+   - 冻结的编码器仅需处理一次文档，生成紧凑型神经数据包（Packet）
+   - 接收端大模型通过提示词门控 Cross-Attention 按需定向读取细节
+   - 接收端输入 Token 直降 57 倍；全文多轮问答端到端提速 300%！
+```
+
+## 增量
+
+**一句话**: 本文提出了名为 LatComm 的大模型间潜空间通信接口，通过将编码与读取解耦，仅需调用冻结的发送端模型一次性将长上下文压缩为固定尺寸的通用神经数据包，即可让下游完全不同的冻结接收端模型通过提示词门控交叉注意力按需读取，将接收端输入 Token 大幅削减 57 倍，实现多题连续问答 3 倍的真实时延暴降。
+
+### 核心机制
+
+LatComm 将笨重的长文档处理切分为**「一次性离线神经封包」与「轻量级在线提示词门控读取」**两大阶段：
+
+1. **与具体问题无关的一体化神经封包（Query-Agnostic Packetization）**：
+   - 保持发送端大模型权重全程冻结，在无需知晓下游任何具体问题的前提下，对长上下文进行单次前向传播。
+   - 提取跨层特征并经过下采样适配器，凝练成一个紧凑的固定尺寸**潜空间数据包（Latent Packet）** $\mathcal{P} \in \mathbb{R}^{M \times d}$（条目数 $M \ll N$，通常实现 16 到 64 倍的体积骤缩）。
+   - 该数据包作为轻量级张量缓存常驻显存，支持跨节点极速分发。
+2. **基于提示词门控的 Cross-Attention 动态读取**：
+   - 接收端大模型可以是参数、词表完全异构的另一款开源模型。
+   - 当具体问题 $\mathbf{q}$ 到达时，接收端基于当前问题的词向量，通过轻量级交叉注意力层扫描预计算好的潜空间数据包。
+   - 内置的门控单元 $\mathbf{g}(\mathbf{q})$ 根据问题的语义焦点，自适应计算注意力激活掩码，精准提取出与当前问题强相关的数据包切片，完全过滤背景冗余信息。
+3. **两端基座模型全程「零微调」**：
+   - 发送端与接收端两款大模型的底层核心权重保持 100% 冻结。
+   - 仅训练参数量极其微小的特征映射层与 Cross-Attention 门控，完全保留两端基座模型强大的通用推理、对齐与指令服从能力。
+4. **硬核降本与精度验证**：
+   - 在涵盖多领域的 12 个多项选择长文本问答数据集上展开系统实测。
+   - 相比于传统单向量稠密压缩基线，平均准确率大幅反超高达 **10.2 个百分点**。
+   - 在高难度长文本基准 QuALITY 上，LatComm 将接收端处理的输入规模**暴砍 57 倍**，在保持高精度的同时，端到端问答耗时**整整缩短至原先的 1/3**。
+
+```
+   LatComm 跨模型潜空间通信架构图
+
+   长背景文档（长度 N Token）
+               |
+               v
+   [冻结的发送端 LLM]（仅需前向运行一次）
+               |
+               v
+   [紧凑特征投影映射层]
+               |
+               v
+   ===>> 常驻显存的潜空间数据包 P（长度 M = N / 57）<<===
+               |
+        +------+------+
+        |             |
+        v (问题 1)    v (问题 2)
+   "第 3 条款细节？"  "终止合同违约责任？"
+        |             |
+        +------+------+
+               |
+               v
+   [提示词门控 Cross-Attention 提取层]
+   （根据当前具体提问，动态点亮数据包中最关键的微观信息切片）
+               |
+               v
+   [冻结的接收端 LLM]
+               |
+               v
+   毫秒级极速输出正解！（端到端服务速度提升 300%）
+```
+
+### 关键概念
+
+- **潜空间通信（Latent Communication）**：跳过将认知压缩为人类自然语言文字的中间步骤，直接在神经网络高维连续激活张量层面进行跨模型高效信息交互。
+- **与问题无关的神经封包（Query-Agnostic Context Packet）**：一种高保真的稠密上下文潜层表征，能够全息封装文档深层信息，供下游任意未知问题随时读取。
+- **提示词门控读取（Prompt-Gated Reading）**：利用具体查询语句的意图动态计算门控权重，使模型在跨注意力扫描预计算缓存时具备极高的聚焦分辨力。
+
+## 范式跃迁
+
+```
+过去 (基于文本字符串的重复 Prefill 范式):
+  通信协议: 模型间粗暴传递全量字符串，每次交互重新拼接长文本。
+  计算复杂度: N 个上下文 Token 面对 Q 个提问，产生 N * Q 的海量重复计算。
+  服务瓶颈: 显存频频溢出，长文本多轮交互卡顿严重，算力成本居高不下。
+
+现在 (基于 LatComm 的一次封包重用范式):
+  通信协议: 压缩为轻量级神经数据包，两端模型冻结，仅依靠门控 Cross-Attention 连通。
+  计算复杂度: N 个 Token 仅编码一次，后续提问仅需处理 N / 57 的微型潜层切片。
+  生产突破: 输入规模直降 57 倍，多轮密集长文本推理速度狂飙 300%，真正实现轻装上阵。
+```
+
+## 专家评估
+
+**选题价值**: 极具现实穿透力。在长文本与多智能体 Agent 普及的工业落地中，反复 Prefill 相同上下文是导致算力账单居高不下的第一元凶。
+
+**方法成熟度**: 架构设计极具系统级工程智慧。巧妙避开了端到端联合微调大模型的巨大开销，在两端基座完全冻结的前提下，依靠外挂门控层完成了高效跨模型通信。
+
+**实验严密性**: 在跨越 12 个公开问答数据集的大规模矩阵中进行了充分检验，对单向量、均值池化及门控拓扑结构给出了详尽的消融对照，性能与吞吐优势无可辩驳。
+
+**写作水准**: 系统架构图清晰直观，对异构模型间跨模态表征对齐的机理解释深入浅出。
+
+**综合评审**: **强烈推荐 (strong accept)** — 复合大模型系统与分布式 Agent 集群高效协同通信的破局之作。
+
+## 行囊 (Takeaways)
+
+- 严禁在多智能体交互中无脑重复传递相同长文本；一次性编码为可重用的潜空间数据包是性能降本的必由之路。
+- 保持两端基座大模型冻结，仅训练轻量级的提示词门控 Cross-Attention，是构建低成本跨模型通信接口的最优工程路径。
+- 在构建智能体客服、合同多轮审查或代码库 Copilot 时，引入 LatComm 模式可瞬时斩获 57 倍输入压缩与 3 倍吞吐跃升。
+:::
