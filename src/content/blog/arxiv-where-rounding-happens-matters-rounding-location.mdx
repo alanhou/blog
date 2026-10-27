@@ -1,0 +1,271 @@
+---
+title:
+  en: "Where Rounding Happens Matters: Rounding-Location Alignment Stabilizes LLM Reinforcement Learning"
+  zh: "舍入发生的位置至关重要：对齐舍入位置彻底稳定大模型强化学习训练"
+description:
+  en: "Reinforcement learning for large language models routinely decouples rollout inference engines from training frameworks. Even with identical weights and BF16 tensors, subtle implementation differences in where FP32 intermediates are rounded into BF16 turn on-policy algorithms into unstable off-policy updates, triggering catastrophic training collapse. The authors uncover three critical rounding divergence hotspots—RoPE, SwiGLU, and residual RMSNorm—and prove that aligning rounding locations in the training stack completely stabilizes BF16 RL without touching kernels or inference engines."
+  zh: "大语言模型强化学习普遍采用推理引擎（如 vLLM）与训练框架（如 Megatron）解耦的双系统架构。然而，即便两端模型权重与 BF16 张量完全一致，低层算子中中间结果舍入至 BF16 的位置差异，也会使原本的同策略（On-Policy）算法退化为严重漂移的异策略更新，造成训练崩溃。普林斯顿与清华研究团队定位出三大舍入分歧热点——RoPE、SwiGLU 与残差 RMSNorm，通过在训练端将中间计算保留为 FP32，在不改动底层内核与推理引擎的前提下彻底解决了 BF16 强化学习训练失稳难题。"
+date: 2026-10-26
+tags: ["arxiv", "ai", "cs.lg", "reinforcement-learning", "llm-training", "numerical-stability", "bf16", "systems"]
+image: "/arxiv-visuals/arxiv-where-rounding-happens-matters-rounding-location.png"
+---
+
+:::en
+**Paper**: [2610.32951](https://arxiv.org/abs/2610.32951)  
+**Authors**: Yijing Ke, Tianle Cai, Ruosong Wang  
+**Categories**: cs.LG  
+
+## The Gap
+
+Reinforcement Learning (RL) post-training—via PPO, GRPO, or REINFORCE—has become the engine behind frontier reasoning models. To achieve industrial throughput, RL systems are architected as decoupled dual stacks:
+
+1. **Rollout Inference Stack**: Optimized inference engines (such as vLLM, SGLang, or TensorRT-LLM) employ continuous batching, fused CUDA/Triton kernels, and aggressive KV cache optimizations.
+2. **Training Stack**: Distributed training frameworks (such as Megatron-LM, DeepSpeed, or PyTorch FSDP) handle distributed forward-backward propagation and optimizer updates in BF16 mixed precision.
+
+### The Silent Catastrophic Collapse
+
+Even when both engines run with **bit-for-bit identical weights** and BF16 tensors, RL training frequently encounters catastrophic divergence, gradient explosion, or entropy collapse. 
+
+Why? Because subtle low-level execution differences between inference fused kernels and training operations cause the rollout policy probabilities $\pi_{\text{old}}(y \mid x)$ to numerically diverge from the training forward pass probabilities $\pi_\theta(y \mid x)$. 
+
+At iteration step 0, the policy importance sampling ratio:
+$$r_t(\theta) = \frac{\pi_\theta(y_t \mid x, y_{<t})}{\pi_{\text{old}}(y_t \mid x, y_{<t})}$$
+is mathematically assumed to equal $1.0000$. But due to minute numerical drift across deep layers, $r_t(\theta)$ drifts significantly away from 1. An intended **on-policy** algorithm unintentionally operates as an uncontrolled **off-policy** update with high-variance gradients!
+
+Prior remedies have proven prohibitively painful:
+- *Full Stack Alignment*: Forcing training frameworks to use the exact same kernels as inference ruins distributed training scaling.
+- *Full FP32 Migration*: Doubles VRAM usage, cuts max context length in half, and halves GPU training throughput.
+- *Heuristic Clipping / Penalties*: Mutes policy ratios, crippling exploration on hard reasoning problems.
+
+```
+   THE DIVERGENCE BETWEEN INFERENCE ROLLOUT AND TRAINING FORWARD
+
+   Rollout Phase (vLLM / TensorRT in BF16):
+     Prompt x ---> Fast Fused Kernels ---> Generates y ~ pi_old(y|x)
+                   Log-probabilities: log pi_old(y|x) recorded.
+                                  |
+                                  v
+   Training Phase (Megatron / PyTorch FSDP in BF16):
+     Feed (x, y) into identical weights ---> Forward Pass computes log pi_theta(y|x)
+                                  |
+                                  v
+   Numerical Discrepancy Check at Step 0:
+     Theoretical Expectation: pi_theta / pi_old = 1.0000
+     Reality: Accumulating low-level rounding discrepancies cause ratio to drift!
+     Result: Off-policy gradient shocks ===> Policy Collapse!
+```
+
+## The Increment
+
+**One sentence**: The authors discover that full-stack kernel synchronization is completely unnecessary; identifying and aligning where intermediate FP32 values are rounded to BF16 in just three critical regions—RoPE, SwiGLU, and residual RMSNorm—is sufficient to stabilize BF16 LLM reinforcement learning across diverse model sizes.
+
+### Core Mechanism
+
+Rather than treating the dual-system discrepancy as an intractable black box, the authors perform systematic numerical surgery to trace where numerical divergence originates:
+
+1. **Diagnosis of Three Divergence Hotspots**:
+   - The authors pinpoint three specific operators responsible for over 90% of logit variance between inference and training forward passes:
+     - **Rotary Position Embedding (RoPE)**: Trigonometric sinusoidal rotations $\mathbf{R}_{\Theta, m}^d$. Inference engines often compute rotation frequencies and coordinate multiplications in continuous FP32 registers before casting. In contrast, standard training implementations cast intermediate rotated halves into BF16 prematurely, accumulating significant angular drift over long context lengths.
+     - **SwiGLU Activation**: $\text{SwiGLU}(x) = (\text{SiLU}(x W_{\text{gate}}) \otimes (x W_{\text{up}})) W_{\text{down}}$. Fused inference kernels evaluate the elementwise product in FP32 registers. Standard training implementations cast the gate and up projections to BF16 before computing the Hadamard product.
+     - **Residual Connection & RMSNorm**: $\text{RMSNorm}(x + f(x))$. Inference kernels accumulate residual additions in FP32 and compute variance in full precision before final quantization, whereas naive training pipelines introduce intermediate BF16 truncations.
+2. **Rounding-Location Alignment (RLA)**:
+   - The proposed fix is surgically non-invasive: **preserve intermediate accumulations in FP32 until the final operator output** within these three specific regions on the training side.
+   - It requires **zero changes** to:
+     - The high-throughput inference engine (e.g., vLLM runs unmodified).
+     - Heavy GEMM matrix multiplication or FlashAttention kernels.
+     - Model weights, precision formats, or the underlying RL loss objective.
+3. **The RoPE-Dominance Phenomenon**:
+   - Across four Qwen-family architectures (1.5B, 7B, 14B), aligning all three regions completely eradicates the training collapse observed under standard BF16 baselines.
+   - Remarkably, in the vast majority of runs, **aligning the RoPE path alone** is sufficient to fully stabilize RL training, even while other low-level numerical discrepancies persist in downstream layers!
+
+```
+   ROUNDING-LOCATION ALIGNMENT (RLA) ARCHITECTURE
+
+   [Training Forward Pipeline]
+   
+   1. RoPE Region:
+      Standard BF16: [Sin/Cos FP32] -> Cast BF16 -> Rotate -> Cast BF16 (Phase Error!)
+      RLA Fix:       [Sin/Cos FP32] ---------> FP32 Rotation ---------> Cast BF16 Output
+   
+   2. SwiGLU Region:
+      Standard BF16: Gate(BF16) * Up(BF16) -> BF16 Product (Logit Drift!)
+      RLA Fix:       Keep Gate & Up intermediates in FP32 -> Multiply -> Cast BF16 Output
+   
+   3. Residual RMSNorm:
+      Standard BF16: Residual sum rounded to BF16 before variance computation
+      RLA Fix:       FP32 residual accumulation -> FP32 variance -> Cast BF16 Output
+
+   RESULT:
+   - Inference Engine (vLLM): 100% Unchanged, maximum rollout speed.
+   - Matrix Multiplications: 100% Standard BF16 Tensor Core execution.
+   - RL Stability: Perfect numerical convergence with ZERO policy collapse!
+```
+
+### Key Concepts
+
+- **Rounding-Location Alignment (RLA)**: The practice of matching the exact operational stages where intermediate high-precision numbers (FP32) are cast to low-precision formats (BF16) between inference and training.
+- **On-Policy Assumption Drift**: The breakdown of the policy gradient theorem that occurs when sampling probabilities and training forward probabilities diverge due to hardware kernel implementation differences.
+- **RoPE Phase Shift**: Angular numerical distortion that accumulates across token positions when rotary embedding coordinates are truncated to BF16 before trigonometric multiplication.
+
+## Framework Shift
+
+```
+Before (The False Trade-Offs of RL Stabilization):
+  Option A: Re-implement inference kernels identically in training -> Degrades training throughput.
+  Option B: Force entire training loop to FP32 -> Halves context length, doubles VRAM usage.
+  Option C: Add aggressive KL/ratio clipping -> Stifles exploration on reasoning benchmarks.
+
+After (Rounding-Location Alignment):
+  Targeted Surgery: Retain FP32 registers only across RoPE, SwiGLU, and Residual RMSNorm.
+  Zero Compromise: Keep inference engine untouched, keep BF16 Tensor Core speed.
+  Flawless Stability: Completely prevents RL training collapse across all model scales.
+```
+
+## Expert Review
+
+**Topic Value**: Monumental for AI systems engineering. Unintended numerical drift between inference engines and training stacks has been one of the most frustrating, time-wasting silent bugs plaguing frontier post-training teams.
+
+**Method Maturity**: Pinpoint diagnosis and surgical implementation. By identifying that RoPE, SwiGLU, and RMSNorm rounding locations drive the divergence, it solves the problem with minimal lines of code.
+
+**Experimental Rigor**: Tested on four separate models within the Qwen family under rigorous RL training regimes, demonstrating conclusive stabilization curves and isolating the outsized role of RoPE rounding.
+
+**Writing Quality**: Clear, direct, and actionable. Strips away the mystique surrounding RL training instabilities and replaces it with concrete systems engineering analysis.
+
+**Overall Verdict**: **strong accept** — An essential operational insight that every team training reasoning LLMs with RL should implement immediately.
+
+## Takeaways
+
+- Identical model weights and BF16 tensors do not guarantee on-policy reinforcement learning; where intermediate rounding occurs can break training.
+- You do not need to overhaul your entire training framework or switch to FP32; retaining FP32 precision strictly within RoPE, SwiGLU, and RMSNorm solves the issue.
+- If you can only fix one operator in your training pipeline, fix the **RoPE rotary embedding calculation**—its phase stability is the single most dominant factor in preventing policy ratio drift.
+:::
+
+:::zh
+**论文**: [2610.32951](https://arxiv.org/abs/2610.32951)  
+**作者**: Yijing Ke, Tianle Cai, Ruosong Wang  
+**分类**: cs.LG  
+
+## 核心困境
+
+以 PPO、GRPO 和 REINFORCE 为代表的强化学习（RL）后训练算法，是大语言模型激发深层思考与数理推理能力的发动机。在工业界主流部署中，为了追求极致吞吐量，RL 系统普遍被拆分为**推理采样**与**反向训练**两套解耦的基础设施：
+
+1. **推理采样栈（Rollout Inference Stack）**：采用高度极致优化的专用推理引擎（如 vLLM、SGLang、TensorRT-LLM），集成连续批处理、Triton/CUDA 深度融合内核以及专用 KV Cache 调度，全量运行于 BF16 精度。
+2. **反向训练栈（Training Stack）**：采用大规模分布式训练框架（如 Megatron-LM、DeepSpeed、PyTorch FSDP），负责分布式前向反向计算与优化器更新，运行在混合精度（BF16 激活与梯度，FP32 优化器主权重）。
+
+### 隐蔽而致命的「训练崩溃」
+
+在实际训练中，算法工程师经常遭遇令人匪夷所思的现象：即便采样端与训练端加载了**完全位对齐（Bit-for-bit identical）的一致权重**与 BF16 张量，RL 训练依然会周期性陷入梯度爆炸、策略熵骤降甚至整体崩盘！
+
+究其根源，是由于推理融合算子与训练框架在底层计算细节上的微妙实现差异，导致采样阶段记录的旧策略概率 $\pi_{\text{old}}(y \mid x)$，与训练阶段前向重算的当前策略概率 $\pi_\theta(y \mid x)$ 发生了微小的数值分歧。
+
+在 step 0 时，重要性采样比率本应严格等于 1：
+$$r_t(\theta) = \frac{\pi_\theta(y_t \mid x, y_{<t})}{\pi_{\text{old}}(y_t \mid x, y_{<t})} \equiv 1.0000$$
+然而，由于深层 Transformer 网络的累积效应，该比率在第 0 步就发生了不可忽视的漂移。原本理论上完美的**同策略（On-Policy）**更新，在工程底层变成了未经校准的**异策略（Off-Policy）**更新，极高方差的梯度震荡直接摧毁了训练稳定性！
+
+现有的妥协方案代价极其惨痛：
+- *强行统一内核*：强制训练端换用推理引擎的定制算子，严重破坏分布式框架的通信与切分效率。
+- *全局退回 FP32*：训练显存消耗直接翻倍，最大上下文长度腰斩，GPU 算力利用率暴跌。
+- *暴力截断比率*：强行收紧裁剪区间或施加过量 KL 惩罚，严重扼杀模型在复杂推理中的探索能力。
+
+```
+   推理采样端与反向训练端的底层数值分歧机制
+
+   采样阶段 (vLLM / TensorRT，全 BF16 极致加速):
+     输入 Prompt x ---> 专用融合算子极速 Rollout ---> 产出推理链 y ~ pi_old(y|x)
+     记录 token 级对数概率: log pi_old(y|x)
+                                  |
+                                  v
+   训练阶段 (Megatron / PyTorch FSDP，加载完全相同权重):
+     将 (x, y) 重新喂入训练端前向传播 ---> 重算当前对数概率 log pi_theta(y|x)
+                                  |
+                                  v
+   Step 0 时的数值自检:
+     数学理想状态: pi_theta / pi_old = 1.0000 (完全对齐)
+     工程现实结果: 底层微小舍入误差逐层放大，比率在第 0 步即发生剧烈漂移！
+     后果: 同策略假定破产，异策略噪声梯度引发策略崩溃 (Policy Collapse)!
+```
+
+## 核心增量
+
+**一句话定位**：普林斯顿大学与清华大学团队研究发现，完全不需要进行两套系统全栈算子的绝对对齐；仅在训练端找出并对齐中间高精度（FP32）计算向低精度（BF16）**发生舍入的三个关键位置（RoPE、SwiGLU 和残差 RMSNorm）**，即可彻底根治 BF16 强化学习的训练崩溃问题，同时完全不损失算力性能与显存优势。
+
+### 核心机制拆解
+
+研究团队对现代 LLM（以 Qwen 架构为例）的前向计算链展开了精密的数值手术，精确定位了导致 logit 漂移的核心震中：
+
+1. **三大数值舍入分歧热点定位**：
+   - 研究证实，超过 90% 的推理-训练输出方差仅由以下三个特定区域的舍入差异引起：
+     - **旋转位置编码（RoPE）**：涉及三角正弦余弦旋转 $\mathbf{R}_{\Theta, m}^d$。推理引擎通常在 FP32 寄存器中完成连续旋转坐标变换后再进行精度截断；而标准训练代码往往过早将切分后的中间张量截断为 BF16，导致长序列上的相位角发生显著漂移。
+     - **SwiGLU 门控激活层**：$\text{SwiGLU}(x) = (\text{SiLU}(x W_{\text{gate}}) \otimes (x W_{\text{up}})) W_{\text{down}}$。融合推理内核在 FP32 精度下完成哈达玛积；而训练端常分别将 gate 与 up 投影截断为 BF16 后再做点乘，误差成倍放大。
+     - **残差连接与 RMSNorm**：$\text{RMSNorm}(x + f(x))$。推理端在 FP32 下累加残差并计算方差；朴素训练管线则存在中间 BF16 阶段性截断。
+2. **舍入位置对齐（Rounding-Location Alignment, RLA）**：
+   - 提出的工程改造极为微创：**仅在训练端的上述三个局部区域中，将中间过程张量保留为 FP32 寄存器精度，直到最终输出算子时再统一舍入为 BF16**。
+   - 实现「三个完全不改动」：
+     - **完全不改动推理端**：vLLM、TensorRT 保持极致优化状态，无需任何减速补丁。
+     - **完全不改动训练端重算子**：矩阵乘法（GEMM）与 FlashAttention 内核保持原生 BF16 Tensor Core 极速运算。
+     - **完全不改动算法**：无需调大 KL 系数，无需修改任何损失函数公式。
+3. **RoPE 单点主导效应**：
+   - 在 Qwen 家族从 1.5B 到 14B 的四个不同尺寸模型上完成验证，全面消除了基线下的训练崩塌。
+   - 尤为惊人的是，在绝大多数实验中，**仅仅对齐 RoPE 路径的舍入位置**，就足以抹平导致训练崩溃的关键漂移，彻底稳定整个 RL 训练流！
+
+```
+   舍入位置对齐 (RLA) 技术实现全景
+
+   [训练端前向算子内部改造]
+   
+   1. RoPE 旋转位置编码区域:
+      标准 BF16 实现: [Sin/Cos FP32] -> 截断为 BF16 -> 旋转运算 -> 截断为 BF16 (相位严重失真!)
+      RLA 对齐改造:   [Sin/Cos FP32] ---------> 全程 FP32 旋转计算 ---------> 统一输出 BF16
+   
+   2. SwiGLU 门控激活区域:
+      标准 BF16 实现: Gate(BF16) * Up(BF16) -> 截断为 BF16 (乘法将误差扩大两个数量级!)
+      RLA 对齐改造:   Gate 与 Up 中间量保持 FP32 点乘 -> 统一输出 BF16
+   
+   3. 残差连接与 RMSNorm 区域:
+      标准 BF16 实现: 残差相加后过早截断为 BF16，再送入归一化求方差
+      RLA 对齐改造:   FP32 累加残差 -> FP32 计算方差均值 -> 统一输出 BF16
+
+   最终收益:
+   - 推理引擎 (vLLM): 原生运行，零性能损耗。
+   - 训练速度: 依然享受 BF16 Tensor Core 满血算力，显存零膨胀。
+   - 训练稳定性: Step 0 策略比率完美收敛，彻底杜绝莫名崩溃！
+```
+
+### 关键概念
+
+- **舍入位置对齐（Rounding-Location Alignment, RLA）**：在不改变全局张量精度的前提下，确保训练端与推理端在相同计算拓扑节点将高精度临时变量截断为低精度格式的对齐工程技术。
+- **同策略假设漂移（On-Policy Drift）**：因软硬件内核差异导致训练时重算概率与采样时记录概率不一致，破坏强化学习理论前置条件的系统性缺陷。
+- **RoPE 相位漂移（RoPE Phase Shift）**：高频旋转因子在提早舍入为 BF16 时，高维坐标因精度不足引起的角度扭曲，该误差随序列长度扩展而急剧恶化。
+
+## 范式跃迁
+
+```
+过去 (解决 RL 训练崩溃的痛苦代价):
+  方案 A (全量内核同构): 强行将推理算子搬进训练 -> 破坏分布式扩展性，工程极其沉重。
+  方案 B (退守 FP32 训练): 全局换用单精度 -> 显存开销翻倍，长上下文训练直接 OOM。
+  方案 C (算法层面妥协): 疯狂加大 KL 惩罚与裁剪 -> 锁死模型在复杂数理问题上的探索空间。
+
+现在 (基于 RLA 的微创手术对齐):
+  靶向治疗: 仅在 RoPE、SwiGLU 和 RMSNorm 三个局部保持 FP32 寄存器运算。
+  零性能惩罚: 保持 vLLM 顶速采样，保持训练端 BF16 Tensor Core 满血吞吐。
+  彻底稳定: 无需调整任何学习率或 KL 参数，全尺寸模型 RL 训练平稳如镜。
+```
+
+## 专家评估
+
+**选题价值**: 工业落地价值连城。解决了无数从事 o1 / R1 推理大模型后训练团队长期被折磨、甚至被误导归咎于算法或超参的「隐形系统暗病」。
+
+**方法成熟度**: 诊断极为精准，改造极度微创。用最轻量级的代码改动（数行 PyTorch 代码）撬动了极大的系统鲁棒性收益。
+
+**实验严密性**: 跨越 Qwen 家族多个量级模型，详细对比了对齐前后的损失曲线、梯度范数与重要性采样比率分布，证据确凿，特别是对 RoPE 主导作用的剥离极具洞察力。
+
+**写作水准**: 抽丝剥茧，直面真实系统实现中的隐晦工程细节，展现了极高的系统架构与数值分析素养。
+
+**综合评审**: **强烈推荐 (strong accept)** — 每一个正在搭建或优化 LLM 强化学习后训练基建团队的必读文献。
+
+## 行囊 (Takeaways)
+
+- 相同的模型权重与 BF16 张量并不等于纯正的 On-Policy；底层算子舍入位置的差异足以诱发毁灭性的策略崩溃。
+- 不要为了数值对齐而愚蠢地将整个训练框架重构或换用慢速 FP32；只需要在 RoPE、SwiGLU 和 RMSNorm 三个关键节点延后 BF16 舍入。
+- 如果你的时间只够优化一个算子，请务必优先重写**训练端的 RoPE 旋转位置编码**，确保其旋转乘法在 FP32 下完成——它贡献了绝大部分数值漂移。
+:::
