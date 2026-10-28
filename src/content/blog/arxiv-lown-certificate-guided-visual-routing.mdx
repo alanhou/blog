@@ -1,0 +1,224 @@
+---
+title:
+  en: "Look Only When Needed: Certificate-Guided Visual Routing for Efficient Diffusion VLMs"
+  zh: "LOWN：按需观照，基于一致性认证的扩散视觉语言模型高效视觉路由"
+description:
+  en: "Diffusion Vision-Language Models (DVLMs) repeatedly process all visual tokens across every denoising step, even though images constitute 89-97% of the total token length. KAIST researchers reveal that removing the image alters unmasked token predictions in only 22.8% of decoding steps. LOWN introduces certificate-guided visual routing: it predicts tokens without visual processing and only inspects the image when text-only predictions diverge from prior image-conditioned states, reducing decoding FLOPs to 35.3% while retaining 99.6% benchmark accuracy without any training."
+  zh: "扩散视觉语言模型（DVLM）在去噪生成的每一步中都对全量视觉 token 进行冗余计算，而图像 token 占据了总输入长度的 89% 至 97%。KAIST 团队通过消融实验震撼发现：在多达 77.2% 的解码去噪步骤中，直接移除图像输入根本不会改变当前 token 的预测结果！据此提出的 LOWN 方案通过“预测一致性认证”建立自适应视觉路由机制，仅在纯文本预测偏离先前多模态状态时才调阅图像，在免训练、免微调的前提下将解码计算量（FLOPs）暴降至 35.3%，并完整保留了 99.6% 的基准评测得分。"
+date: 2026-10-28
+tags: ["arxiv", "ai", "cs.cv", "diffusion-vlms", "efficiency", "visual-routing", "multimodal-llm", "inference-acceleration"]
+image: "/arxiv-visuals/arxiv-lown-certificate-guided-visual-routing.png"
+---
+
+:::en
+**Paper**: [2610.36671](https://arxiv.org/abs/2610.36671)  
+**Authors**: Donghyeon Cho, Joowon Kim, Seungho Shin, Eunho Yang  
+**Categories**: cs.CV, cs.AI, cs.CL  
+
+## The Gap
+
+Diffusion Vision-Language Models (DVLMs, such as LLaDA-V) represent an emerging alternative to traditional autoregressive multimodal models, unlocking parallel multi-token generation, bidirectional context modeling, and controllable text-visual synthesis.
+
+However, DVLMs suffer from a crippling computational efficiency bottleneck during inference:
+
+1. **Massive Visual Token Dominance**:
+   - In modern multimodal benchmarks (e.g., VQA, ChartQA, DocVQA, MathVista), high-resolution vision encoders produce between 576 and 2,048 visual patch tokens.
+   - Consequently, visual tokens account for **89% to 97% of the entire input token sequence**.
+2. **Exhaustive Redundant Processing**:
+   - A standard DVLM iterates through $T$ continuous or discrete denoising steps (typically 32 to 128 steps).
+   - In *every single denoising step*, the transformer attention layers redundantly process the entire sequence of hundreds or thousands of static image tokens alongside a handful of emerging text tokens.
+3. **Flaws in Existing Pruning Methods**:
+   - Prior visual token pruning strategies permanently discard spatial tokens based on initial attention weights.
+   - Once pruned, fine-grained visual details are irrevocably lost, degrading complex diagrammatic and OCR reasoning while still forcing the model to recompute remaining visual patches at every step.
+
+```
+   THE COMPUTATIONAL TRAGEDY OF DIFFUSION VLMS
+
+   Step 1:  [Image Tokens: 1024 tokens (95%)] + [Masked Text: 50 tokens] ──> Full Attention
+   Step 2:  [Image Tokens: 1024 tokens (95%)] + [Masked Text: 50 tokens] ──> Full Attention
+   Step 3:  [Image Tokens: 1024 tokens (95%)] + [Masked Text: 50 tokens] ──> Full Attention
+   ...
+   Step 64: [Image Tokens: 1024 tokens (95%)] + [Masked Text: 50 tokens] ──> Full Attention
+
+   CRITICAL DISCOVERY:
+   Why repeatedly attend to 1024 static image tokens just to predict
+   common linguistic transitions like "is", "a", "of", or "because"?
+```
+
+## The Increment
+
+**One sentence**: LOWN (Look Only When Needed) discovers that image conditioning is mathematically redundant in over 77% of DVLM decoding steps, introducing a training-free certificate-guided routing mechanism that bypasses visual computation whenever text-only predictions agree with certified multimodal priors.
+
+### Core Mechanism
+
+The authors conducted an exhaustive step-by-step ablation on LLaDA-V: at each denoising step $t$, they compared the model's logits with the image versus completely without the image ($I = \emptyset$).
+
+**The Empirical Revelation**:
+Removing the image changed the predicted token at **only 22.8% of steps on average**, and as low as **7.9%** on syntax-heavy reasoning datasets. In more than three out of every four steps, the model was predicting purely linguistic structure or following syntactic momentum that required zero visual re-inspection!
+
+```
+   LOWN: CERTIFICATE-GUIDED VISUAL ROUTING DECODING
+
+   At Denoising Step t:
+           │
+           ├──> Fast Step: Predict Masked Tokens WITHOUT Image Tokens (Text-Only FLOPs: ~5%)
+           │    Let text-only prediction be: y_t^(text)
+           │
+           ├──> Verification via Prior Agreement:
+           │    Compare y_t^(text) with previous image-conditioned prediction y_(t-1)^(vis)
+           │
+           ├──[Do they agree on k tokens?]
+           │       │
+           │       ├── YES (Certified!) ──────────────────────────────────────┐
+           │       │   - Certificate Issued: Earlier visual context holds.     │
+           │       │   - SKIP Visual Processing Entirely this step!            ▼
+           │       │   - Directly unmask the k certified tokens.          [Unmask Tokens]
+           │       │                                                           ▲
+           │       └── NO (Discrepancy Detected!)                              │
+           │           - The visual scene is genuinely needed.                 │
+           │           - Invoke full visual cross-attention pass               │
+           │           - Update prior image prediction cache ──────────────────┘
+```
+
+1. **Agreement as a Mathematical Certificate**:
+   - Let $\hat{y}_t^{(0)}$ be the prediction generated without visual tokens at step $t$, and let $\hat{y}_{t-1}^{(I)}$ be the last computed image-conditioned prediction.
+   - If $\hat{y}_t^{(0)} = \hat{y}_{t-1}^{(I)}$ for a subset of tokens, this agreement serves as a formal certificate that visual context has already been assimilated into the text prefix.
+2. **Adaptive Dynamic Step Budgeting**:
+   - The number of certified tokens determines how many masked tokens can be safely unmasked in the current step without re-running visual self-attention.
+   - Only when agreement fails (indicating visual conflict or novel entity grounding) does LOWN trigger an image-conditioned forward pass.
+3. **Training-Free & Hyperparameter-Free**:
+   - LOWN requires zero fine-tuning, no auxiliary routing networks, and no tuned confidence thresholds.
+4. **Orthogonal Compatibility**:
+   - Composes seamlessly with KV caching and spatial token pruning for multiplicative speedups.
+
+## The Evidence
+
+The authors evaluated LOWN across 10 diverse multimodal vision-language benchmarks (including DocVQA, ChartQA, InfoVQA, ScienceQA, and TextVQA) using LLaDA-V:
+
+| Benchmark | Baseline Score | LOWN Score | Baseline FLOPs | LOWN FLOPs | Speedup / Compute Saved |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| DocVQA | 82.4 | 82.2 | 100% | 31.8% | **68.2% Saved** |
+| ChartQA | 71.9 | 71.8 | 100% | 34.2% | **65.8% Saved** |
+| InfoVQA | 44.5 | 44.3 | 100% | 38.6% | **61.4% Saved** |
+| ScienceQA | 89.1 | 89.0 | 100% | 29.4% | **70.6% Saved** |
+| TextVQA | 68.7 | 68.5 | 100% | 36.5% | **63.5% Saved** |
+| **10-Benchmark Average** | **71.3** | **71.0** (99.6%) | **100%** | **35.3%** | **64.7% FLOPs Saved** |
+
+Key quantitative results:
+- **64.7% Average FLOP Reduction**: LOWN slashes total decoding computation down to just **35.3% of baseline FLOPs**.
+- **99.6% Accuracy Retention**: Across all ten benchmarks, LOWN retains virtually identical performance (71.0 vs 71.3 average score).
+- **Outperforming Fixed Schedules**: Fixed step skipping schedules (e.g., skip vision every other step) degraded score by 4.8 to 8.2 points, demonstrating that dynamic certificate verification is essential.
+- **Combined with Spatial Pruning**: Pairing LOWN with FastV spatial pruning dropped total compute to under 19% of original baseline with under 1.2% accuracy delta.
+
+## Key Takeaways
+
+1. **Images Are Intermittent, Not Continuous**: In multimodal generation, visual tokens are only required during sparse semantic grounding moments; intermediate syntax is purely linguistic.
+2. **Agreement Is a Free Certificate**: Comparing lightweight text-only predictions against past multimodal states yields robust verification without extra discriminator models.
+3. **Paving the Way for Real-Time Multimodal Diffusion**: By bypassing 65% of vision processing, LOWN solves the primary latency blocker preventing diffusion VLMs from deploying in interactive edge settings.
+:::
+
+:::zh
+**论文**: [2610.36671](https://arxiv.org/abs/2610.36671)  
+**作者**: Donghyeon Cho, Joowon Kim, Seungho Shin, Eunho Yang  
+**分类**: cs.CV, cs.AI, cs.CL  
+
+## 核心痛点
+
+扩散视觉语言模型（Diffusion Vision-Language Models, 简称 DVLM，如基于离散扩散架构的 LLaDA-V）作为自回归多模态模型的颠覆性替代者，具备多 token 并行生成、双向长程上下文建模以及高度可控的图文推理能力。
+
+然而，DVLM 在实际推理部署中遭遇了几乎不可承受的**算力灾难**：
+
+1. **视觉 Token 占据绝对统治地位**：
+   - 在图表问答（ChartQA）、文档解析（DocVQA）及科学图文推理中，高分辨率视觉编码器通常会生成 576 到 2048 个图像 patch token。
+   - 相比于生成简短的几十个回答文本，视觉 token 占据了模型整段输入总序列长度的 **89% 至 97%**。
+2. **步步全量重算的严重算力浪费**：
+   - 扩散模型去噪通常需要经历 $T$ 个步长（如 32 到 128 步迭代）。
+   - 在**去噪生成的每一个单一时间步**中，Transformer 注意力层都在无休止地对数以千计的完全静态图像 token 进行全量二次方交叉注意力计算。
+3. **传统剪枝方案的不可逆硬伤**：
+   - 先前的视觉 token 剪枝策略（如基于初始注意力的静态丢弃）会永久抹去被剪掉的空间区域。这种操作不可逆转地破坏了细粒度 OCR 字符与图表微小细节，且被保留下来的视觉 token 在后续每一步仍然得全量计算。
+
+```
+   扩散视觉语言模型的计算悲剧
+
+   去噪第 1 步:  [图像 Tokens: 1024 个 (占 95%)] + [带掩码文本: 50 个] ──> 全量注意力计算
+   去噪第 2 步:  [图像 Tokens: 1024 个 (占 95%)] + [带掩码文本: 50 个] ──> 全量注意力计算
+   去噪第 3 步:  [图像 Tokens: 1024 个 (占 95%)] + [带掩码文本: 50 个] ──> 全量注意力计算
+   ...
+   去噪第 64 步: [图像 Tokens: 1024 个 (占 95%)] + [带掩码文本: 50 个] ──> 全量注意力计算
+
+   核心追问：
+   仅仅为了在文本中预测“是”、“因为”、“以及”等常规语法虚词，
+   我们真的需要每一步都反复去扫描那 1024 个静止不变的图像 Token 吗？
+```
+
+## 创新方案
+
+**一句话总结**：LOWN（Look Only When Needed，按需观照）揭示了图像条件在 DVLM 超 77% 的解码步骤中完全多余的惊人事实，提出了首个无需训练的“一致性认证视觉路由”机制，仅在无图纯文本预测与先验多模态状态发生分歧时才调阅图像，大幅省去 65% 计算开销。
+
+### 核心机制
+
+KAIST 团队对 LLaDA-V 进行了逐时间步的严谨因果消融：在每一个去噪时间步 $t$ 上，记录“输入图像”与“完全抽离图像（$I = \emptyset$）”两种状态下的模型预测 Logit。
+
+**颠覆性实验发现**：
+在多达 **77.2% 的解码去噪步骤**中，强行移除图像输入根本不会改变当前掩码位置被还原出的预测 Token！在很多语法连贯或常识逻辑步骤中，这一比例甚至高达 **92.1%**。这意味着超过四分之三的算力纯粹被空耗在重读静态图像上！
+
+```
+   LOWN：基于一致性认证的自适应视觉路由
+
+   在去噪时间步 t:
+           │
+           ├──> 极速轻量步: 完全不输入视觉 Token 进行纯文本预测 (仅消耗 ~5% FLOPs)
+           │    得到纯文本候选输出: y_t^(text)
+           │
+           ├──> 先验一致性认证 (Verification via Prior Agreement):
+           │    对比纯文本预测 y_t^(text) 与上一轮的多模态图像条件预测 y_(t-1)^(vis)
+           │
+           ├──[两者的 Top-1 预测在 k 个 Token 上完全一致？]
+           │       │
+           │       ├── 是 (达成认证 Certified!) ──────────────────────────────┐
+           │       │   - 颁发一致性证书：先前的视觉多模态记忆依然高度可信有效！ │
+           │       │   - 本步完全跳过视觉计算 (SKIP Visual Processing)！      ▼
+           │       │   - 直接解掩码这 k 个已认证 Token。                [解掩码输出]
+           │       │                                                           ▲
+           │       └── 否 (检测到预测分歧 Discrepancy!)                        │
+           │           - 此时模型确实需要视觉线索来进行事实性校准！             │
+           │           - 启动完整的全模态视觉交叉注意力前向传播                │
+           │           - 更新多模态预测缓存 ───────────────────────────────────┘
+```
+
+1. **一致性作为免费的数学凭证**：
+   - 设 $\hat{y}_t^{(0)}$ 为在时间步 $t$ 剥离图像后预测的 Token，$\hat{y}_{t-1}^{(I)}$ 为上一次包含图像时的多模态预测。
+   - 若两者一致，这在数学上构成了一份强有力的“一致性凭证（Certificate）”，证明前序文本前缀已充分吸收了视觉语义，当前生成的 Token 处于纯语言惯性或常识推断期，无需重新查看图像。
+2. **自适应动态步长释放**：
+   - 一致性认证命中的 Token 数量，直接决定了当前去噪步中可以安全揭示（Unmask）的 Token 规模。
+   - 仅当一致性被打破、模型出现不确定性时，LOWN 才会精准触发一次带图像的完整前向传播。
+3. **免微调与零超参数设计**：
+   - LOWN 不需要任何后序微调，不需要训练外置的路由判别器，也没有人为设定的置信度阈值。
+4. **正交兼容叠加加速**：
+   - 可与 KV-cache 缓存机制以及传统的空间图像剪枝方案无缝叠加，实现算力乘法级压缩。
+
+## 验证成效
+
+作者在涵盖 DocVQA、ChartQA、InfoVQA、ScienceQA 及 TextVQA 等 10 大主流多模态基准上进行了系统测试：
+
+| 测试基准 | 原始基线准确率 | LOWN 准确率 | 原始基线 FLOPs | LOWN FLOPs | 计算节省幅度 (FLOPs Saved) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| DocVQA (文档理解) | 82.4 | 82.2 | 100% | 31.8% | **节省 68.2% 算力** |
+| ChartQA (图表推理) | 71.9 | 71.8 | 100% | 34.2% | **节省 65.8% 算力** |
+| InfoVQA (复杂图讯) | 44.5 | 44.3 | 100% | 38.6% | **节省 61.4% 算力** |
+| ScienceQA (多模态科学) | 89.1 | 89.0 | 100% | 29.4% | **节省 70.6% 算力** |
+| TextVQA (文字场景) | 68.7 | 68.5 | 100% | 36.5% | **节省 63.5% 算力** |
+| **10 项基准综合平均** | **71.3** | **71.0** (保留99.6%) | **100%** | **35.3%** | **平均狂降 64.7% 计算量** |
+
+关键结论：
+- **解码 FLOPs 暴降 64.7%**：LOWN 将整个去噪解码阶段的总计算量压缩至基线的仅 **35.3%**。
+- **无损保留 99.6% 精度**：在全部 10 项严苛的多模态基准中，LOWN 几乎维持了与全量计算完全一致的评测表现（71.0 vs 71.3）。
+- **秒杀硬编码跳步策略**：对比简单的“隔一步算一次图像”等静态跳步方案（精度骤降 4.8 至 8.2 分），LOWN 证实了动态“一致性认证”对于保障关键实体推理精准度的不可替代性。
+- **与空间剪枝叠加效果惊人**：当 LOWN 与 FastV 空间剪枝级联使用时，总算力消耗跌至原始的 19% 以下，精度损失仍控制在 1.2% 之内。
+
+## 关键启示
+
+1. **视觉信息是间歇性输入，而非连续输入**：在多模态生成中，图像只在发生关键实体对齐与事实锚定的离散瞬间必不可少，而大量连词、虚词与常识过渡纯属语言学惯性。
+2. **轻重结合的一致性校验是低成本加速法宝**：通过比对极低算力的纯文本预测与历史多模态状态，无需任何外部模型即可获得高可信度的免费跳步凭证。
+3. **推动扩散多模态模型迈向实时端侧落地**：砍掉近三分之二的冗余视觉注意力计算，彻底扫清了扩散视觉语言模型在端侧交互与低延迟应用中的核心绊脚石。
+:::
