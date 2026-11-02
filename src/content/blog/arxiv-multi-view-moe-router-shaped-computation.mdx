@@ -1,0 +1,331 @@
+---
+title:
+  en: "Multi-View MoE: Letting Every Router Shape Expert Computation"
+  zh: "Multi-View MoE：让每一个路由器协同塑造专家计算与表征"
+description:
+  en: "Traditional Sparse Mixture-of-Experts (MoE) models suffer from a fundamental disconnect: single-router selection scores correlate poorly with true empirical expert utility in deep layers. Multi-View MoE resolves this without extra compute or communication overhead by aggregating independent multi-routers and reusing routing preferences to modulate latent-view representations before expert dispatch."
+  zh: "传统的稀疏混合专家模型（Sparse MoE）存在一个深层结构性缺陷：单一路由器在深层网络的打分与专家的真实有效效用（Utility）之间几乎没有相关性。百度 ERNIE 团队提出 Multi-View MoE，通过多视角独立路由聚合，并在不增加任何计算 FLOPs 和通信开销的前提下，将路由偏好直接复用于调制专家输入的多视角潜在表征，在 708B Token 预训练中全面提升下游推理与评测基准。"
+date: 2026-11-02
+tags: ["arxiv", "ai", "cs.lg", "cs.ai", "mixture-of-experts", "moe", "transformers", "efficient-dl", "deepseek"]
+image: "/arxiv-visuals/arxiv-multi-view-moe-router-shaped-computation.png"
+---
+
+:::en
+**Paper**: [2610.40577](https://arxiv.org/abs/2610.40577)  
+**Authors**: Zelin Zhao, Tianchi Ma, Junyuan Shang, Shuohuan Wang, Dianhai Yu (ERNIE Team, Baidu)  
+**Categories**: cs.LG, cs.AI  
+
+## The Gap
+
+Sparse Mixture-of-Experts (MoE) architectures (pioneered by Switch Transformers, Mixtral, and DeepSeek-V2/V3) scale parameter capacity while keeping per-token inference FLOPs constant by routing each token to a top-$k$ subset of experts.
+
+However, standard MoE models operate under a persistent, unaddressed structural limitation: **the router-utility disconnect**.
+
+1. **Weak Correlation in Deep Layers**:
+   - In conventional architectures, a single linear routing head computes routing logits and selects experts via top-$k$ gating.
+   - However, dense empirical evaluation reveals that the **Spearman rank correlation between single-router scores and true empirical expert utility ($L_2$ activation norm)** drops drastically throughout the network, falling below $\rho < 0.05$ in middle and deep layers.
+   - Because unselected experts receive no direct gradient feedback from that token, poor routing decisions become self-reinforcing traps.
+
+2. **The Dilemma of Enriching Expert Signals**:
+   - Prior attempts to improve routing fall into costly computational traps:
+     - *Activation-based routing* (e.g., AoE) requires preliminary forward passes through all experts to measure intermediate activations before selection, inflating FLOPs.
+     - *Multi-representation approaches* (e.g., token slicing or duplicate branches) process multiple hidden vectors through the same expert, multiplying expert computation and all-to-all communication volume across tensor-parallel ranks.
+
+```
+                    THE TRADITIONAL MOE BOTTLENECK
+
+  Hidden State h
+        │
+   [Single Router] ──> Spearman rho < 0.05 with true expert utility in deep layers!
+        │
+   Top-k Selection
+        │
+        ├──> Expert E_1(h)  ──┐
+        ├──> Expert E_2(h)  ──┼──> Weighted Sum ──> Output y
+        └──> Expert E_k(h)  ──┘
+        
+  * PROBLEM: All selected experts receive the EXACT SAME input vector h,
+    ignoring why each expert was chosen by the routing mechanism!
+```
+
+---
+
+## The Increment
+
+**One sentence**: Multi-View MoE aggregates independently initialized sigmoid routers to rectify expert ranking, and reuses their relative preferences to mix a basis of shared latent views into expert-tailored inputs—achieving higher downstream accuracy and lower training loss under a strictly fixed budget of active experts, FLOPs, and communication.
+
+```
+                              MULTI-VIEW MOE ARCHITECTURE
+
+                     Hidden State h (Dimension d)
+                    ┌──────────────┴──────────────┐
+                    │                             │
+                    ▼                             ▼
+        [Shared Projection Basis]         [Multi-Router Submodule]
+       P_1 h, P_2 h, ..., P_K h           R independent router heads
+           (K latent views)               s_{m,i} = sigmoid(w_m,i^T h)
+                    │                             │
+                    │               ┌─────────────┴─────────────┐
+                    │               ▼                           ▼
+                    │       Sum Across Routers:         Normalize Across
+                    │        s_bar_i = sum_m s_m,i       Routers (per expert):
+                    │               │                   a_m,i = s_m,i / sum_n s_n,i
+                    │               ▼                           │
+                    │       Top-k Selection S                   │
+                    │               │                           │
+                    └───────────────┼───────────────────────────┘
+                                    │
+                                    ▼
+                         [Latent View Mixing]
+             For each selected expert i in S:
+             v_hat_i = sum_{m=1}^K a_m,i * (P_m h)
+                                    │
+                                    ▼
+                         [Expert Forward Pass]
+             Exactly ONE forward pass per active expert: E_i(v_hat_i)
+                                    │
+                                    ▼
+                         [Routed Output Gating]
+                     y = sum_{i in S} g_i * E_i(v_hat_i)
+```
+
+---
+
+## The Anatomy
+
+### 1. Multi-Router: Aligning Routing with Utility
+
+Instead of relying on a single fallible gating vector, Multi-Router instantiates $R$ independently parameterized routing heads $\{w^{(m)}\}_{m=1}^R$. For hidden state $h$, router $m$ outputs a sigmoid score for expert $i$:
+$$s_{m,i} = \sigma\left({w^{(m)}_i}^\top h\right)$$
+
+The aggregate score for expert $i$ is obtained by summing across routers and adding the load-balancing bias $b_i$:
+$$\bar{s}_i = \sum_{m=1}^R s_{m,i}$$
+$$\mathcal{S} = \text{TopK}_k(\bar{s} + b)$$
+
+During training, these independent routers naturally differentiate: one router learns fine-grained syntactic boundaries while another tracks semantic reasoning roles. An expert can be selected if it is strongly favored by one specialist router or jointly endorsed by consensus across multiple routers.
+
+### 2. Multi-View Input Modulation
+
+Standard MoE feeds the identical projection $P h$ to every active expert. Multi-View MoE introduces a shared bank of $K$ linear projection matrices $\{P_m\}_{m=1}^K$, generating $K$ distinct latent views:
+$$v^{(m)} = P_m h \in \mathbb{R}^{d_{\text{latent}}}$$
+
+For each selected expert $i \in \mathcal{S}$, Multi-View computes **convex mixing coefficients** by normalizing expert $i$'s scores across the $R$ routers (where $R = K$):
+$$a_{m,i} = \frac{s_{m,i}}{\sum_{n=1}^R s_{n,i}}, \quad \sum_{m=1}^K a_{m,i} = 1$$
+
+The input $\hat{v}_i$ delivered to expert $E_i$ is the convex combination of the latent views:
+$$\hat{v}_i = \sum_{m=1}^K a_{m,i} v^{(m)}$$
+
+This is mathematically equivalent to dynamic, token- and expert-dependent effective projection:
+$$P_{\text{eff},i}(h) = \sum_{m=1}^K a_{m,i}(h) P_m, \quad \hat{v}_i = P_{\text{eff},i}(h) h$$
+
+### 3. Output Aggregation and Computational Invariance
+
+The final routed output combines expert computations with normalized output gates $g_i$:
+$$y = \sum_{i \in \mathcal{S}} g_i E_i\left(\sum_{m=1}^K a_{m,i} v^{(m)}\right)$$
+where $g_i = \text{Softmax}_{i \in \mathcal{S}}(\bar{s}_i \cdot \alpha_i)$ and $\alpha_i$ is a learned per-expert routing scale.
+
+**Crucial Engineering Guarantee**:
+- **Active Experts**: Exactly $k$ experts are selected.
+- **Compute FLOPs**: Each selected expert executes **exactly one** forward pass.
+- **Communication**: Inter-device token dispatch and reduction transfer vectors of size $d_{\text{latent}}$, identical to standard latent-space MoE. The all-to-all communication volume does not increase.
+
+---
+
+## Quantitative Evaluation
+
+The authors pretrain a **24-layer 10B-A1B** model (10 billion total parameters, 1 billion active parameters per token, top-8 routing with 1 shared expert) on **708 billion tokens**.
+
+### 1. Downstream Benchmark Scores (at 708B Tokens)
+
+| Task Category | Benchmark | Baseline (LatentMoE) | Multi-Router ($R=2$) | Multi-View ($K=R=2$) | $\Delta$ (Multi-View vs Baseline) |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Exams** | CMMLU | 53.71% | 53.77% | **55.20%** | **+1.49%** |
+| | MMLU | 57.48% | 57.50% | **58.67%** | **+1.19%** |
+| | MMLU-Redux | 59.03% | 58.90% | **60.93%** | **+1.90%** |
+| | MMLU-Pro | 27.28% | **27.71%** | 27.12% | -0.16% |
+| | *Exams Avg.* | *49.38%* | *49.47%* | ***50.48%*** | ***+1.10%*** |
+| **Knowledge** | HotpotQA | 22.00% | 22.13% | **22.54%** | **+0.54%** |
+| | SimpleQA | 3.35% | **3.85%** | 3.41% | +0.06% |
+| | PreciseWiki | 8.64% | **9.16%** | 9.02% | +0.38% |
+| | *Knowledge Avg.* | *11.33%* | *11.71%* | ***11.66%*** | ***+0.33%*** |
+| **Science** | **GPQA** | 30.00% | 32.86% | **35.60%** | **+5.60%** |
+| **Reasoning** | BBH | 36.10% | **37.31%** | 35.76% | -0.34% |
+| **Overall** | **9-Task Mean** | **33.07%** | **33.69%** | **34.25%** | **+1.18%** |
+
+### 2. Router-Utility Alignment and Training Convergence
+
+- **Correlation Improvements**: Multi-Router improves the global Spearman rank correlation between router scores and empirical expert utility by **+8.1%**, and achieves an astounding **+58% relative improvement** in the deep layer with the worst baseline single-router alignment.
+- **Late-Stage Loss**: Over the final 1,000 steps of pretraining:
+  - Baseline loss: $2.25621$
+  - Multi-Router loss: $2.25047$ ($\Delta = -5.74 \times 10^{-3}$)
+  - Multi-View loss: $2.24883$ ($\Delta = -7.38 \times 10^{-3}$)
+- **Input Permutation Ablation**: Permuting the view-mixing weights $a_{m,i}$ across selected experts increases held-out negative log-likelihood (NLL) by $0.01340$ nats/token, proving that experts actively specialize on token-specific modulated representations.
+
+---
+
+## Key Takeaways
+
+1. **Routing Should Shape Computation, Not Just Selection**: In traditional MoE, routing scores are discarded after selecting experts and scaling their outputs. Multi-View MoE demonstrates that routing preferences can modulate expert input representations directly, unlocking substantial representational diversity.
+2. **Zero Inefficiency MoE Scaling**: Unlike approaches that duplicate computation or require extra matrix multiplications inside FFNs, Multi-View MoE performs convex mixing on pre-dispatch latent vectors. It preserves active parameters, FLOPs, and all-to-all communication budgets.
+3. **Significant Reasoning Gains on GPQA**: The massive **+5.60 percentage point jump on GPQA** demonstrates that deep multi-step scientific reasoning benefits disproportionately from multi-router disambiguation and expert input specialization.
+:::
+
+:::zh
+**论文**: [2610.40577](https://arxiv.org/abs/2610.40577)  
+**作者**: Zelin Zhao, Tianchi Ma, Junyuan Shang, Shuohuan Wang, Dianhai Yu（百度 ERNIE 团队）  
+**分类**: cs.LG, cs.AI  
+
+## 核心痛点与背景
+
+稀疏混合专家模型（Sparse Mixture-of-Experts, MoE，如 Switch Transformers、Mixtral、DeepSeek-V2/V3）通过将每个 Token 动态路由至参数子集（Top-$k$），实现了在保持单 Token 计算 FLOPs 不变的前提下大幅扩张模型参数容量。
+
+然而，工业界与学术界目前采用的传统 MoE 架构存在一个长期被忽视的底层结构性缺陷：**路由器打分与专家真实效用的严重脱节**。
+
+1. **深层网络的“盲目路由”困境**：
+   - 传统 MoE 依靠单组线性路由头（Single Router）计算 Token 对各专家的匹配打分，并通过 Top-$k$ 门控选出激活专家。
+   - 然而，论文的密集实证评估表明：在网络的中层和深层，**单路由器的排序打分与专家真实的经验效用（以专家激活输出的 $L_2$ 范数衡量）之间的斯皮尔曼秩相关系数（Spearman $\rho$）断崖式下跌，甚至降至 0.05 以下**。
+   - 未被选中的专家无法从当前 Token 获取任何梯度反馈，导致错误的路由决策在训练过程中形成自我强化的负向循环。
+
+2. **丰富专家表征与计算成本的两难悖论**：
+   - 现有的改进尝试往往陷入巨大的计算惩罚：
+     - *基于内部激活的路由*（如 AoE）：需要所有专家先执行前向投影计算才能获取选拔信号，破坏了稀疏计算的能效。
+     - *多重表征/切片路由*：将 Token 拆解为多个子 Token 分别通过专家计算，导致专家的前向计算次数和跨卡 All-to-All 通信开销成倍暴增。
+
+```
+                    传统 MOE 架构的根本性瓶颈
+
+  隐藏层状态 h
+        │
+   [单线性路由器] ──> 在中深层，与专家真实输出效用相关性 rho < 0.05！
+        │
+   Top-k 门控选择
+        │
+        ├──> 专家 E_1(h)  ──┐
+        ├──> 专家 E_2(h)  ──┼──> 加权求和 ──> 输出 y
+        └──> 专家 E_k(h)  ──┘
+        
+  * 痛点：所有被选中的专家接收到的都是完全相同的一张输入特征向量 h，
+    路由器在做出选择后，其蕴含的丰富偏好信息即被直接丢弃！
+```
+
+---
+
+## 核心贡献与创新
+
+**一句话总结**：百度 ERNIE 团队提出 Multi-View MoE，利用多组独立路由器的协同投票纠正专家选择排序，并巧妙地将路由器偏好复用于调制专家输入的多视角潜在基底（Latent Views）——在**完全不增加激活专家数量、不增加专家 FLOPs、不增加 All-to-All 通信量**的前提下，系统性提升了模型的预训练与下游推理效能。
+
+```
+                              MULTI-VIEW MOE 整体架构
+
+                     隐藏层表征 h (维度 d)
+                    ┌──────────────┴──────────────┐
+                    │                             │
+                    ▼                             ▼
+        [共享潜在投影基底]                [多路由器子模块]
+       P_1 h, P_2 h, ..., P_K h           R 个独立参数化的路由头
+          (共 K 个潜在视角)              s_{m,i} = sigmoid(w_m,i^T h)
+                    │                             │
+                    │               ┌─────────────┴─────────────┐
+                    │               ▼                           ▼
+                    │         跨路由器求和聚合：         跨路由器归一化
+                    │        s_bar_i = sum_m s_m,i       (针对每个专家独立计算):
+                    │               │                   a_m,i = s_m,i / sum_n s_n,i
+                    │               ▼                           │
+                    │       Top-k 选拔集合 S                     │
+                    │               │                           │
+                    └───────────────┼───────────────────────────┘
+                                    │
+                                    ▼
+                         [潜在视角动态混合]
+             针对每个入选专家 i in S 混合输入：
+             v_hat_i = sum_{m=1}^K a_m,i * (P_m h)
+                                    │
+                                    ▼
+                         [专家单次前向执行]
+             每个激活专家仅执行【一次】前向计算: E_i(v_hat_i)
+                                    │
+                                    ▼
+                         [门控输出加权聚合]
+                     y = sum_{i in S} g_i * E_i(v_hat_i)
+```
+
+---
+
+## 核心技术实现
+
+### 1. Multi-Router：多视角独立路由器
+
+Multi-Router 摒弃了脆弱的单路由头，部署了 $R$ 个独立参数化的 Sigmoid 路由头 $\{w^{(m)}\}_{m=1}^R$。对于输入特征 $h$，第 $m$ 个路由器对第 $i$ 个专家的匹配打分为：
+$$s_{m,i} = \sigma\left({w^{(m)}_i}^\top h\right)$$
+
+最终专家总分由各路由头求和并加上负载均衡偏置项 $b_i$ 决定：
+$$\bar{s}_i = \sum_{m=1}^R s_{m,i}$$
+$$\mathcal{S} = \text{TopK}_k(\bar{s} + b)$$
+
+训练实证表明，独立初始化的多个路由头会自发演化出高度差异化的专长偏好：有的路由头专注于局部句法模式，有的路由头专注于跨步长语义推理。这使得被某个路由头极力看好、或被多个路由头共同认可的专家均能入选。
+
+### 2. Multi-View 潜在视角输入调制
+
+传统 MoE 给所有入选专家传入相同的投影向量 $P h$。Multi-View MoE 设置了 $K$ 个低维共享线性投影基底 $\{P_m\}_{m=1}^K$，生成 $K$ 个潜在特征视角：
+$$v^{(m)} = P_m h \in \mathbb{R}^{d_{\text{latent}}}$$
+
+对于每一个选中的专家 $i \in \mathcal{S}$，Multi-View 利用该专家在各路由器上的得分比例，计算该专家的**凸混合系数（Convex Mixing Weights）**（其中 $R = K$）：
+$$a_{m,i} = \frac{s_{m,i}}{\sum_{n=1}^R s_{n,i}}, \quad \sum_{m=1}^K a_{m,i} = 1$$
+
+随后直接在输入端合成该专家的定制化潜在表征：
+$$\hat{v}_i = \sum_{m=1}^K a_{m,i} v^{(m)}$$
+
+这在数学上等价于为每个 Token-专家对动态生成了一个有效投影矩阵：
+$$P_{\text{eff},i}(h) = \sum_{m=1}^K a_{m,i}(h) P_m, \quad \hat{v}_i = P_{\text{eff},i}(h) h$$
+
+### 3. 严格的零计算开销保障（Zero Computational Overhead）
+
+最终专家输出聚合如下：
+$$y = \sum_{i \in \mathcal{S}} g_i E_i\left(\sum_{m=1}^K a_{m,i} v^{(m)}\right)$$
+其中 $g_i = \text{Softmax}_{i \in \mathcal{S}}(\bar{s}_i \cdot \alpha_i)$，$\alpha_i$ 为专家缩放因子。
+
+**工程硬指标保证**：
+- **激活专家数量**：严格保持为预设的 $k$ 个专家。
+- **计算复杂度**：每个入选专家仅执行**一次**前向计算，FFN 算力消耗与基础 LatentMoE 严格一致。
+- **通信带宽**：跨卡张量传输的输入向量维度保持为 $d_{\text{latent}}$，跨 GPU 的 All-to-All 通信数据量毫厘未增。
+
+---
+
+## 实验结果与深度分析
+
+研究团队在 **24 层 10B-A1B** 骨干模型（总参数量 100 亿，每个 Token 激活 10 亿参数，Top-8 路由 + 1 共享专家）上，系统训练了 **7080 亿（708B）Token**，对基线 LatentMoE、Multi-Router 与 Multi-View 进行了同条件对齐评测。
+
+### 1. 708B Token 下游核心基准跑分
+
+| 任务分类 | 评测基准 | 基线 (LatentMoE) | Multi-Router ($R=2$) | Multi-View ($K=R=2$) | $\Delta$ (Multi-View 对比基线) |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **通识考试** | CMMLU | 53.71% | 53.77% | **55.20%** | **+1.49%** |
+| | MMLU | 57.48% | 57.50% | **58.67%** | **+1.19%** |
+| | MMLU-Redux | 59.03% | 58.90% | **60.93%** | **+1.90%** |
+| | MMLU-Pro | 27.28% | **27.71%** | 27.12% | -0.16% |
+| | *考试类均值* | *49.38%* | *49.47%* | ***50.48%*** | ***+1.10%*** |
+| **知识问答** | HotpotQA | 22.00% | 22.13% | **22.54%** | **+0.54%** |
+| | SimpleQA | 3.35% | **3.85%** | 3.41% | +0.06% |
+| | PreciseWiki | 8.64% | **9.16%** | 9.02% | +0.38% |
+| | *知识类均值* | *11.33%* | *11.71%* | ***11.66%*** | ***+0.33%*** |
+| **高阶科学** | **GPQA** | 30.00% | 32.86% | **35.60%** | **+5.60%** |
+| **逻辑推理** | BBH | 36.10% | **37.31%** | 35.76% | -0.34% |
+| **综合总览** | **9 项任务总均值** | **33.07%** | **33.69%** | **34.25%** | **+1.18%** |
+
+### 2. 路由对齐度与收敛曲线分析
+
+- **斯皮尔曼秩相关系数大增**：Multi-Router 将全局打分与专家真实效用的秩相关系数提升了 **+8.1%**；而在基线对齐最差的深层网络中，相关系数实现了高达 **+58%** 的相对暴涨。
+- **预训练晚期 Loss 持续降低**：在 708B Token 预训练最后 1,000 步中：
+  - 基线平均 Loss：$2.25621$
+  - Multi-Router 平均 Loss：$2.25047$（下降 $5.74 \times 10^{-3}$）
+  - Multi-View 平均 Loss：$2.24883$（下降幅度扩大至 $7.38 \times 10^{-3}$）
+- **输入置换消融实验**：如果在最终 MoE 层强行将各专家的混合比例 $a_{m,i}$ 进行打乱置换，模型的验证集 NLL 立即飙升 $0.01340$ nats/token，且全网络 24 层置换均导致显著负面性能回退，证明专家确实学到了依赖于路由打分的定制化表征。
+
+---
+
+## 启示与实践意义
+
+1. **路由不仅决定“由谁算”，更应塑造“算什么”**：传统架构在 Top-$k$ 门控选拔结束后便丢弃了精细的路由权重；Multi-View MoE 证明路由器的多头偏好是极其廉价而强大的表征调制源。
+2. **零硬件开销的架构升级范式**：在十亿乃至万亿级大模型的分布式部署中，任何通信量或重复计算的增加都是不可接受的。Multi-View 仅在本地做向量加权混合，不改动任何 All-to-All 通信和专家内部核函数，非常适合工业级大规模复现。
+3. **GPQA 暴涨 5.6% 的深远影响**：专家在输入端的解耦调制为复杂科学推理提供了更丰富的专业特征通道，为后续开源大模型（如 DeepSeek 系列迭代）在架构层提供了极具借鉴价值的演进方向。
+:::
