@@ -1,0 +1,284 @@
+---
+title:
+  en: "ACCT: Asymmetric Cross-LLM Context Transfer"
+  zh: "ACCT：非对称跨大模型上下文复用与 KV 缓存直接迁移"
+description:
+  en: "In modern heterogeneous LLM deployments, dynamically routing requests between small and large models forces each target model to recompute massive context prefill from scratch. Tsinghua researchers introduce ACCT: a lightweight interface that translates source-model KV caches into sparse target-model KV states—slashing KV memory by 75% while achieving 6.5x to 21.2x prefill speedups across Qwen and LLaMA model families."
+  zh: "在现代异构大模型混合部署体系中，当不同规模的模型（如端侧小模型与云端大模型）动态接力处理同一长上下文时，目标模型往往需要从零完整重算整个 Prompt 的 Prefill，造成巨大的算力与时延浪费。清华大学团队提出 ACCT 框架，通过制图师（Cartographer）、分配器（Allocator）和编译器（Compiler）三大轻量组件，将源模型的 KV 缓存直接转化为目标模型可读取的稀疏 KV 状态，在削减 75% 显存占用的同时，实现了 6.5 至 21.2 倍的 Prefill 加速。"
+date: 2026-11-03
+tags: ["arxiv", "ai", "cs.cl", "cs.ai", "cs.lg", "llm-inference", "kv-cache", "heterogeneous-serving", "qwen", "llama"]
+image: "/arxiv-visuals/arxiv-asymmetric-cross-llm-context-transfer.png"
+---
+
+:::en
+**Paper**: [2610.42116](https://arxiv.org/abs/2610.42116)  
+**Authors**: Yuzhe Liu, Haolin Tian, Tonghan Wang (Tsinghua University)  
+**Categories**: cs.CL, cs.AI, cs.LG  
+
+## The Gap
+
+Production large language model (LLM) infrastructures are rapidly moving away from monolithic single-model endpoints toward **heterogeneous serving architectures** (e.g., speculative decoding, cascade routing, multi-agent systems, and collaborative edge-cloud pipelines). In these systems, small models (e.g., 3B–7B) perform initial triage, routing, or verification, while larger models (e.g., 8B–70B) handle complex reasoning.
+
+However, existing serving engines suffer from a massive efficiency barrier: **the context re-computation bottleneck**.
+
+1. **Redundant Prefill at Massive Context Lengths**:
+   - Modern interactions feature long conversational histories, codebases, or multi-document retrieval contexts spanning 10K to 32K+ tokens.
+   - When a request is escalated from a small model to a large model, the target model **cannot read the source model's Key-Value (KV) cache** due to differences in hidden dimensions, head counts, and layer depths.
+   - Consequently, the target model must re-encode the entire context from raw text, incurring substantial prefill FLOPs and exploding Time-To-First-Token (TTFT) latency.
+2. **The Failure of Naive KV Sharing**:
+   - Direct dimension projection fails because different layers and attention heads across model scales capture drastically different semantic abstractions.
+   - Simply pruning the context with uniform heuristics degrades multi-hop reasoning and domain QA.
+
+```
+               THE HETEROGENEOUS SERVING BOTTLENECK
+
+  Traditional Setup:
+  [User Prompt: 20K Tokens]
+          │
+          ├──> Small Model (4B): Computes KV Cache (20K tokens) ──> Routes to 8B
+          │
+          └──> Target Model (8B): MUST RECOMPUTE 20K Tokens Prefill from scratch!
+               * Wastes 95% of prefill compute
+               * Adds seconds of Time-To-First-Token (TTFT) latency
+               * VRAM exhaustion under concurrent long contexts
+```
+
+---
+
+## The Increment
+
+**One sentence**: ACCT (Asymmetric Cross-LLM Context Transfer) decouples context computation from downstream inference by compiling precomputed source-model KV caches into sparse, query-relevant target-model KV states—cutting KV cache footprint by 75% while achieving 6.5× to 21.2× speedups over native target prefill at ~19K tokens.
+
+```
+                              ACCT ARCHITECTURE
+
+  Source Model KV Cache (Layer l_s, Head h_s) + Query q
+                         │
+                         ▼
+             [1. The Cartographer]
+     Ranks content tokens for each target layer
+     and KV head based on query-relevance
+                         │
+                         ▼
+              [2. The Allocator]
+     Dynamically allocates token budgets across
+     target layers/heads under a global budget (e.g., 25%)
+                         │
+                         ▼
+              [3. The Compiler]
+     Linearly projects selected source KV vectors
+     into target-compatible Key-Value representations
+                         │
+                         ▼
+             [Target Model Inference]
+     Directly mounts transferred sparse KV cache!
+     Skips prompt prefill -> generates response immediately!
+```
+
+---
+
+## The Anatomy
+
+### 1. Three Lightweight Components
+
+ACCT bridges within-family model pairs (e.g., Qwen3 4B $\leftrightarrow$ 8B, LLaMA 3B $\leftrightarrow$ 8B, Qwen2.5 7B $\leftrightarrow$ 32B) through three coordinated modules:
+
+#### A. The Cartographer: Query-Grounded Token Selection
+For each target layer $l_t$ and attention head $h_t$, the Cartographer ranks all context tokens according to their predicted relevance to the current query:
+$$S_{l_t, h_t} = \text{Score}\left(K_s, V_s, q_s; l_t, h_t\right)$$
+Instead of computing full attention over all layers, it leverages query representations from the source model to prioritize the critical tokens required for target-model reasoning.
+
+#### B. The Allocator: Dynamic Cross-Layer KV Budgeting
+Not all layers or attention heads require equal context depth. Some heads track broad syntactic boundaries with high token sparsity, while others maintain precise multi-hop factual linkages.
+Under a total global budget $B$ (e.g., 25% of full context), the Allocator assigns head-specific capacities $b_{l_t, h_t}$ such that:
+$$\sum_{l_t} \sum_{h_t} b_{l_t, h_t} \le B$$
+This concentrates KV capacity on the most information-dense attention heads.
+
+#### C. The Compiler: Cross-Model Feature Projection
+For the retained tokens, the Compiler projects source KV vectors into target KV dimensions using learned linear mappings:
+$$K_t^{(l_t, h_t)} = W_K \cdot K_s^{(l_s, h_s)}, \quad V_t^{(l_t, h_t)} = W_V \cdot V_s^{(l_s, h_s)}$$
+The target model mounts these compiled tensors directly into its KV cache buffer, bypassing token embedding and prefill transformer blocks entirely.
+
+### 2. Computational Latency Profile
+
+At inference time, the target model's prefill phase is replaced by the lightweight conversion process:
+$$T_{\text{ACCT}} = T_{\text{source prefill}} + T_{\text{conversion}}$$
+When the source model has already prefilled the context (as in multi-turn dialogues, agentic memory lookups, or routing gates), the target model experiences **zero context prefill overhead**, needing only to encode the brief user query.
+
+---
+
+## Quantitative Evaluation
+
+The authors evaluate ACCT across three major open-source model families (**Qwen3**, **LLaMA**, **Qwen2.5**) across 6 transfer directions spanning 5 general-capability benchmarks and 6 context-dependent reasoning tasks.
+
+### 1. Task Performance at 4× Compression (75% Cache Reduction)
+
+| Model Direction | Method | MMLU (Acc) | PIQA (Acc) | SearchQA (F1) | TriviaQA (F1) | BoolQ (Acc) | PubMedQA (Acc) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Qwen3 4B → 8B** | Target Full (100% KV) | 59.70% | 73.20% | 46.65% | 50.48% | 86.30% | 48.80% |
+| | **ACCT (25% KV)** | **65.70%** | **73.10%** | **67.07%** | **66.31%** | 61.90% | 40.20% |
+| | *Relative Performance* | *1.10×* | *1.00×* | *1.44×* | *1.31×* | *0.72×* | *0.82×* |
+| **Qwen3 8B → 4B** | Target Full (100% KV) | 63.60% | 69.20% | 38.56% | 37.68% | 84.00% | 34.00% |
+| | **ACCT (25% KV)** | 58.20% | **69.00%** | **50.33%** | **54.51%** | 60.20% | **49.60%** |
+| | *Relative Performance* | *0.92×* | *1.00×* | *1.31×* | *1.45×* | *0.72×* | *1.46×* |
+| **Llama 3B → 8B** | Target Full (100% KV) | 58.60% | 77.40% | 63.44% | 78.71% | 82.00% | 70.00% |
+| | **ACCT (25% KV)** | 41.90% | 69.30% | **66.88%** | 69.71% | 63.50% | 53.60% |
+| | *Relative Performance* | *0.72×* | *0.90×* | *1.05×* | *0.89×* | *0.77×* | *0.77×* |
+| **Qwen2.5 7B → 32B** | Target Full (100% KV) | 72.40% | 80.30% | 44.05% | 34.10% | 85.30% | 57.00% |
+| | **ACCT (25% KV)** | 64.60% | 70.20% | **46.47%** | 33.58% | 56.60% | 47.00% |
+| | *Relative Performance* | *0.89×* | *0.87×* | *1.05×* | *0.98×* | *0.66×* | *0.82×* |
+
+*Key Result*: Even under a strict **4× compression ratio (75% cache reduction)**, ACCT actually **outperforms Target Full** on open-domain knowledge retrieval tasks (+20.4 F1 points on SearchQA and +15.8 F1 points on TriviaQA for Qwen3 4B $\rightarrow$ 8B) because the Cartographer filters out distracting context noise.
+
+### 2. Context Prefill Latency Acceleration
+
+Across all six transfer directions at ~19K tokens context length:
+- **Prefill Latency Speedup**: ACCT achieves **6.5× to 21.2× speedup** over native target context prefilling.
+- **Computation Time Reduction**: Slashes prefilling time by up to **95.3%**.
+- **Memory Footprint**: Reduces global KV cache storage by **75%** at $4\times$ compression and **50%** at $2\times$ compression.
+
+---
+
+## Key Takeaways
+
+1. **Context is Reusable Across Models**: Model architectures within the same family learn sufficiently compatible semantic spaces to allow direct cross-scale KV cache translation.
+2. **Filtering Out Noise Beats Full Attention**: Retaining only 25% of query-relevant KV tokens often outperforms 100% full context retention on QA tasks, demonstrating that selective sparse caching acts as an implicit denoising mechanism.
+3. **Game Changer for Cascade Routing & Multi-Agent Runtimes**: ACCT removes the prohibitive prefill latency penalty when escalating queries from small router models to giant reasoning models.
+:::
+
+:::zh
+**论文**: [2610.42116](https://arxiv.org/abs/2610.42116)  
+**作者**: Yuzhe Liu, Haolin Tian, Tonghan Wang（清华大学）  
+**分类**: cs.CL, cs.AI, cs.LG  
+
+## 核心痛点与背景
+
+在生产级大模型部署系统中，单一模型的直接调用正快速演进为**异构模型协作部署**架构（如投机采样 Speculative Decoding、大/小模型级联路由 Cascade Routing、多智能体协同流水线以及端云协同系统）。在这些体系中，小模型（如 3B–7B）常负责快速初筛、安全审查或初步生成，大模型（如 8B–70B）则在遇到复杂难题时接管深度推理。
+
+然而，现存的异构推理引擎面临一个严重的算力与延迟瓶颈：**上下文重复编码（Context Re-computation）困境**。
+
+1. **长上下文下巨大的 Prefill 算力浪费**：
+   - 现代问答、代码库解析、长文档检索（RAG）以及多轮对话往往包含 10K 至 32K+ Tokens 的冗长上下文。
+   - 当任务由小模型流转至大模型时，由于两者的隐藏层维度、注意力头数及网络层数均不相同，**目标模型无法直接读取源模型计算好的 KV 缓存（Key-Value Cache）**。
+   - 目标大模型必须从原始自然语言文本开始，从头完整重跑一遍耗时漫长的 Prefill 前向计算，导致首字延迟（TTFT）大幅恶化，并在高并发下迅速挤爆 GPU 显存。
+2. **简单维度投影的全面失效**：
+   - 不同尺寸模型各层、各注意力头的表征语义高度异质，简单的跨模型全局投影会导致注意力和语义结构崩溃，破坏多跳推理与专业问答精度。
+
+```
+                    异构大模型部署中的算力与延迟瓶颈
+
+  传统流程：
+  [用户长上下文输入: 20K Tokens]
+          │
+          ├──> 源小模型 (4B): 耗时计算 20K Tokens 的 KV Cache ──> 判定需要转交 8B 模型
+          │
+          └──> 目标大模型 (8B): 必须从零重新进行 20K Tokens 的 Prefill 计算！
+               * 浪费了超过 95% 的前置计算算力
+               * 产生数秒的首字生成延迟（TTFT 严重超时）
+               * 多并发场景下显存迅速爆满崩溃
+```
+
+---
+
+## 核心贡献与创新
+
+**一句话总结**：清华大学团队提出 ACCT（非对称跨大模型上下文复用）框架，通过制图师（Cartographer）、分配器（Allocator）和编译器（Compiler）三大协同轻量模块，将源模型已生成的 KV 缓存直接编译为目标模型可用的稀疏 KV 状态——在**削减 75% 显存占用**的同时，在 19K 长文本下取得了 **6.5 至 21.2 倍的 Prefill 计算加速**。
+
+```
+                              ACCT 系统技术架构
+
+  源模型预计算的 KV Cache (层 l_s, 头 h_s) + 用户提问 Query q
+                         │
+                         ▼
+             [1. 制图师 Cartographer]
+     基于源端 Query 表征，对目标模型各层与各头
+     的 Context Token 进行相关性打分与排序
+                         │
+                         ▼
+              [2. 分配器 Allocator]
+     在全局总预算（如仅保留 25% KV）约束下，
+     对各层各头动态分配非对称的 Token 保留容量
+                         │
+                         ▼
+              [3. 编译器 Compiler]
+     利用轻量线性变换，将选中的源 KV 向量直接
+     投影编译为目标模型兼容的 Key-Value 张量
+                         │
+                         ▼
+             [目标大模型直接挂载推理]
+     直接挂载编译后的稀疏 KV Cache，完全跳过 Prefill 阶段！
+     仅需编码用户单句提问，立即可开始流式生成！
+```
+
+---
+
+## 核心技术实现
+
+### 1. 三大核心协同组件
+
+ACCT 针对同家族不同尺寸的模型对（如 Qwen3 4B $\leftrightarrow$ 8B、LLaMA 3B $\leftrightarrow$ 8B、Qwen2.5 7B $\leftrightarrow$ 32B），构建了轻量级跨模型迁移接口：
+
+#### A. 制图师（Cartographer）：面向 Query 的 Token 重要性绘制
+对于目标模型的第 $l_t$ 层和第 $h_t$ 个注意力头，制图师评估每个上下文 Token 与当前 Query 的关联程度：
+$$S_{l_t, h_t} = \text{Score}\left(K_s, V_s, q_s; l_t, h_t\right)$$
+通过利用源模型计算出的 Query 表征指导打分，制图师提前锁定了目标模型推理最关键的信息焦点。
+
+#### B. 分配器（Allocator）：跨层与跨头的非对称容量配置
+在 Transformer 中，不同层和注意力头的语义承载方式截然不同：某些底层头关注局部词法结构，极度稀疏；而高层语义头则负责关键实体的长程关联。
+在全局给定的 KV 缓存总预算 $B$（例如全局仅保留 25% 容量，即 $4\times$ 压缩）下，分配器动态求解各头保留额度：
+$$\sum_{l_t} \sum_{h_t} b_{l_t, h_t} \le B$$
+确保将有限的显存资源精准倾斜给最高信息密度的关键注意力头。
+
+#### C. 编译器（Compiler）：跨模型特征空间线性投影
+针对入选保留的优质 Token，编译器通过轻量可学习线性映射将源端特征维度转换至目标端空间：
+$$K_t^{(l_t, h_t)} = W_K \cdot K_s^{(l_s, h_s)}, \quad V_t^{(l_t, h_t)} = W_V \cdot V_s^{(l_s, h_s)}$$
+目标模型在加载这些张量后直接就绪，完全无需经过词嵌入（Embedding）和前向 Transformer 模块的繁重计算。
+
+### 2. 端到端延迟收益模型
+
+在推理部署时，目标模型原本巨大的 Prefill 耗时被轻量级状态转换所替代：
+$$T_{\text{ACCT}} = T_{\text{source prefill}} + T_{\text{conversion}}$$
+在级联问答、多轮对话或智能体记忆检索等源模型已处理过上下文的实际场景中，目标大模型实际面对的开销仅为毫秒级的张量转换，**彻底消除了漫长的 Prefill 等待**。
+
+---
+
+## 实验结果与深度分析
+
+研究团队在 **Qwen3**、**LLaMA** 与 **Qwen2.5** 三大主流开源模型家族、6 个双向跨尺度迁移方向上，系统评估了 5 项通识能力与 6 项高上下文依赖任务。
+
+### 1. 4× 极限压缩下（削减 75% 显存）下游任务性能表现
+
+| 迁移模型对 | 推理方案 | MMLU (准确率) | PIQA (准确率) | SearchQA (F1) | TriviaQA (F1) | BoolQ (准确率) | PubMedQA (准确率) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Qwen3 4B → 8B** | 目标模型全量重算 (100% KV) | 59.70% | 73.20% | 46.65% | 50.48% | 86.30% | 48.80% |
+| | **ACCT 迁移方案 (25% KV)** | **65.70%** | **73.10%** | **67.07%** | **66.31%** | 61.90% | 40.20% |
+| | *相对基准性能* | *1.10×* | *1.00×* | *1.44×* | *1.31×* | *0.72×* | *0.82×* |
+| **Qwen3 8B → 4B** | 目标模型全量重算 (100% KV) | 63.60% | 69.20% | 38.56% | 37.68% | 84.00% | 34.00% |
+| | **ACCT 迁移方案 (25% KV)** | 58.20% | **69.00%** | **50.33%** | **54.51%** | 60.20% | **49.60%** |
+| | *相对基准性能* | *0.92×* | *1.00×* | *1.31×* | *1.45×* | *0.72×* | *1.46×* |
+| **Llama 3B → 8B** | 目标模型全量重算 (100% KV) | 58.60% | 77.40% | 63.44% | 78.71% | 82.00% | 70.00% |
+| | **ACCT 迁移方案 (25% KV)** | 41.90% | 69.30% | **66.88%** | 69.71% | 63.50% | 53.60% |
+| | *相对基准性能* | *0.72×* | *0.90×* | *1.05×* | *0.89×* | *0.77×* | *0.77×* |
+| **Qwen2.5 7B → 32B** | 目标模型全量重算 (100% KV) | 72.40% | 80.30% | 44.05% | 34.10% | 85.30% | 57.00% |
+| | **ACCT 迁移方案 (25% KV)** | 64.60% | 70.20% | **46.47%** | 33.58% | 56.60% | 47.00% |
+| | *相对基准性能* | *0.89×* | *0.87×* | *1.05×* | *0.98×* | *0.66×* | *0.82×* |
+
+*核心突破与结论*：
+1. **去噪收益使得部分任务反超全量重算**：在问答检索类基准（SearchQA、TriviaQA）中，仅保留 25% 显存的 ACCT 在 Qwen3 4B $\rightarrow$ 8B 上分别取得了 +20.4 和 +15.8 个 F1 分数的巨幅反超！这证明通过制图师主动过滤掉冗余上下文噪声，反而大幅降低了大模型的注意力干扰。
+2. **通识与推理能力强韧保留**：在跨参数量级（如 4B 至 8B，或 7B 至 32B）跨越下，模型依然能稳定继承原模型的 MMLU 和 PIQA 逻辑推导水平。
+
+### 2. Prefill 首字延迟加速实测
+
+在 ~19K Token 长文本实测中：
+- **Prefill 阶段提速**：ACCT 带来了 **6.5 至 21.2 倍的端到端提速**。
+- **计算时间削减**：将目标模型的预填充计算时间削减了最高达 **95.3%**。
+- **显存开销锐减**：在 $4\times$ 压缩模式下直接降低 **75% 的 KV Cache 显存**，在 $2\times$ 模式下降低 **50%**，极大缓解了生产集群的显存碎片化与 OOM 风险。
+
+---
+
+## 启示与实践意义
+
+1. **上下文计算不再是一次性消耗品**：同架构模型家族在预训练过程中展现出惊人一致的几何注意力流形，打破了“不同尺寸模型不能互通 KV 缓存”的固有思维。
+2. **稀疏挑选胜过盲目保留全部历史**：在长文本推理中，全量保留几万 Token 往往伴随着大量注意力杂音，基于 Query 的动态非对称分配兼顾了信息精炼与显存压缩。
+3. **彻底释放大小模型混合协作的潜力**：消除跨模型切换的 Prefill 延迟惩罚后，现代集群可以极低成本实现“小模型负责高并发过滤、大模型负责攻坚”的完美动静分工。
+:::
