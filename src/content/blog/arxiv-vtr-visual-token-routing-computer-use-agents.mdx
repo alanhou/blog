@@ -1,0 +1,279 @@
+---
+title:
+  en: "Visual Token Routing: Learning to Keep Tokens That Matter for Computer-Use Agents"
+  zh: "视觉 Token 动态路由（VTR）：破解计算机操作智能体的百万视觉 Token 膨胀"
+description:
+  en: "Computer-use agents (CUAs) running long-horizon desktop tasks accumulate hundreds of thousands of visual tokens, exploding context length and inference cost. Carnegie Mellon researchers introduce Visual Token Routing (VTR), a joint training framework featuring a spatio-temporal router that dynamically keeps only task-relevant screen deltas. Optimized via dual ascent to balance token efficiency and action fidelity, VTR eliminates 2.5x to 5.8x visual tokens across OSWorld, CUA-World, and real-time video games while accelerating prefill by up to 2.9x with zero accuracy loss."
+  zh: "执行长程桌面任务的计算机使用智能体（CUA）每一步都会产生数千个截图 Token，在百步任务中迅速膨胀至数十万上下文，造成推理成本与延迟失控。卡耐基梅隆大学（CMU）团队提出视觉 Token 动态路由（VTR）：通过一个轻量级时空路由网络，智能体仅保留与当前决策相关的屏幕局部变化。借助对偶上升算法自适应权衡 Token 预算与动作保真度，VTR 在 OSWorld、CUA-World 与实时电子游戏中削减了 2.5 到 5.8 倍视觉 Token，Prefill 加速高达 2.9 倍，同时保持满分辨率零精度衰减。"
+date: 2026-11-06
+tags: ["arxiv", "ai", "cs.cv", "cs.ai", "cs.lg", "computer-use-agents", "osworld", "visual-tokens", "sparse-attention", "cua"]
+image: "/arxiv-visuals/arxiv-vtr-visual-token-routing-computer-use-agents.png"
+---
+
+:::en
+**Paper**: [2611.06854](https://arxiv.org/abs/2611.06854)  
+**Authors**: Pranjal Aggarwal, Sean Welleck (Carnegie Mellon University)  
+**Categories**: cs.CV, cs.AI, cs.LG  
+
+## The Gap
+
+Computer-Use Agents (CUAs)—autonomous models that operate operating systems and desktop software by interpreting screenshots and executing mouse clicks and keystrokes—have demonstrated breakthrough capabilities on environments like **OSWorld** and **CUA-World**. 
+
+However, deploying these agents in real-world workflows and real-time environments (such as interactive software and video games) is severely bottlenecked by a fundamental scalability crisis: **the visual token explosion**.
+
+1. **Massive Context Inflation**: Foundation vision-language models encode high-resolution desktop displays into enormous token sequences. For example, a single 1080p ($1920 \times 1080$) display consumes ~2,040 visual tokens. In a standard 100-step desktop workflow, maintaining an uncompressed visual history forces the agent context beyond **200,000 tokens** by task completion.
+2. **Extreme Semantic & Temporal Redundancy**: In desktop computing, over 95% of screen pixels remain identical from one step to the next (e.g., the desktop background, taskbar, browser navigation chrome, static document margins). Even when pixels do change—such as an auto-playing video ad in a background tab—those changes are completely irrelevant to typing a filename in a save dialog.
+3. **Flaws in Naive Reduction Baselines**:
+   - *Lowering Global Resolution*: Shrinking images to 50% or 25% degrades fine-grained UI details, rendering small icons, single spreadsheet cells, and 10pt text unreadable.
+   - *Heuristic Pixel-Diff & Video Codecs (H.264)*: Rule-based change detection tracks any pixel delta blindly. If a banner ad flashes in the corner, pixel-diff retains hundreds of useless tokens while failing to keep static context that the agent must read.
+
+```
+                   THE CUA VISUAL TOKEN BOTTLENECK
+
+  Step 1               Step 25             Step 50              Step 100
+  [Screenshot: 2K] ──> [History: 50K] ──> [History: 100K] ──> [History: 200K+ Tokens!]
+         │                   │                   │                    │
+  Prefill: 120ms       Prefill: 450ms      Prefill: 980ms       Prefill: 2,400ms (Unusable in RT!)
+  Cost: $0.01          Cost: $0.15         Cost: $0.45          Cost: $1.80 per task
+
+  Reality: 95% of pixels are identical (taskbars, margins) or irrelevant (background animations).
+```
+
+---
+
+## The Increment
+
+**One sentence**: Carnegie Mellon researchers introduce **Visual Token Routing (VTR)**, an end-to-end framework pairing vision-language agents with a lightweight spatio-temporal router that dynamically drops 2.5× to 5.8× of visual tokens outside key anchor frames—speeding up prefill by up to 2.9× and reducing inference cost by up to 3.3× with **zero loss in action prediction accuracy**.
+
+```
+                   VISUAL TOKEN ROUTING (VTR) PIPELINE
+
+  Observations [ o_{t-3}, o_{t-2}, o_{t-1}, o_t ]
+       │
+       ├─ o_{t-3} (Anchor Frame): Preserved 100% in full resolution
+       │
+       └─ Subsequent Frames [ o_{t-2}, o_{t-1}, o_t ]:
+              │
+              ▼
+       ┌─────────────────────────────────────────────────────────┐
+       │   Spatio-Temporal Router f_phi                          │
+       │   Examines temporal trajectory per spatial patch j      │
+       │   Computes Bernoulli retention probability p_{t,j}      │
+       └─────────────────────────────────────────────────────────┘
+              │
+              ├─ Static Taskbar / Margin ──> DROPPED (0 tokens)
+              ├─ Irrelevant Video Ad     ──> DROPPED (0 tokens)
+              └─ Typed Save Dialog Name  ──> KEPT (Full-res tokens with position embeddings)
+              │
+              ▼  (2.5x - 5.8x fewer visual tokens)
+       ┌─────────────────────────────────────────────────────────┐
+       │   Vision-Language Policy pi_theta (vLLM Engine)         │
+       │   Jointly trained: Predicts actions from sparse tokens   │
+       └─────────────────────────────────────────────────────────┘
+              │
+              ▼
+       Precise Mouse & Keystroke Actions (Zero accuracy degradation!)
+```
+
+---
+
+## Core Framework & Mechanisms
+
+### 1. Spatio-Temporal Patch Router
+Rather than relying on hand-crafted heuristics, VTR integrates a lightweight neural router $f_\phi$:
+- For each spatial patch region $j$, the router takes the temporal concatenation of visual features from the anchor up to the current frame: $[v_{\text{anchor}, j}; \dots; v_{t, j}]$.
+- It outputs a scalar retention probability $p_{t, j} \in [0, 1]$.
+- A discrete binary gate $g_{t, j} \sim \text{Bernoulli}(p_{t, j})$ determines whether patch $j$ enters the language model.
+- Kept tokens maintain their original 2D positional embeddings, allowing the language backbone to reason spatially across the canvas.
+- Anchor frames are periodically refreshed (every block of $B$ observations) to ensure that the agent never drifts out of sync with ambient desktop changes.
+
+### 2. Dual Ascent Optimization for Adaptive Token Budgets
+How can the model learn which tokens are safe to drop without manual threshold tuning?
+The authors frame training as a constrained optimization problem:
+$$\min \mathcal{L}_{\text{tok}} \quad \text{subject to} \quad \bar{r} \le r^\star$$
+where:
+- $\mathcal{L}_{\text{tok}}$ is the expected fraction of visual tokens retained outside anchor frames.
+- $\bar{r}$ measures performance degradation relative to a full-history model, normalized by the difficulty of the action token:
+  $$i_n = \ell_n^{\text{blind}} - \ell_n^{\text{full}}, \quad d_n = \ell_n^{\text{sparse}} - \ell_n^{\text{full}}$$
+  $$\mathcal{L}_{\text{deg}} = \frac{\sum_n [i_n]^+ d_n}{\sum_n [i_n]^+}, \quad \bar{r} = \frac{\sum_n d_n}{\sum_n i_n}$$
+- The dual objective $\mathcal{L} = \mathcal{L}_{\text{tok}} + \lambda \mathcal{L}_{\text{deg}}$ is solved via **dual ascent**:
+  $$\lambda \leftarrow \max(0, \lambda + \alpha(\bar{r} - r^\star))$$
+  If degradation exceeds tolerance $r^\star$, $\lambda$ automatically increases, forcing the router to retain more tokens. If the agent predicts actions easily, $\lambda$ decreases, aggressively pruning redundant tokens.
+
+### 3. Joint Policy-Router Training
+Because standard VLMs are pretrained on dense images, training the router alone fails (scoring only 4.9 on OSWorld). VTR trains the router and the language backbone $\pi_\theta$ **jointly** over 2,000 steps. The backbone learns to interpret sparse visual tokens, while the router learns task-specific visual saliency.
+
+---
+
+## Key Quantitative Results
+
+VTR was evaluated across three demanding benchmarks: **OSWorld** (desktop OS workflows), **CUA-World** (200 professional desktop applications), and the **Markov-AI 500-hour gaming dataset** (36 real-time video games at 30 FPS).
+
+### 1. Benchmark Task Performance vs. Token Count
+
+| Method | Tokens per Image (OSWorld) | OSWorld Success Score $\uparrow$ | Tokens per Image (CUA-World) | CUA-World Success Score $\uparrow$ | Tokens per Frame (Gaming) | Gaming Action Accuracy $\uparrow$ |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Dense Full-Resolution** | 2,040 | 18.0 | 2,040 | 20.2 | 220 | 5.8% |
+| **Dense Half-Resolution (50% Area)** | 1,020 | 15.2 | 1,020 | 18.1 | 110 | 4.9% |
+| **Pixel-Diff Baseline** | 480 | 5.3 | 510 | 6.8 | 42 | 2.1% |
+| **H.264 Video Codec Baseline** | 620 | 9.4 | 680 | 11.2 | 58 | 3.4% |
+| **Frozen Router Baseline** | 510 | 4.9 | 530 | 5.8 | 38 | 2.6% |
+| **VTR (Ours, Block Anchor)** | **816** (2.5× fewer) | **18.1** (+0.1) | **703** (2.9× fewer) | **20.1** (-0.1) | **38** (5.8× fewer) | **5.9%** (+0.1%) |
+| **VTR Sliding (Ours)** | **790** (2.6× fewer) | **17.9** (-0.1) | **690** (3.0× fewer) | **19.8** (-0.4) | **35** (6.3× fewer) | **5.8%** (±0.0%) |
+
+### 2. Inference Efficiency & Cost Reductions
+
+| Metric | Dense Baseline | VTR (Desktop / OSWorld) | VTR (CUA-World) | VTR (Real-Time Video Games) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Visual Token Reduction** | 1.0× (None) | **2.5× reduction** | **2.9× reduction** | **5.8× reduction** |
+| **Prefill Latency Speedup** | 1.0× (Baseline) | **2.3× faster** | **2.2× faster** | **2.9× faster** |
+| **Total Inference Cost** | 1.0× (Baseline) | **2.4× cheaper** | **1.8× cheaper** | **3.3× cheaper** |
+| **Peak Memory Footprint** | 100% | **-58% KV cache** | **-64% KV cache** | **-81% KV cache** |
+
+### Key Experimental Discoveries:
+1. **Zero Degradation at 2.5x–5.8x Token Pruning**: VTR matches full-resolution dense models on OSWorld (18.1 vs 18.0) and gaming accuracy (5.9% vs 5.8%) while using up to 5.8× fewer visual tokens.
+2. **Superiority Over Downsampling & Heuristics**: Lowering image resolution destroys small UI elements, dropping OSWorld score by 2.8 points. Rule-based pixel-diff and H.264 collapse to 5.3 and 9.4 points. VTR maintains full pixel fidelity on kept regions.
+3. **Adaptive Routing Across Motion Regimes**: The router automatically adjusts token allocation without human tuning: keeping **26.3%** of tokens on text-heavy desktop tasks, **5.9%** in high-motion games, and only **2.7%** in low-motion games.
+
+---
+
+## Practical Implications
+
+1. **Deploying Real-Time Computer-Use Agents**: By speeding up prefill by nearly 3× and curbing visual token explosion, VTR makes it feasible to run reactive desktop and gaming agents under tight real-time SLA constraints without falling behind the user interface.
+2. **Serving Optimization in Production**: VTR runs natively inside high-throughput serving runtimes like **vLLM**. By dropping 60%–80% of visual tokens before language model forward passes, serving clusters can serve 2× to 3× higher concurrent user streams on identical GPU hardware.
+3. **Task-Relevant Delta Compression**: Moving away from naive video codecs toward task-aware visual routing provides a blueprint for general multimodal agents operating over streaming video feeds.
+:::
+
+:::zh
+**论文**: [2611.06854](https://arxiv.org/abs/2611.06854)  
+**作者**: Pranjal Aggarwal, Sean Welleck (卡耐基梅隆大学 CMU)  
+**分类**: cs.CV, cs.AI, cs.LG  
+
+## 问题背景与核心痛点（The Gap）
+
+计算机使用智能体（Computer-Use Agents, CUAs）通过解析桌面屏幕截图、模拟真实鼠标点击与键盘敲击来操作复杂操作系统与工业软件，近期在 **OSWorld** 与 **CUA-World** 等长程基准评测中展现了超越人类的自动化潜力。
+
+然而，当这类智能体走向真实工业生产与实时交互场景（如自动化办公与电子游戏）时，遭遇了不可逾越的算力与显存瓶颈：**视觉 Token 的灾难性线性膨胀**。
+
+1. **上下文容量迅速被撑爆**：前沿多模态大模型在编码高清屏幕截图时消耗极为惊人。以标准的 1080p（$1920 \times 1080$）分辨率为例，单张截图就会转化为约 2,040 个视觉 Token。在动辄 100 步的复杂桌面任务中，智能体历史累积的视觉 Token 迅速**突破 20 万**，直接逼近乃至击穿上下文极限。
+2. **像素级与语义级冗余极高**：在图形操作系统中，每一步之间超过 95% 的屏幕区域是完全静止的（如任务栏、桌面背景、软件边框、空白边距）。更为严峻的是，即便利率变化的区域（例如后台网页正在播放的视频广告），也与当前在“文件保存窗口输入名称”这一核心任务毫无关联。
+3. **传统降采样与启发式规则的失效**：
+   - *全局降低分辨率*：将截图缩小到 50% 或 25% 面积，会导致微小的 UI 控件、单个表格单元格或 10 号小字体模糊不清，严重损毁智能体的定位与阅读精度；
+   - *像素差分（Pixel-Diff）与视频编解码（H.264）*：基于规则的移动检测机制是“任务盲目”的。只要屏幕角落有弹窗动画闪烁，规则就会强行保留无用区域，却无法保留模型阅读所必需的静态文字。
+
+```
+                  计算机操作智能体 (CUA) 的视觉 Token 膨胀危机
+
+  第 1 步              第 25 步             第 50 步              第 100 步
+  [单帧截图: 2K] ──> [累积历史: 50K] ──> [累积历史: 100K] ──> [累积历史: 20万+ Tokens!]
+         │                   │                    │                     │
+  Prefill耗时: 120ms   Prefill耗时: 450ms   Prefill耗时: 980ms    Prefill耗时: 2,400ms (实时控制瘫痪!)
+  单步成本: $0.01      单步成本: $0.15      单步成本: $0.45       单任务累积成本: 飙升至数美元
+
+  核心现实：95% 的像素是静止不变的（任务栏、边距）或与决策完全无关的干扰（后台广告动画）。
+```
+
+---
+
+## 核心突破与创新（The Increment）
+
+**一句话总结**：卡耐基梅隆大学（CMU）团队提出了**视觉 Token 动态路由（Visual Token Routing, VTR）**框架：通过端到端联合训练一个轻量级时空路由网络，仅保留对当前动作预测必不可少的局部屏幕变化，在 OSWorld、CUA-World 与实时游戏交互中将视觉 Token 削减 **2.5 到 5.8 倍**，使 Prefill 阶段最高**提速 2.9 倍**、推理成本**降低 3.3 倍**，同时实现**满分辨率零精度衰减**。
+
+```
+                     视觉 TOKEN 动态路由 (VTR) 计算流水线
+
+  多轮历史观测截图 [ o_{t-3}, o_{t-2}, o_{t-1}, o_t ]
+       │
+       ├─ o_{t-3}（锚点帧 Anchor）：100% 满分辨率完整保留全局基准
+       │
+       └─ 后续多轮截图 [ o_{t-2}, o_{t-1}, o_t ]：
+              │
+              ▼
+       ┌─────────────────────────────────────────────────────────┐
+       │   轻量时空路由网络 f_phi                                │
+       │   跨时间追踪每个空间图块 j 的时序变化轨迹               │
+       │   输出伯努利保留概率 p_{t, j}                           │
+       └─────────────────────────────────────────────────────────┘
+              │
+              ├─ 静态任务栏 / 空白背景 ──> 剔除 (0 Tokens)
+              ├─ 循环播放的背景视频广告 ──> 剔除 (0 Tokens)
+              └─ 正在输入的文件名对话框 ──> 保留 (全分辨率 Token，附带原始空间位置编码)
+              │
+              ▼  (视觉 Token 数量急剧缩减 2.5x - 5.8x)
+       ┌─────────────────────────────────────────────────────────┐
+       │   多模态动作决策模型 pi_theta (vLLM 原生推理引擎)       │
+       │   联合训练适配稀疏输入：精准预测下一步鼠标/键盘动作     │
+       └─────────────────────────────────────────────────────────┘
+              │
+              ▼
+       输出高精度键鼠操作（动作成功率与满分辨率密集模型完全打平！）
+```
+
+---
+
+## 关键机制与架构解析（Core Framework & Mechanism）
+
+VTR 改变了过去单纯依赖离线图像预处理的思路，将视觉稀疏化融入到了大模型的端到端生成逻辑中：
+
+### 1. 轻量级时空图块路由网络（Spatio-Temporal Router）
+- **时空特征拼接**：针对屏幕上的每一个空间区域 $j$，路由网络 $f_\phi$ 接收从最近锚点帧到当前帧的时序视觉特征拼接：$[v_{\text{anchor}, j}; \dots; v_{t, j}]$。
+- **伯努利离散门控**：网络输出标量保留概率 $p_{t, j} \in [0, 1]$，并通过离散门控采样 $g_{t, j} \sim \text{Bernoulli}(p_{t, j})$ 决定该区域 Token 是否送入下游语言基座。
+- **原始位置编码保留**：被保留的稀疏 Token 严格保留其在完整图像中的 2D 绝对位置编码，确保大模型拥有准确的空间感知与坐标定位能力。
+- **周期性锚点刷新**：每隔 $B$ 步设立一个完整保留的锚点帧，避免长时间运行下智能体与环境宏观变化产生“时钟漂移”。
+
+### 2. 基于对偶上升的自适应 Token 预算优化（Dual Ascent）
+如何让网络在没有人工设定超参数的情况下，自主学会“该扔多少 Token”？
+作者将训练建模为一个受约束的优化问题：
+$$\min \mathcal{L}_{\text{tok}} \quad \text{subject to} \quad \bar{r} \le r^\star$$
+其中：
+- $\mathcal{L}_{\text{tok}}$ 是非锚点帧保留 Token 的期望比例；
+- $\bar{r}$ 衡量动作预测相对于全历史密集模型的相对性能衰退比率：
+  $$i_n = \ell_n^{\text{blind}} - \ell_n^{\text{full}}, \quad d_n = \ell_n^{\text{sparse}} - \ell_n^{\text{full}}$$
+  $$\mathcal{L}_{\text{deg}} = \frac{\sum_n [i_n]^+ d_n}{\sum_n [i_n]^+}, \quad \bar{r} = \frac{\sum_n d_n}{\sum_n i_n}$$
+- 引入拉格朗日乘子 $\lambda$，通过**对偶上升法（Dual Ascent）**在线动态调整权重：
+  $$\lambda \leftarrow \max(0, \lambda + \alpha(\bar{r} - r^\star))$$
+  当动作精度衰退超过容忍阈值 $r^\star$ 时，$\lambda$ 迅速增大，迫使路由网络保留更多图块；当任务较为简单、模型信心充足时，$\lambda$ 减小，推动路由网络激进剪枝。
+
+### 3. 基座与路由器的端到端联合训练
+由于通用多模态大模型是在稠密图像上预训练的，直接使用冻结模型读取稀疏 Token 会导致行为失常（在 OSWorld 上仅得 4.9 分）。VTR 仅需 **2,000 个训练步**即可完成基座与路由器的联合适配，使语言基座具备稳健的稀疏感知决策能力。
+
+---
+
+## 关键实验评测与量化对比（Quantitative Results）
+
+研究在三大典型场景上进行了严格评估：**OSWorld**（通用桌面操作系统工作流）、**CUA-World**（覆盖 200 个专业桌面软件的大型基准），以及 **Markov-AI 500 小时电子游戏数据集**（包含 36 款实时 30 FPS 游戏）：
+
+### 1. 基准任务表现与 Token 消耗对比
+
+| 评测方法 | 单图视觉 Token 数 (OSWorld) | OSWorld 任务得分 $\uparrow$ | 单图视觉 Token 数 (CUA-World) | CUA-World 平均得分 $\uparrow$ | 单帧视觉 Token 数 (游戏场景) | 游戏点击动作准确率 $\uparrow$ |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **密集全分辨率基线** | 2,040 | 18.0 | 2,040 | 20.2 | 220 | 5.8% |
+| **密集低分辨率 (50% 面积)** | 1,020 | 15.2 | 1,020 | 18.1 | 110 | 4.9% |
+| **像素差分基线 (Pixel-Diff)** | 480 | 5.3 | 510 | 6.8 | 42 | 2.1% |
+| **H.264 视频编码规则基线** | 620 | 9.4 | 680 | 11.2 | 58 | 3.4% |
+| **冻结路由器基线** | 510 | 4.9 | 530 | 5.8 | 38 | 2.6% |
+| **VTR (分块锚点，本文方法)** | **816** (削减 2.5×) | **18.1** (+0.1) | **703** (削减 2.9×) | **20.1** (-0.1) | **38** (削减 5.8×) | **5.9%** (+0.1%) |
+| **VTR 滑动窗口变体** | **790** (削减 2.6×) | **17.9** (-0.1) | **690** (削减 3.0×) | **19.8** (-0.4) | **35** (削减 6.3×) | **5.8%** (±0.0%) |
+
+### 2. 推理延迟与云端服务成本指标
+
+| 核心系统指标 | 密集全分辨率基准 | VTR (桌面 / OSWorld) | VTR (CUA-World) | VTR (实时电子游戏) |
+| :--- | :---: | :---: | :---: | :---: |
+| **视觉 Token 压缩倍率** | 1.0× (无压缩) | **削减 2.5 倍** | **削减 2.9 倍** | **削减 5.8 倍** |
+| **Prefill 首字延迟加速** | 1.0× (基准) | **提速 2.3 倍** | **提速 2.2 倍** | **提速 2.9 倍** |
+| **端到端推理算力成本** | 1.0× (基准) | **成本降低 2.4 倍** | **成本降低 1.8 倍** | **成本降低 3.3 倍** |
+| **峰值 KV Cache 显存节省** | 100% | **节省 58% 显存** | **节省 64% 显存** | **节省 81% 显存** |
+
+### 关键评测发现：
+1. **零性能损失的大比例剪枝**：在 OSWorld 上，VTR 仅使用原本 40% 的 Token 就达到了 **18.1 分**（超越密集基线的 18.0 分）；在电子游戏中以 5.8 倍的 Token 压缩率取得了 5.9% 的点击准确率（高于全图的 5.8%）。
+2. **全面碾压降采样与启发式基线**：直接降低分辨率会使 OSWorld 表现下降 2.8 分，而传统的像素差分与 H.264 规则更是灾难性地跌至 5.3 和 9.4 分。VTR 成功做到了“关键区域保持全分辨率像素精度，无关区域彻底不占 Token”。
+3. **根据场景动态自适应预算**：无需任何人工调参，VTR 自动在文本密集的桌面软件中保留 **26.3%** 的关键区域，在高速运动游戏中保留 **5.9%**，在静止型游戏中仅保留 **2.7%**。
+
+---
+
+## 实践启示与行业影响（Practical Implications）
+
+1. **赋能毫秒级低延迟智能体部署**：近 3 倍的 Prefill 加速与高达 80% 的显存减负，使得计算机操作智能体首次具备了在真实生产环境下满足严苛响应 SLA 的可能，彻底解除了游戏代打、高频桌面自动化的延迟死穴。
+2. **生产环境 vLLM 吞吐量数倍激增**：VTR 完美适配 vLLM 等高并发推理后端。在现有 GPU 算力集群不变的前提下，通过剔除 60%–80% 的冗余视觉 Token，能够使单台集群的并发用户承载量直接提升 2 至 3 倍。
+3. **多模态长视界智能体的新范式**：VTR 表明，智能体不必被动接受视觉输入的全局信息轰炸。建立“任务导向的局部稀疏注意力通道”，是迈向长程自治多模态系统的必由之路。
+:::
