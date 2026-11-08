@@ -1,0 +1,327 @@
+---
+title:
+  en: "VFlash: Fast, Accurate Visual Planning via Flash Primitive Decoding"
+  zh: "VFlash：基于闪速图元解码的高效高精度具身视觉规划"
+description:
+  en: "NVIDIA, JHU, and PolyU researchers introduce VFlash, replacing autoregressive coordinate generation in Vision-Language Models with Flash Primitive Decoding (FPD). By leveraging the known schemas of spatial primitives (trajectories, bounding boxes, 3D point motions), VFlash drafts complete multi-token primitives in a single non-causal forward pass without requiring token-level alignment with the target VLM, slashing decoding latency by up to 80% on Jetson Thor while improving trajectory accuracy."
+  zh: "来自 NVIDIA、约翰斯·霍普金斯大学及香港理工大学等机构的研究团队提出 VFlash，通过“闪速图元解码”（FPD）彻底颠覆了视觉语言模型（VLM）中逐坐标自回归解码轨迹与包围盒的传统范式。VFlash 利用空间几何图元固有的结构约束，仅需一次非因果前向传播即可并行生成完整的多 token 空间图元，无需与目标模型逐 token 对齐，在 Jetson Thor 上降低了超 80% 的解码延迟，同时提升了机器人操作与端到端智驾的规划精度。"
+date: 2026-11-08
+tags: ["arxiv", "ai", "cs.ro", "cs.cv", "robotics", "autonomous-driving", "speculative-decoding", "visual-planning", "vlm", "nvidia", "real-time-inference"]
+image: "/arxiv-visuals/arxiv-vflash-visual-planning-flash-primitive-decoding.png"
+---
+
+:::en
+**Paper**: [2611.08449](https://arxiv.org/abs/2611.08449)  
+**Authors**: Yu-Cheng Chou, Shihao Wang, Jin Huang, Chi-Pin Huang, Chiao-An Yang, Xianzhe Fan, Jing Wang, Zhiqi Li, Yuanguo Kuang, Ruijie Zheng, Johan Bjorck, Sifei Liu, Hang Su, Abhishek Badki, Lei Zhang, Alan Yuille, Linxi "Jim" Fan, Jan Kautz, Zhiding Yu (NVIDIA, Johns Hopkins University, The Hong Kong Polytechnic University, Purdue University, The University of Hong Kong)  
+**Categories**: cs.RO, cs.CV  
+
+## The Gap
+
+Vision-Language Models (VLMs) have emerged as foundational cognitive backbones for embodied intelligence in robotics and autonomous driving. Rather than reasoning solely in natural language, modern physical AI systems increasingly represent action intents via **visual plans**—such as 2D/3D end-effector trajectories, target bounding boxes, affordance points, and dense future 3D point tracks.
+
+However, standard autoregressive (AR) VLMs treat spatial coordinates as sequences of discrete text or special coordinate tokens, generating them strictly **one token at a time**:
+- A dual-arm 10-waypoint trajectory spanning 2D image plane and 3D metric coordinates requires 54 sequential token generations.
+- Dense 3D motion forecasting across multiple future frames requires hundreds of coordinate tokens.
+- On embedded robotics hardware (e.g., NVIDIA Jetson Thor), each 4B VLM forward step takes 35–39 ms. Autoregressive decoding alone absorbs **75% to 87%** of the entire control loop budget, resulting in multi-second planning delays that cripple real-time reaction.
+
+Prior speculative decoding frameworks (e.g., Medusa, EAGLE, DFlash) fail in spatial coordinate regimes:
+1. **Misaligned Verification**: Conventional speculative decoding requires strict token-level agreement with the target VLM's next-token distribution:
+   $$\tau = \min \{ j \in [1, \gamma] : a_j \neq \arg\max p_\theta(\cdot | x, a_{<j}) \}$$
+   If a drafter predicts coordinate bin 499 while the target predicts 500 (a negligible 0.1% geometric difference), the draft is instantly rejected, causing the effective acceptance length to collapse to just 2.1–2.2 tokens per step.
+2. **Fixed-Window Splitting**: Standard drafters use fixed-length windows (e.g., 4 or 16 tokens), which arbitrarily slice spatial primitives mid-coordinate or across waypoints, breaking geometric consistency.
+
+```
+                  THE BOTTLENECK IN AUTOREGRESSIVE VISUAL PLANNING
+
+  User Image + Instruction: "Fold the shorts, predict 10 key trajectory points (2D+3D)"
+  
+  [Autoregressive VLM]: 54 sequential forward passes!
+   Pass 1   Pass 2   Pass 3          Pass 53  Pass 54
+  ┌──────┐ ┌──────┐ ┌──────┐        ┌──────┐ ┌──────┐
+  │ u_1  │─│ v_1  │─│ u_2  │─ ... ─ │ z_9  │─│ z_10 │  ──> Latency: ~3,552 ms on Jetson Thor
+  └──────┘ └──────┘ └──────┘        └──────┘ └──────┘      (Incompatible with real-time control)
+
+  [Standard Speculative Decoding (DFlash)]:
+  Draft 16 tokens ──> Target verification rejects at bin mismatch (e.g. 500 vs 499)!
+                      Acceptance rate drops to ~2.2 tokens/step (Lat: ~1,828 ms)
+```
+
+---
+
+## The Increment
+
+**One sentence**: NVIDIA and academic partners introduce **VFlash**, a generalist visual planning framework that identifies structured visual primitives (boxes, variable-length 2D/3D trajectories, dense motions) via declared schemas, drafts the **entire primitive in a single parallel forward pass** using a non-causal lightweight drafter, and directly accepts structurally valid predictions without requiring token-level agreement with the target VLM.
+
+```
+                     VFLASH: FLASH PRIMITIVE DECODING (FPD)
+
+  Context: Image + "Fold the shorts"
+       │
+       ▼
+  Target VLM: Emits primitive start token `<2D>` and tool-call schema length B(s) = 54
+       │
+       ▼
+  [VFlash Lightweight Drafter]: Single non-causal forward pass over ALL 54 masked positions!
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │ Parallel Prediction:                                                        │
+  │ q_φ(a_{1:B(s)-1} | H_θ(x), a_0) = ∏_{j=1}^{B(s)-1} q_{φ,j}(a_j | H_θ, MASK)  │
+  └─────────────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+  [Structural Validator / Confidence Guard]: Validates format and coordinate bounds
+       │
+       ├──> Valid schema? ──> ACCEPT ENTIRE PRIMITIVE (All 54 tokens committed!)
+       └──> Boundary check? ──> One target VLM forward pass to sync KV cache
+                                Total latency: 703 ms (5.0x speedup; 80% reduction!)
+```
+
+---
+
+## Core Framework & Mechanisms
+
+### 1. Flash Primitive Decoding (FPD) Formulation
+VFlash models spatial generation through structured schemas $s$. A schema defines:
+- The primitive type (bounding box, variable-length trajectory, dense point flow).
+- The coordinate dimensionality (2D pixel coordinates $(u, v) \in [0, 1000]^2$, 3D metric coordinates $(x, y, z) \in \mathbb{R}^3$).
+- The block length $B(s)$, declaring the total token budget upfront.
+
+Instead of autoregressively factorizing tokens via $\prod_{j} p_\theta(a_j | x, a_{<j})$, VFlash freezes the backbone hidden representations $H_\theta(x)$ at the primitive start token $a_0$, and predicts all $B(s)-1$ coordinate positions conditionally independently in a single forward step:
+$$q_\varphi(a_{1:B(s)-1} | H_\theta(x), a_0) = \prod_{j=1}^{B(s)-1} q_{\varphi, j}(a_j | H_\theta(x), a_0, \text{MASK}_{B(s)-1})$$
+
+### 2. Dual Alignment Principles
+To overcome the instability of non-causal generation over long sequences, VFlash establishes two structural invariants:
+1. **Boundary Alignment**: Each draft block corresponds exactly to one complete visual primitive. The tool call explicitly outputs the primitive length $P$, preventing the drafter from truncating entities mid-trajectory.
+2. **Position Alignment**: Every token index $j$ within the block corresponds to a deterministic geometric semantic role (waypoint index, spatial axis $x/y/z$, or XML delimiter tag). Legal coordinate vocabularies are enforced directly on the output logits via zero-cost mask constraints.
+
+```
+                      PRIMITIVE TOKEN LAYOUT SCHEMAS
+
+  1. Bounding Box (Length = 6):
+     <box>  u_1   v_1   u_2   v_2  </>
+
+  2. 2D + 3D Trajectory (Length = 2 + 2P + 3P + 2 = 5P + 4 tokens):
+     <2D> (u  v) x P  </>  <3D> (x  y  z) x P  </>
+
+  3. Dense 3D Point Motion (Frame-interpolated):
+     <Dense> t_1  t_2  [ k (s d_1 d_2 d_3 d_4 d_5) x 3 ] x P  </>
+```
+
+### 3. Training and Direct Acceptance Criterion
+The drafter $\varphi$ is trained with uniform position weights over ground-truth annotated primitives, rather than matching the target VLM's autoregressive sequence:
+$$\mathcal{L}_{\text{prim}} = - \sum_{j=1}^{B(s)-1} \log q_{\varphi, j}(a_j^* | H_\theta(x), a_0, \text{MASK}_{B(s)-1})$$
+
+At inference time, VFlash replaces token-level rejection with structural validation:
+$$\tau_{\text{dir}} = \begin{cases} B(s), & \text{if } \mathcal{A}_s(\hat{a}) = 1 \\ 1 + r, & \text{otherwise} \end{cases}$$
+where $\mathcal{A}_s$ checks grammatical schema validity and bounding coordinates. If valid, all $B(s)$ tokens are accepted in one shot. The amortized decoding latency per coordinate is reduced to:
+$$L_{\text{dir}} = \frac{t_{\text{par}} + t_{\text{target}}}{B(s)}$$
+where $t_{\text{par}}$ is the drafter forward pass and $t_{\text{target}}$ is a single target VLM pass used to update the KV cache.
+
+---
+
+## Benchmark Results & Empirical Findings
+
+### 1. Open-Loop 2D & 3D Robot Trajectory Accuracy
+Crucially, single-pass primitive drafting not only accelerates inference, but actually **improves geometric accuracy** over autoregressive generation by eliminating error accumulation along the trajectory chain.
+
+| Method | Target Params | ShareRobot-Bench DFD $\downarrow$ | ShareRobot-Bench HD $\downarrow$ | ShareRobot-Bench RMSE $\downarrow$ | VABench-V DFD $\downarrow$ | VABench-V HD $\downarrow$ | VABench-V RMSE $\downarrow$ |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Qwen3-VL (2025) | 4B | 0.381 | 0.329 | 0.220 | 0.279 | 0.253 | 0.204 |
+| RoboBrain-2.0 (2025) | 7B | **0.167** | **0.158** | **0.125** | 0.329 | 0.260 | 0.224 |
+| LoHo-Manip (2026b) | 4B | 0.231 | 0.206 | 0.156 | 0.212 | 0.182 | 0.147 |
+| **Baseline (AR)** | 4B | 0.202 | 0.175 | 0.142 | 0.130 | 0.125 | 0.093 |
+| **VFlash (Ours)** | 4B | **0.194** | **0.162** | **0.133** | **0.126** | **0.116** | **0.089** |
+
+*Note: DFD = Discrete Fréchet Distance; HD = Hausdorff Distance; RMSE = Root Mean Square Error.*
+
+### 2. Closed-Loop Robotics Manipulation (MolmoSpaces & LIBERO)
+- On **MolmoSpaces**, a policy conditioned on VFlash visual plans achieves **70.2%** average success across four distinct task suites, compared to **62.6%** for the baseline autoregressive VLM plan.
+- On **LIBERO-PRO** (out-of-distribution physical perturbations), VFlash improves Spatial, Object, and Goal task completion rates by **+11.1**, **+9.4**, and **+6.9** percentage points over the unconditioned baseline.
+
+### 3. End-to-End Autonomous Driving (NAVSIM & Waymo)
+Conditioning a lightweight diffusion action head on VFlash plans achieves state-of-the-art closed-loop driving metrics:
+
+| Method | Driving Benchmark | NC $\uparrow$ | DAC $\uparrow$ | EP $\uparrow$ | TTC $\uparrow$ | PDMS $\uparrow$ / RFS $\uparrow$ |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| DiffusionDrive (2025) | NAVSIM | 98.2 | 96.2 | 82.2 | 94.7 | 88.1 |
+| SpanVLA (2026c) [RL] | NAVSIM | **99.1** | 97.1 | 86.3 | 95.2 | 90.3 |
+| Qwen-Drive-1.0-RL | NAVSIM | 98.6 | 98.2 | 84.8 | 95.9 | **90.7** |
+| **VFlash-RL (Ours)** | NAVSIM | 98.3 | 97.8 | 85.9 | 95.4 | **90.7** |
+| MindVLA-U1 (2026) [RL]| Waymo (5s) | ADE: 1.09 | — | — | — | 7.87 |
+| Qwen-Drive-1.0-RL | Waymo (5s) | ADE: 1.19 | — | — | — | **7.91** |
+| **VFlash-RL (Ours)** | Waymo (5s) | ADE: 1.22 | — | — | — | **7.86** |
+
+### 4. End-to-End Inference Latency Profiling
+Latency measurements across embedded edge hardware and server accelerators (Batch Size = 1):
+
+| System Benchmark | Platform | Autoregressive (AR) | DFlash (Speculative) | VFlash (FPD) | Total Speedup | Latency Reduction |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **MolmoSpaces** | Jetson Thor | 3,552.7 ms | 1,828.4 ms | **703.3 ms** | **5.05x** | **-80.2%** |
+| **MolmoSpaces** | DGX Spark | 3,356.5 ms | 1,809.2 ms | **649.9 ms** | **5.16x** | **-80.6%** |
+| **MolmoSpaces** | NVIDIA H100 | 516.1 ms | 340.0 ms | **142.3 ms** | **3.63x** | **-72.4%** |
+| **NAVSIM Driving**| Jetson Thor | 1,842.5 ms | 1,609.5 ms | **534.4 ms** | **3.45x** | **-71.0%** |
+| **Dense 3D Flow** | H100 | ~2,500 ms | ~1,200 ms | **~100 ms** | **~25x** | **-96.0%** |
+
+On Jetson Thor, VFlash reduces pure decoding time for an 84-token driving trajectory from **1,420 ms down to 78 ms**—an astounding **18.2x decoding speedup**.
+
+---
+
+## Practical Implications
+
+1. **System-1 Latency for High-Level Planners**: By collapsing multi-token coordinate generation into a single draft forward pass, physical AI architectures can execute high-level VLM re-planning at **1.4–2.0 Hz directly on embedded robotics platforms** (Jetson Thor), transforming slow deliberative planners into reactive real-time controllers.
+2. **Decoupling Geometric Fidelity from Token Alignment**: The paper provides a crucial insight for embodied post-training: speculative drafting of spatial coordinates should optimize for **ground-truth geometric distance**, not token-probability equivalence with an autoregressive base model.
+3. **Plug-and-Play VLA Acceleration**: VFlash requires no modifications to the base VLM's weights, training only a shallow non-causal drafting head with standard cross-entropy loss over spatial datasets.
+:::
+
+:::zh
+**论文**: [2611.08449](https://arxiv.org/abs/2611.08449)  
+**作者**: Yu-Cheng Chou, Shihao Wang, Jin Huang, Chi-Pin Huang, Chiao-An Yang, Xianzhe Fan, Jing Wang, Zhiqi Li, Yuanguo Kuang, Ruijie Zheng, Johan Bjorck, Sifei Liu, Hang Su, Abhishek Badki, Lei Zhang, Alan Yuille, Linxi "Jim" Fan, Jan Kautz, Zhiding Yu（NVIDIA、约翰斯·霍普金斯大学、香港理工大学、普渡大学、香港大学）  
+**分类**: cs.RO, cs.CV  
+
+## 核心痛点：自回归空间规划的时延鸿沟
+
+视觉语言模型（VLM）已成为具身智能（机器人与自动驾驶）的“认知大脑”。在现代物理 AI 系统中，模型不再仅仅输出离散的文本语言，而是大量依赖**视觉规划（Visual Plans）**来显式表达空间动作意图——例如目标包围盒（Bounding Boxes）、双臂末端轨迹点序列（2D 图像坐标与 3D 空间坐标）、以及未来场景点的稠密运动流（Dense 3D Point Flow）。
+
+然而，现有的自回归（Autoregressive, AR）解码架构给空间规划带来了灾难性的时延问题：
+- **逐 Token 串行解码的高昂代价**：机器人一条 10 个航路点的双臂轨迹（包含 2D 像素与 3D 公制坐标）需要消耗 54 个 token；而稠密 3D 点云运动预测更需要数百个坐标 token。每个 token 都必须串行触发一次完整的 4B VLM 前向计算。
+- **端侧部署的算力瓶颈**：在主流车载与机器人车载算力芯片（如 NVIDIA Jetson Thor）上，单次 VLM 前向推理耗时 35–39 ms。在完整的控制环路中，仅轨迹解码一项就占用了 **75% 至 87%** 的端到端推理耗时，导致规划周期长达 3.5 秒以上，根本无法应对动态环境下的实时控制。
+- **传统推测解码的几何失效**：传统推测解码（Speculative Decoding，如 Medusa、EAGLE、DFlash）要求草稿模型的预测必须与目标 VLM 的 Top-1 Token 严格对齐：
+  $$\tau = \min \{ j \in [1, \gamma] : a_j \neq \arg\max p_\theta(\cdot | x, a_{<j}) \}$$
+  在连续坐标离散化的场景下，若草稿预测第 499 号 bin，而目标模型倾向第 500 号 bin（几何物理误差仅 0.1%），该 token 便会被判定失败并整体回滚，使得推测接受长度锐减至每个 Step 仅 2.1–2.2 个 token，加速收益几乎归零。
+
+```
+                    自回归视觉规划在端侧设备的严重瓶颈
+
+  输入场景图像 + 任务指令："折叠短裤，输出双臂未来 5 秒内 10 个关键轨迹点 (2D+3D)"
+  
+  【传统自回归解码】：必须进行 54 次完全串行的前向传播！
+   Step 1   Step 2   Step 3          Step 53  Step 54
+  ┌──────┐ ┌──────┐ ┌──────┐        ┌──────┐ ┌──────┐
+  │ u_1  │─│ v_1  │─│ u_2  │─ ... ─ │ z_9  │─│ z_10 │  ──> Jetson Thor 端到端耗时: 3,552 ms
+  └──────┘ └──────┘ └──────┘        └──────┘ └──────┘      (无法满足高频动态交互需求)
+
+  【常规推测解码 (DFlash)】：
+  推测 16 个 token ──> 坐标数值轻微波动触发严格拒绝 (499 vs 500) ──> 接受长度仅 2.2 tokens
+                      耗时仍高达 1,828 ms，无法彻底解决核心瓶颈
+```
+
+---
+
+## 核心突破：闪速图元解码（Flash Primitive Decoding）
+
+**核心结论**：NVIDIA 携手约翰斯·霍普金斯大学及香港理工大学团队提出 **VFlash**，指出空间轨迹与几何包围盒具有天然明确的先验模式（Schema），通过轻量级非因果草稿网络，在**单次并行前向传播中直接生成整个空间图元的所有坐标**，并采用“结构合法性校验”彻底取代逐 Token 的对齐验证，在 Jetson Thor 上将视觉规划延迟骤降 80% 以上，且轨迹物理精度超越自回归基线。
+
+```
+                     VFLASH：闪速图元解码（FPD）架构
+
+  上下文环境：RGB 输入 + "折叠牛仔裤"
+       │
+       ▼
+  目标 VLM：触发图元起始 Token `<2D>`，通过工具调用明确图元长度 B(s) = 54
+       │
+       ▼
+  【VFlash 轻量非因果草稿头】：单次并行前向推导全部 54 个 Mask 位置！
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │ 条件独立并行概率联合建模：                                                      │
+  │ q_φ(a_{1:B(s)-1} | H_θ(x), a_0) = ∏_{j=1}^{B(s)-1} q_{φ,j}(a_j | H_θ, MASK)  │
+  └─────────────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+  【结构校验器 / 置信度门控】：检测坐标取值区间与几何合法性
+       │
+       ├──> 格式合法？ ──> 直接接受全部 54 个 Token！（无需目标模型逐字比对）
+       └──> 目标 VLM 仅需执行 1 次前向计算以更新 KV 缓存并提供后续隐状态
+            Jetson Thor 端到端延迟降至 703 ms（提速 5.05 倍，时延削减 80%！）
+```
+
+---
+
+## 核心机制与架构详解
+
+### 1. 结构化图元模式（Primitive Schema）
+VFlash 将物理世界中所有的空间表征抽象为预定义的结构化图元（Visual Primitives）$s$。每个图元在解码前即锁定了其内在模式：
+- **图元类型**：包围盒（Box）、变长 2D/3D 机械臂轨迹（Trajectory）、稠密 3D 点流（Dense Point Track）。
+- **坐标维度与粒度**：归一化图像平面坐标 $(u, v) \in [0, 1000]^2$、公制真实世界三维坐标 $(x, y, z) \in \mathbb{R}^3$。
+- **图元长度 $B(s)$**：由上游指令或工具调用先验确定（如航路点数量 $P$ 预设为 10）。
+
+借助这一先验，草稿网络无需在步长内部进行时序因果掩码推演，而是基于目标 VLM 在起始标记 $a_0$ 处的隐状态 $H_\theta(x)$，对后续 $B(s)-1$ 个坐标位置进行**条件独立的一次性全并行预测**：
+$$q_\varphi(a_{1:B(s)-1} | H_\theta(x), a_0) = \prod_{j=1}^{B(s)-1} q_{\varphi, j}(a_j | H_\theta(x), a_0, \text{MASK}_{B(s)-1})$$
+
+### 2. 双重对齐设计准则
+为确保非因果长程推测在几何空间中的稳定性，VFlash 确立了两大核心设计：
+1. **边界对齐（Boundary Alignment）**：每个草稿预测块严格对应一个**完整的几何图元**，彻底规避了固定滑动窗口（如 16-token window）将同一个航路点或坐标截断的弊端。
+2. **位置对齐（Position Alignment）**：草稿块内部的每个索引位置 $j$ 均具有确定性的几何语义角色（如“第 3 个点的 Y 轴坐标”或“结束标签 `</>`”）。这允许系统在 Logits 层施加无损的硬掩码约束，杜绝语法越界。
+
+```
+                      三类核心空间图元的排列模式表
+
+  1. 目标包围盒 (长度固定 = 6 tokens):
+     <box>  u_1   v_1   u_2   v_2  </>
+
+  2. 2D + 3D 机械臂空间轨迹 (长度 = 5P + 4 tokens, P 为航路点数):
+     <2D> (u  v) x P  </>  <3D> (x  y  z) x P  </>
+
+  3. 稠密 3D 场景流预测 (跨帧运动序列):
+     <Dense> t_1  t_2  [ k (s d_1 d_2 d_3 d_4 d_5) x 3 ] x P  </>
+```
+
+### 3. 直接接受准则与训练目标
+传统的推测解码对齐目标是拟合自回归模型的转移分布，而 VFlash 发现：**自回归模型的逐 Token 积累误差往往会导致后段轨迹漂移**。因此，VFlash 草稿头直接使用真实几何标注坐标（Annotated Primitives）进行多任务交叉熵微调：
+$$\mathcal{L}_{\text{prim}} = - \sum_{j=1}^{B(s)-1} \log q_{\varphi, j}(a_j^* | H_\theta(x), a_0, \text{MASK}_{B(s)-1})$$
+
+在推理阶段，VFlash 执行直接接受判定：
+$$\tau_{\text{dir}} = \begin{cases} B(s), & \text{若 } \mathcal{A}_s(\hat{a}) = 1 \\ 1 + r, & \text{发生越界异常} \end{cases}$$
+其中 $\mathcal{A}_s$ 仅核验图元语法结构及数值边界合法性。一旦通过，整个图元的数十个坐标在单步内全部提交；随后目标 VLM 仅需执行一次并行前向传播以同步 KV 缓存。
+
+---
+
+## 实验结果与基准对比
+
+### 1. 2D 与 3D 轨迹规划精度
+实验表明，直接并行预测消除了解码误差的递归累积，VFlash 在开环轨迹预测上的物理几何误差全面低于自回归基准：
+
+| 评估方法 | 模型参数量 | ShareRobot 离散弗雷歇距离 (DFD) $\downarrow$ | ShareRobot 豪斯多夫距离 (HD) $\downarrow$ | ShareRobot RMSE $\downarrow$ | VABench-V DFD $\downarrow$ | VABench-V HD $\downarrow$ | VABench-V RMSE $\downarrow$ |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Qwen3-VL (2025) | 4B | 0.381 | 0.329 | 0.220 | 0.279 | 0.253 | 0.204 |
+| RoboBrain-2.0 (2025) | 7B | **0.167** | **0.158** | **0.125** | 0.329 | 0.260 | 0.224 |
+| LoHo-Manip (2026b) | 4B | 0.231 | 0.206 | 0.156 | 0.212 | 0.182 | 0.147 |
+| **基线 (自回归 AR)** | 4B | 0.202 | 0.175 | 0.142 | 0.130 | 0.125 | 0.093 |
+| **VFlash (本文方法)**| 4B | **0.194** | **0.162** | **0.133** | **0.126** | **0.116** | **0.089** |
+
+### 2. 闭环具身操作与真实控制
+- 在 **MolmoSpaces** 仿真套件中，以 VFlash 规划为条件的动作模型在 4 个任务大类中取得了 **70.2%** 的平均操作成功率，相较自回归基准的 **62.6%** 实现了显著提升（+7.6%）。
+- 在强扰动环境 **LIBERO-PRO** 下，相较于无视觉规划基线，VFlash 在空间位置（Spatial）、操作对象（Object）与目标达成（Goal）维度分别实现 **+11.1**、**+9.4** 与 **+6.9** 个百分点的成功率提升。
+
+### 3. 端到端自动驾驶（NAVSIM 与 Waymo）
+在 NAVSIM 与 Waymo 闭环自动驾驶评测中，基于冻结 VLM 的 VFlash 方案不仅取得了与专用驾驶大模型对齐的驾驶安全性，更将推理帧率拉升至实用区间：
+
+| 自动驾驶模型 | 训练范式 | 驾驶评测基准 | 行驶舒适度 (Comf.) $\uparrow$ | 碰撞时间 (TTC) $\uparrow$ | 综合驾驶分数 (PDMS / RFS) $\uparrow$ |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| DiffusionDrive (2025) | SFT | NAVSIM | 100.0 | 94.7 | 88.1 |
+| SpanVLA (2026c) | RL | NAVSIM | 100.0 | 95.2 | 90.3 |
+| Qwen-Drive-1.0-RL | RL | NAVSIM | 100.0 | 95.9 | **90.7** |
+| **VFlash-RL (本文方法)**| RL | NAVSIM | 100.0 | 95.4 | **90.7** |
+| MindVLA-U1 (2026) | RL | Waymo (5s) | — | — | 7.87 |
+| Qwen-Drive-1.0-RL | RL | Waymo (5s) | — | — | **7.91** |
+| **VFlash-RL (本文方法)**| RL | Waymo (5s) | — | — | **7.86** |
+
+### 4. 硬件端到端推理时延剖析
+在嵌入式设备 Jetson Thor、桌面工作站 DGX Spark 以及服务器级 NVIDIA H100 上的实测端到端推理时间（Batch Size = 1）：
+
+| 任务场景 | 部署硬件芯片 | 自回归基线 (AR) | DFlash 推测解码 | VFlash 闪速解码 | 端到端加速比 | 整体时延降幅 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **MolmoSpaces 机械臂** | Jetson Thor | 3,552.7 ms | 1,828.4 ms | **703.3 ms** | **5.05x** | **-80.2%** |
+| **MolmoSpaces 机械臂** | DGX Spark | 3,356.5 ms | 1,809.2 ms | **649.9 ms** | **5.16x** | **-80.6%** |
+| **MolmoSpaces 机械臂** | NVIDIA H100 | 516.1 ms | 340.0 ms | **142.3 ms** | **3.63x** | **-72.4%** |
+| **NAVSIM 自动驾驶** | Jetson Thor | 1,842.5 ms | 1,609.5 ms | **534.4 ms** | **3.45x** | **-71.0%** |
+| **稠密 3D 点流预测** | NVIDIA H100 | ~2,500 ms | ~1,200 ms | **~100 ms** | **~25x** | **-96.0%** |
+
+在 Jetson Thor 上，对于长达 84 个 Token 的自动驾驶轨迹，纯解码耗时从自回归的 **1,420 ms 锐减至 78 ms**，实现高达 **18.2 倍**的纯解码时延降低。
+
+---
+
+## 实践启示与工程落地
+
+1. **具身慢思考与快反应的桥梁**：过去业界受限于高昂推理延迟，不得不将 VLM 作为低频的离线调度器（0.1–0.2 Hz）。VFlash 将整体规划耗时压缩至数百毫秒，使得高层 VLM 视觉规划器能够以 **1.5–2.0 Hz 的高频直接闭环介入端侧控制**。
+2. **重塑推测解码的设计思维**：在连续几何世界中，“拟合基础模型输出分布”并不等于“物理世界最优”。VFlash 证明了针对结构化输出进行非因果几何监督与合法性直接放行，能够兼顾超高吞吐与更优的物理精度。
+3. **极简低成本的适配方案**：底层目标 VLM 权重完全冻结，开发者仅需基于轻量 Transformer 训练一个非因果投影头即可适配各类端侧机器人底盘，为具身智能规模化落地清除了核心工程障碍。
+:::

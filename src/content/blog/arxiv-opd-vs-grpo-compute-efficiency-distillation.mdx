@@ -1,0 +1,312 @@
+---
+title:
+  en: "Unpacking the Compute Efficiency of Strong-to-Weak OPD Against GRPO"
+  zh: "拆解强弱在线策略蒸馏（OPD）对决 GRPO 的算力效率真相"
+description:
+  en: "Salesforce AI Research presents the first rigorous, FLOPs-matched comparison between on-policy distillation (OPD) and Group Relative Policy Optimization (GRPO). While external post-trained teachers consistently lose to GRPO across all task difficulty tiers and cause response-length inflation, using the student's own GRPO checkpoint as a 'self-GRPO teacher' changes everything—recovering accuracy with 50x fewer FLOPs. Moreover, multi-teacher OPD consolidates multi-domain specialists into a unified generalist with 42% fewer total FLOPs than joint GRPO."
+  zh: "Salesforce AI Research 开展了首个严格对齐训练 FLOPs 的系统性对比，剖析在线策略蒸馏（OPD）与组相对策略优化（GRPO）的真实算力效率。研究揭示：使用外部后训练教师模型的 OPD 在各类难度下全面落后于 GRPO 并伴随回答长度虚胀；但若改用学生模型自身的 GRPO 检查点作为“自 GRPO 教师”，仅需 1/50 的蒸馏算力即可复现甚至超越教师精度。在跨领域场景中，多教师 OPD 仅消耗专家训练 5.2% 的额外算力即可完成多领域整合，总算力较联合 GRPO 节省达 42%。"
+date: 2026-11-08
+tags: ["arxiv", "ai", "cs.lg", "cs.cl", "knowledge-distillation", "grpo", "reinforcement-learning", "llm-training", "compute-efficiency", "on-policy-distillation", "salesforce"]
+image: "/arxiv-visuals/arxiv-opd-vs-grpo-compute-efficiency-distillation.png"
+---
+
+:::en
+**Paper**: [2611.08453](https://arxiv.org/abs/2611.08453)  
+**Authors**: Zeyu Leo Liu, Yang Li, Bo Pang, Emre Can Acikgoz, Xuan-Phi Nguyen, Anurag Koul, Srijan Bansal, Erik Nijkamp, Shafiq Joty, Semih Yavuz (Salesforce AI Research, UIUC)  
+**Categories**: cs.LG, cs.CL  
+
+## The Gap
+
+Post-training large language models (LLMs) for complex reasoning has seen a split between two competing paradigms:
+1. **Reinforcement Learning with Verifiable Rewards (RLVR / GRPO)**: The model explores rollouts on its own, guided only by sparse, binary outcome rewards ($r_i \in \{0, 1\}$).
+2. **On-Policy Distillation (OPD)**: The student generates rollouts on-policy, but every single generated token is supervised by the dense logit probabilities of a frozen, stronger teacher model.
+
+The prevailing hypothesis in the literature was that **dense teacher feedback should be vastly more compute-efficient than sparse outcome rewards**, particularly on challenging reasoning tasks where students rarely stumble upon correct answers. In theory, where GRPO receives zero reward signal, OPD can still guide the student token by token.
+
+However, existing literature rarely compared OPD and GRPO on a **matched-FLOPs** basis. Instead, papers typically reported GPU wall-clock hours, gradient update steps, or rollout counts:
+- Every OPD training token requires an additional forward pass through the frozen teacher ($2N_t$ FLOPs per token).
+- External teachers often cause **response-length inflation**, driving up token counts and FLOP consumption rapidly.
+- When accounting for true floating-point operations across both rollout generation and optimization, does OPD actually beat GRPO in accuracy per training FLOP?
+
+```
+                      THE UNRESOLVED COMPUTE-EFFICIENCY QUESTION
+
+  Outcome-Reward RL (GRPO):
+  Student rollouts ──> Sparse binary reward (0 or 1) ──> Cost: 10 * N_s per token
+  Promise: Explores freely without teacher bias.
+  Risk: Zero signal when problems are too difficult for student.
+
+  On-Policy Distillation (OPD):
+  Student rollouts ──> Dense teacher logits on every token ──> Cost: 10 * N_s + 2 * N_t per token
+  Promise: Strong, dense guidance on every single step.
+  Risk: Teacher forward pass is expensive; teacher bias causes length inflation and degeneration.
+
+  Crucial Question: For a fixed FLOPs budget, which one produces higher held-out accuracy?
+```
+
+---
+
+## The Increment
+
+**One sentence**: Salesforce AI Research delivers the first systematic, FLOPs-matched evaluation of reverse-KL OPD versus GRPO, showing that **external post-trained teachers broadly underperform GRPO** across all difficulty tiers, but using a student's own checkpoint as a **self-GRPO teacher** recovers full reasoning capability with **$50\times$ fewer distillation FLOPs**, enabling multi-teacher consolidation that beats joint GRPO with **42% fewer total FLOPs**.
+
+```
+                           THE THREE PILLARS OF FINDINGS
+
+  1. External Teachers Lose to GRPO:
+     OPD (Qwen3-8B / 32B) ──> Consistently worse Pareto efficiency than GRPO!
+     Fails even on the easiest subset for distillation (Student solve=0, Teacher solve>0.6).
+
+  2. Self-GRPO Teacher Reverses the Curve:
+     Student (Qwen3-4B-Base) ──[GRPO checkpoints]──> Self-GRPO Teacher
+                                                            │
+     Distillation into Base Student: Matches GRPO with 50.0x fewer FLOPs! (135.6x fewer vs 8B ext.)
+
+  3. Multi-Teacher Consolidation:
+     Math Expert (Self-GRPO) ──┐
+                               ├──> Multi-Teacher OPD ──> Consolidated Generalist
+     Code Expert (Self-GRPO) ──┘    (Distillation adds only 5.2% FLOPs; 42% total FLOPs savings vs Joint GRPO)
+```
+
+---
+
+## Core Framework & Mechanisms
+
+### 1. Rigorous Compute Accounting
+Let $N_s$ and $N_t$ be the active parameter counts of the student and teacher models in per-token matrix multiplications:
+- **GRPO Training**:
+  $$\text{FLOPs}_{\text{GRPO}} = 10 N_s \times \text{tokens}$$
+  comprising $2N_s$ for autoregressive rollout generation, $2N_s$ for log-probability recomputation, and $6N_s$ for backward parameter updates.
+- **OPD Training**:
+  $$\text{FLOPs}_{\text{OPD}} = (10 N_s + 2 N_t) \times \text{tokens}$$
+  incurring the exact same student costs plus an additional forward pass of the frozen teacher ($2N_t$) on every generated token.
+
+### 2. Objectives Formulation
+For prompt $q$ with group size $G$, student policy $\pi_\theta$, and rollout $o_i$:
+- **GRPO Objective**:
+  $$\mathcal{L}_{\text{GRPO}}(\theta) = -\mathbb{E}_{q, \{o_i\}} \left[ \frac{1}{G} \sum_{i=1}^G \hat{A}_i \sum_{t=1}^{|o_i|} \log \pi_\theta(o_{i,t} | q, o_{i,<t}) \right], \quad \hat{A}_i = r_i - \text{mean}(\{r_j\})$$
+- **Reverse-KL OPD Objective (over top-$k$ support, $k=16$)**:
+  Renormalize probabilities over the student's top-$k$ set $S_k(o_{i,t})$:
+  $$\tilde{\pi}_\theta(v|o_{i,<t}) = \frac{\pi_\theta(v|o_{i,<t})}{\sum_{u \in S_k} \pi_\theta(u|o_{i,<t})}, \quad \tilde{\pi}_T(v|o_{i,<t}) = \frac{\pi_T(v|o_{i,<t})}{\sum_{u \in S_k} \pi_T(u|o_{i,<t})}$$
+  $$\mathcal{L}_{\text{OPD}}(\theta) = \mathbb{E}_{q, \{o_i\}} \left[ \frac{1}{G} \sum_{i=1}^G \sum_{t=1}^{|o_i|} \sum_{v \in S_k} \tilde{\pi}_\theta(v) \left( \log \tilde{\pi}_\theta(v) - \log \tilde{\pi}_T(v) \right) \right]$$
+
+Crucially, **the true outcome reward $r_i$ never enters $\mathcal{L}_{\text{OPD}}$**. OPD relies purely on the teacher's probability landscape.
+
+```
+                           MATHEMATICAL COMPARISON
+
+  Feature               GRPO (Outcome RL)            OPD (On-Policy Distillation)
+  ────────────────────────────────────────────────────────────────────────────────
+  Supervision           Sparse binary reward r_i      Dense token distribution π_T
+  Forward passes        Student only                 Student + Teacher (2 N_t extra)
+  Token overhead        Shorter, targeted rollouts   Response inflation / repetition
+  Loss formulation      Advantage-weighted log-prob  Reverse-KL on Top-16 support
+  Domain consolidation  Requires joint retraining    Seamless multi-teacher routing
+```
+
+---
+
+## Benchmark Results & Empirical Findings
+
+### 1. External Teachers Underperform Across All Difficulty Tiers
+To isolate where OPD might have an inherent advantage, the authors stratified the DAPO-Math-17K training dataset into 8 difficulty cells based on student solve rate (`mean@32` $= 0$ vs $> 0$) and teacher solve rate (`mean@32` $\in [0, 1]$).
+
+```
+                 STUDENT VS TEACHER DIFFICULTY STRATIFICATION (DAPO-MATH)
+
+  Teacher > 0.6  │  GRPO Wins (Peak acc higher)   │  GRPO Wins (Wider margin)
+  Teacher 0.3-0.6│  GRPO Wins                     │  GRPO Wins
+  Teacher 0-0.3  │  GRPO Wins                     │  GRPO Wins
+  Teacher = 0    │  GRPO Wins                     │  GRPO Wins
+                 └────────────────────────────────┴───────────────────────────
+                           Student = 0                    Student > 0
+```
+
+Even in the upper-left cell—where the student has 0% chance of solving the problem alone and the teacher solves over 60% of cases—**GRPO still achieves a higher held-out accuracy at fewer training FLOPs**. As teachers get larger (from 4B to 8B to 32B), the OPD Pareto frontier worsens because the $2N_t$ penalty grows without a proportional accuracy lift.
+
+### 2. The Power of the Self-GRPO Teacher
+When the teacher is set to the student's **own GRPO checkpoint** (e.g., a Qwen3-4B-Base student distilled from a Qwen3-4B-GRPO checkpoint):
+
+| Setup | Training FLOPs to Reach Target | Speedup vs GRPO | Speedup vs Ext. OPD (8B) | OOD Math Macro (AIME/AMC) |
+| :--- | :--- | :--- | :--- | :--- |
+| **GRPO from scratch** | 1.00x baseline | 1.0x | — | 33.9% |
+| **OPD with External Qwen3-8B Teacher** | 2.71x baseline | 0.37x (Slower!) | 1.0x | 26.5% |
+| **OPD with Self-GRPO Teacher** | **0.02x baseline** | **50.0x faster** | **135.6x faster** | **34.8%** |
+
+Remarkably, the student distilled with self-GRPO achieves **34.8%**, surpassing the teacher checkpoint itself (**33.9%**), while requiring **50 times less compute** than training via GRPO from scratch.
+
+### 3. Multi-Domain Specialization & Multi-Teacher Consolidation
+When training across disparate capabilities (Math, Code, MMLU-Pro Knowledge, IFBench Instruction Following):
+- Running **Joint GRPO** across all 4 domains requires balancing conflicting reward distributions and gradient noise, consuming enormous compute.
+- Running **Multi-Teacher OPD with Self-GRPO Specialists** trains domain experts independently, then distills them into a unified student.
+
+| Strategy | Training Domain | Specialist FLOPs | Distillation FLOPs | Total Compute | Final Eval Score |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Joint GRPO** | Math + Code (2 domains) | — | — | 100% (Baseline) | 33.9% (Math) / 41.2% (Code) |
+| **Multi-Teacher OPD (External 8B)** | Math + Code (2 domains) | — | — | 118% | 22.4% (Severe repetition!) |
+| **Multi-Teacher OPD (Self-GRPO)** | Math + Code (2 domains) | 52.8% | **5.2%** | **58.0% (-42% FLOPs!)** | **34.2% / 41.8%** |
+| **Multi-Teacher OPD (Self-GRPO)** | 4 Domains (Math+Code+MMLU+IF) | 92.0% | **8.0%** | **100%** | Matches all 4 specialists |
+
+In multi-domain settings, an external 8B teacher triggers catastrophic student collapse: endless token loops, code block hallucinations, and random Chinese characters in English responses. In contrast, self-GRPO multi-teacher distillation costs only **5.2% to 8.0%** of specialist compute, yielding a state-of-the-art generalist.
+
+---
+
+## Practical Implications
+
+1. **Stop Distilling from Arbitrary External Teachers**: Off-the-shelf instruction-tuned or thinking models carry divergent vocabulary biases, formatting habits, and reasoning lengths that poison student on-policy rollouts and waste FLOPs.
+2. **The "Specialist First, Consolidate Second" Post-Training Recipe**: The most compute-efficient post-training architecture is not a monolithic multi-task RL run, but rather:
+   - Step 1: Train small, targeted RL models on domain-specific verifiable rewards (Code-only, Math-only, Agent-only).
+   - Step 2: Use **Multi-Teacher OPD** with the self-checkpoints as teachers to fold all skills into a single base model, spending under 8% additional compute.
+3. **Always Report Implementation-Invariant FLOPs**: Wall-clock time obscures teacher forward overhead and inference framework optimizations. Training FLOPs must become the standard benchmark metric for LLM distillation papers.
+:::
+
+:::zh
+**论文**: [2611.08453](https://arxiv.org/abs/2611.08453)  
+**作者**: Zeyu Leo Liu, Yang Li, Bo Pang, Emre Can Acikgoz, Xuan-Phi Nguyen, Anurag Koul, Srijan Bansal, Erik Nijkamp, Shafiq Joty, Semih Yavuz（Salesforce AI Research、伊利诺伊大学厄巴纳-香槟分校 UIUC）  
+**分类**: cs.LG, cs.CL  
+
+## 核心痛点：在线蒸馏“算力高效”的神话与现实
+
+在后训练（Post-Training）阶段，赋予大语言模型（LLM）深度推理能力主要有两大技术路线：
+1. **基于可验证奖励的强化学习（RLVR / GRPO）**：模型依靠自身策略采样 Rollout，仅依赖稀疏的最终正负结果奖励（Binary Outcome Reward, $r_i \in \{0, 1\}$）进行策略梯度更新。
+2. **在线策略蒸馏（On-Policy Distillation, OPD）**：学生模型自身进行在线采样，但在生成的每一个 Token 上，均接收来自一个冻结的、更强教师模型的稠密概率分布指导（Per-Token Supervision）。
+
+长期以来，学术界与工业界普遍存在一个直觉假设：**稠密的教师监督信号应当比稀疏的结果奖励更具算力效率（Compute Efficiency）**。特别是在极具挑战性的数学与代码题目中，学生模型自行采样很难碰巧答对，GRPO 会因为缺乏正向奖励而陷入梯度停滞；而 OPD 的教师模型每一步都能提供纠偏指导。
+
+然而，以往的蒸馏论文极少在**严格匹配浮点计算量（FLOPs-Matched）**的前提下与 GRPO 进行硬碰硬对比，往往仅汇报 GPU 训练时长或优化步数：
+- **高昂的教师前向开销**：OPD 中学生生成的每一个 Token，都必须额外执行一次教师模型的前向传播（增加 $2N_t$ FLOPs/token）。
+- **回答长度恶性虚胀（Length Inflation）**：外部教师往往导致学生生成冗长且重复的思考链，急剧拉高每步的 Token 吞吐量与显存占用。
+- 真正将采样生成、概率重算与反向传播的 FLOPs 综合算清后，**OPD 真的能在同等算力预算下达到比 GRPO 更高的准确率吗？**
+
+```
+                     在线策略蒸馏 vs GRPO 的核心算力争鸣
+
+  【结果强化学习 (GRPO)】：
+  学生在线采样 ──> 仅依赖最终 0/1 判定 ──> 单 Token 算力成本: 10 * N_s
+  优势：不受教师先验偏置约束，探索上限高。
+  痛点：在学生解题率为 0 的极难题目上可能缺乏梯度信号。
+
+  【在线策略蒸馏 (OPD)】：
+  学生在线采样 ──> 教师在每个 Token 上提供稠密 Logits ──> 单 Token 算力: 10 * N_s + 2 * N_t
+  优势：理论上每一步都有密集梯度反馈。
+  痛点：教师模型前向计算代价极重；易产生回答虚胀、复读与语言漂移。
+
+  核心命题：在严苛对齐的训练 FLOPs 预算下，究竟谁的准确率更高？
+```
+
+---
+
+## 核心突破：算力效率剖析与“自 GRPO 教师”范式
+
+**核心结论**：Salesforce AI Research 展开了首个严格以 FLOPs 为尺度的系统性对比，证伪了“外部教师在线蒸馏比 GRPO 更具算力效率”的流行假设；同时发现，若将学生模型自身的 GRPO 检查点作为**“自 GRPO 教师”（Self-GRPO Teacher）**，蒸馏效率将暴增 **50 倍**；在此基础上构建的**多教师 OPD 架构**，能够以比联合 GRPO 节省 **42% 总算力**的极低代价，将多个垂类专家合成为通才大模型。
+
+```
+                         三大核心发现与架构路径
+
+  1. 外部教师蒸馏全面落后于 GRPO：
+     以 Qwen3-8B / 32B 作为外部教师，OPD 在各个 FLOP 节点下的 Pareto 表现均差于 GRPO，
+     甚至在“学生解题率=0，教师解题率>0.6”的蒸馏黄金区间依然惨败。
+
+  2. 自 GRPO 教师（Self-GRPO Teacher）逆转乾坤：
+     学生模型 (Qwen3-4B-Base) ──[先期少量 GRPO]──> 自 GRPO 检查点
+                                                       │
+     作为教师蒸馏回 Base 模型：仅需 GRPO 1/50 的 FLOPs 即可全面复现性能！（比外部 8B 省 135.6 倍）
+
+  3. 多专家低成本合成通才：
+     数学专家 (Self-GRPO) ──┐
+                            ├──> 多教师 OPD 蒸馏 ──> 统一全能大模型
+     代码专家 (Self-GRPO) ──┘    (蒸馏阶段仅耗费专家训练 5.2% 的算力，总 FLOPs 降低 42%)
+```
+
+---
+
+## 核心机制与数学建模
+
+### 1. 严格的算力计量模型（Compute Accounting）
+设 $N_s$ 为学生模型参与矩阵乘法计算的活跃参数量，$N_t$ 为教师参数量：
+- **GRPO 算力成本**：
+  $$\text{FLOPs}_{\text{GRPO}} = 10 N_s \times \text{Tokens}$$
+  包含：自回归采样生成（$2N_s$）、Log-prob 重计算（$2N_s$）、反向传播与参数更新（$6N_s$）。
+- **OPD 算力成本**：
+  $$\text{FLOPs}_{\text{OPD}} = (10 N_s + 2 N_t) \times \text{Tokens}$$
+  在学生自身开销的基础上，严格累加冻结教师模型在每个生成 Token 上的前向传播成本（$2N_t$）。
+
+### 2. 目标函数严谨对比
+对于提示词 $q$ 与包含 $G$ 个候选采样的组 $\{o_i\}$：
+- **GRPO 目标函数**：
+  $$\mathcal{L}_{\text{GRPO}}(\theta) = -\mathbb{E}_{q, \{o_i\}} \left[ \frac{1}{G} \sum_{i=1}^G \hat{A}_i \sum_{t=1}^{|o_i|} \log \pi_\theta(o_{i,t} | q, o_{i,<t}) \right]$$
+  优势项采用组内均值扣除：$\hat{A}_i = r_i - \text{mean}(\{r_j\})$。
+- **闭式反向 KL OPD 目标函数（Top-$k$ 截断支持集，$k=16$）**：
+  在学生 Top-$k$ 词表中重新归一化学生与教师概率：
+  $$\tilde{\pi}_\theta(v|o_{i,<t}) = \frac{\pi_\theta(v|o_{i,<t})}{\sum_{u \in S_k} \pi_\theta(u|o_{i,<t})}, \quad \tilde{\pi}_T(v|o_{i,<t}) = \frac{\pi_T(v|o_{i,<t})}{\sum_{u \in S_k} \pi_T(u|o_{i,<t})}$$
+  $$\mathcal{L}_{\text{OPD}}(\theta) = \mathbb{E}_{q, \{o_i\}} \left[ \frac{1}{G} \sum_{i=1}^G \sum_{t=1}^{|o_i|} \sum_{v \in S_k} \tilde{\pi}_\theta(v) \left( \log \tilde{\pi}_\theta(v) - \log \tilde{\pi}_T(v) \right) \right]$$
+
+关键点在于：**题目的真实正确与否（$r_i$）完全不参与 $\mathcal{L}_{\text{OPD}}$ 的计算**，蒸馏全盘受制于教师的软概率图谱。
+
+```
+                          两大算法核心机制对比
+
+  对比维度               GRPO (结果强化学习)              OPD (在线策略蒸馏)
+  ────────────────────────────────────────────────────────────────────────────────
+  监督反馈形式           稀疏 0/1 判定奖励               稠密 Token 级反向 KL 散度
+  前向计算实体           仅学生模型自身                  学生模型 + 冻结教师模型 (2 N_t)
+  输出 Token 控制        生成精炼，目标导向强             易受外部教师影响产生虚胀复读
+  算力消耗特性           每步 10 N_s                     每步 10 N_s + 2 N_t (大教师代价极高)
+  多任务融合能力         联合训练梯度方差极大             支持低算力多教师软路由蒸馏
+```
+
+---
+
+## 实验结果与深度剖析
+
+### 1. 难度分层实验：破除“极难题目蒸馏更优”的误区
+研究者将 DAPO-Math-17K 数学训练集依据学生模型（Qwen3-1.7B-Base）与教师模型（Qwen3-4B-Thinking）的通过率（`mean@32`）正交划分为 8 个难度象限：
+
+```
+                 学生与教师联合解题难度 8 象限对比 (DAPO-Math)
+
+  教师高胜率 (>0.6)│  GRPO 胜（峰值准确率全面超越） │  GRPO 胜（优势随算力进一步扩大）
+  教师中胜率 (0.3) │  GRPO 胜                       │  GRPO 胜
+  教师低胜率 (<0.3)│  GRPO 胜                       │  GRPO 胜
+  教师零胜率 (=0)  │  GRPO 胜                       │  GRPO 胜
+                   └────────────────────────────────┴───────────────────────────
+                             学生解题率 = 0                  学生解题率 > 0
+```
+
+实验得出了令人震惊的反直觉结论：即使在**“学生完全解不出（=0），教师解题率极高（>0.6）”**这一理论上对蒸馏最为有利的场景下，**GRPO 在几乎所有算力节点上的准确率依然全面压制 OPD**。随着教师参数从 4B 扩大至 8B 与 32B，OPD 的算力开销成倍暴增，而学生吸收能力的饱和导致 Pareto 效率进一步恶化。
+
+### 2. 自 GRPO 教师的惊人逆转
+当教师模型不再选用外部模型，而是选用**学生自身在 GRPO 训练过程中产出的检查点**时，局面发生了翻天覆地的变化：
+
+| 训练配置路线 | 达到目标精度所需训练 FLOPs | 相对 GRPO 提速比 | 相对外部 8B OPD 提速比 | OOD 数学宏平均 (AIME/AMC) |
+| :--- | :--- | :--- | :--- | :--- |
+| **纯 GRPO 从头训练** | 1.00x (基线) | 1.0x | — | 33.9% |
+| **外部 Qwen3-8B 教师 OPD** | 2.71x (更慢更贵) | 0.37x | 1.0x | 26.5% |
+| **自 GRPO 教师 OPD (Self-GRPO)**| **0.02x (仅 1/50 算力)** | **50.0x** | **135.6x** | **34.8% (超越教师自身!)** |
+
+在数学推理任务上，使用自 GRPO 检查点作为教师，仅需 GRPO **2% 的算力（50 倍提速）**即可完全恢复模型精度，甚至在最终表现上（34.8%）超过了原本教师检查点的表现（33.9%）。这一规律在 8B 大学生模型、代码任务以及英伟达 Nemotron 模型家族中均得到了高度一致的复现。
+
+### 3. 多领域多教师整合：42% 总算力大节省
+现实中没有单一模型能够通吃所有垂直领域。若想获得兼具数学、代码、常识推理与指令遵循的通用模型：
+- **联合 GRPO 路线**：将所有领域数据混合直接进行强化学习，多任务梯度冲突与奖励尺度失衡会导致收敛极慢。
+- **多教师自 GRPO 蒸馏路线**：各领域独立训练专精 GRPO 模型，随后通过多教师 OPD 整合进统一基座。
+
+| 训练管线策略 | 覆盖领域类型 | 专精训练 FLOPs | 蒸馏阶段 FLOPs | 总算力消耗占比 | 最终各领域能力保留率 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **联合 GRPO 训练** | 数学 + 代码 (双领域) | — | — | 100% (算力基线) | 数学 33.9% / 代码 41.2% |
+| **外部 8B 教师多任务蒸馏** | 数学 + 代码 (双领域) | — | — | 118% (超额消耗) | 22.4% (严重退化复读) |
+| **多教师 OPD (自 GRPO 专家)** | 数学 + 代码 (双领域) | 52.8% | **5.2%** | **58.0% (净省 42% 算力!)** | **数学 34.2% / 代码 41.8%** |
+| **多教师 OPD (自 GRPO 专家)** | 4 领域 (数/码/知识/指令) | 92.0% | **8.0%** | **100%** | 完美对齐 4 个专精专家 |
+
+外部教师在四领域混合蒸馏中发生了毁灭性崩溃：学生模型陷入无限循环复读、英文提示下乱码输出中文等病态表征；而采用自 GRPO 专家的多教师蒸馏，**蒸馏阶段仅需专家训练 5.2% 至 8.0% 的微量算力**，即可合成各领域能力无损的通才模型，整体耗费算力较端到端联合 GRPO 缩减达 42%。
+
+---
+
+## 实践启示与工程落地
+
+1. **破除对外部大教师的盲目崇拜**：直接拿外部现成的通用大模型对小模型进行 Token 级在线蒸馏往往吃力不讨好。外部模型的思考习惯与词表分布偏置会导致学生在线生成严重虚胀变形。
+2. **“先专精、后合并”的后训练工业新范式**：企业在构建综合推理模型时，算力最优路径并非一开始就跑超大规模的全能混合 RL，而是：
+   - 第一阶段：在数学、编程、工具调用等闭环场景分别使用小算力跑轻量 GRPO 专家模型；
+   - 第二阶段：将这些同源检查点作为多教师，通过 OPD 以不足 8% 的边际算力快速打包折叠为单一通用模型。
+3. **呼吁确立以 FLOPs 为准绳的学术评测标准**：脱离了硬件无关的理论计算量，单纯比较 GPU 卡时或步数极易掩盖算法真实效率。FLOPs 计量应成为未来所有强化学习与知识蒸馏论文的核心标尺。
+:::
