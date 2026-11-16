@@ -1,0 +1,261 @@
+---
+title:
+  en: "See Every Block Once: Variance-Reduced Post-Training for Masked Diffusion Language Models"
+  zh: "每个块只看一次：掩码扩散语言模型的低方差强化学习后训练"
+description:
+  en: "Researchers from Kyoto University and RIKEN prove that random block sampling introduces massive between-group variance in MDLM reinforcement learning, and show that full-block deterministic evaluation yields an average +12.79 point jump across reasoning benchmarks."
+  zh: "京都大学与理研团队证明掩码扩散语言模型（MDLM）强化学习中的随机分块采样存在巨大的组间方差，提出每块评估一次的全块估计器，推理基准平均性能跃升 12.79 分。"
+date: 2026-11-16
+tags: ["arxiv", "ai", "cs.cl", "cs.lg", "diffusion-models", "reinforcement-learning"]
+image: "/arxiv-visuals/arxiv-see-every-block-once-variance-reduced-masked-diffusion.png"
+---
+
+:::en
+**Paper**: [2611.17754](https://arxiv.org/abs/2611.17754)
+**Authors**: Yunzhen He, Hiroaki Yamagiwa, Hidetoshi Shimodaira
+**Categories**: cs.CL, cs.LG
+
+## The Gap
+
+Masked Diffusion Language Models (MDLMs) are emerging as high-speed, non-autoregressive alternatives to standard autoregressive transformers. By casting sequence generation as iteratively unmasking tokens via an absorbing-state diffusion process, MDLMs can generate text in flexible, non-left-to-right orders. To achieve high generative coherence, modern systems partition sequences of length $L$ into $C$ sequential blocks of size $B$ ($L = B \times C$).
+
+However, aligning MDLMs with human preferences via reinforcement learning (RL) has been plagued by severe optimization instability:
+- Unlike autoregressive models where policy gradients use exact token log-probabilities $\sum \log p(y_t | y_{<t})$, discrete diffusion log-likelihoods are intractable.
+- Post-training must rely on a Monte Carlo surrogate of the Evidence Lower Bound (ELBO): $\mathcal{L}_{\text{Block}}$.
+- Current post-training algorithms (such as SPG and random block baselines) estimate this surrogate by uniformly sampling random block indices $b_k \sim \text{Unif}(\\{{0, \dots, C-1\\}})$ across $K$ Monte Carlo trials.
+
+When the number of blocks is modest ($C \in \\{{2, 4, 8\\}}$) and sample budget is constrained ($K = C = 4$), random sampling causes catastrophic **block miss rates**: in 91% of trials, at least one entire block is never sampled, while others are sampled redundantly. This induces massive **between-group variance** $\sigma^2_{\text{between}}$ across blocks, injecting severe gradient noise that paralyzes policy gradient updates.
+
+```
+[ Problem: Policy Gradient Post-Training of MDLMs Suffers Extreme Instability ]
+                                      |
+                                      v
+[ Flawed Practice: Estimate Blockwise ELBO by Randomly Sampling Block Indices bk ]
+                                      |
+                                      v
+[ Failure Mode: 91% Probability of Missing Blocks -> Massive Between-Group Variance ]
+                                      |
+                                      v
+[ Theoretical Insight: Variance decomposes into Var_between + Var_within ]
+                                      |
+                                      v
+[ Method: "See Every Block Once" (SEBO) Full-Block Deterministic Estimator ]
+                                      |
+                                      v
+[ Evidence: +12.79 pts Avg over Random Sampling; Matches K=32 Precision at K=4 ]
+                                      |
+                                      v
+[ Conclusion: Estimator Topology, Not Just Loss Objective, Dictates RL Convergence ]
+```
+
+## The Increment
+
+**One sentence**: By replacing random block index sampling with a deterministic full-block estimator that evaluates every block exactly once, this paper mathematically eliminates between-group block-selection variance while preserving unbiasedness, delivering an average +12.79 point accuracy gain across five reasoning benchmarks.
+
+### Core Mechanism
+
+Consider an output sequence of $L$ tokens divided into $C = L/B$ blocks. In blockwise generation, when generating block $b$, all prior blocks ($b' < b$) are conditioned upon as fixed context, within-block tokens are masked with ratio $t_b \in (0, 1]$, and all downstream blocks ($b' > b$) remain fully masked.
+
+The true blockwise surrogate objective is:
+$$\mathcal{L}_{\text{Block}}(o | c; \theta) = \mathbb{E}_{b, t_b, M_{t_b}} [\ell_{b, t_b, M_{t_b}}(o, c; \theta)]$$
+
+Existing methods compute a Monte Carlo estimate with $K$ random draws:
+$$\hat{\mathcal{L}}_{\text{Rand}} = \frac{1}{K} \sum_{k=1}^K \ell_{b_k, t_k, M_k}, \quad b_k \sim \text{Unif}(\\{{0, \dots, C-1\\}})$$
+
+Using the law of total variance, the variance of this random estimator decomposes into:
+$$\text{Var}[\hat{\mathcal{L}}_{\text{Rand}}] = \frac{1}{K} \left( \sigma^2_{\text{between}} + \bar{\sigma}^2_{\text{within}} \right)$$
+where $\sigma^2_{\text{between}} = \frac{1}{C}\sum_{b=0}^{C-1} (\mu_b - \bar{\mu})^2$ measures the discrepancy in loss magnitudes across different blocks (e.g., initial reasoning steps vs. final answers), and $\bar{\sigma}^2_{\text{within}}$ is the mean intra-block stochastic masking variance.
+
+The authors propose the **Full-Block Estimator** $\hat{\mathcal{L}}_{\text{Full}}$:
+$$\hat{\mathcal{L}}_{\text{Full}}(o | c; \theta) = \frac{1}{C} \sum_{b=0}^{C-1} \ell_{b, t_b, M_{t_b}}(o, c; \theta)$$
+where each block $b \in \\{{0, \dots, C-1\\}}$ is visited **deterministically and exactly once**, while masking ratios $t_b$ and mask sets $M_{t_b}$ remain independently sampled per block.
+
+Because the block index is no longer a random variable:
+$$\text{Var}[\hat{\mathcal{L}}_{\text{Full}}] = \frac{\bar{\sigma}^2_{\text{within}}}{C}$$
+The between-group variance $\sigma^2_{\text{between}}$ is **identically zero**. At matched sample size $K = C$:
+$$\frac{\text{Var}[\hat{\mathcal{L}}_{\text{Full}}]}{\text{Var}[\hat{\mathcal{L}}_{\text{Rand}}]} = \frac{\bar{\sigma}^2_{\text{within}}}{\sigma^2_{\text{between}} + \bar{\sigma}^2_{\text{within}}} \le 1$$
+
+```
+Random Sampling (Baseline, K=4):
+  Draw 1: Block 0  |  Draw 2: Block 2  |  Draw 3: Block 0  |  Draw 4: Block 2
+  Result: Block 1 and Block 3 are completely ignored!
+  Gradient noise: High between-block error sigma^2_between corrupts update.
+
+Full-Block Estimator (SEBO, C=4):
+  Step 0: Block 0  |  Step 1: Block 1  |  Step 2: Block 2  |  Step 3: Block 3
+  Result: Every block evaluated exactly once.
+  Gradient noise: sigma^2_between is mathematically wiped to 0. Unbiased.
+```
+
+**Structural Metaphor**: Imagine a health inspector auditing a 4-station commercial kitchen (Prep, Grill, Fryer, Dishwashing) with a budget of 4 checks. A careless inspector (random sampling) rolls a 4-sided die four times and ends up checking Prep twice and Grill twice, completely missing the Fryer and Dishwashing stations. If the uninspected Dishwashing station has a severe leak, the audit report is wildly unrepresentative of the kitchen's true hygiene. In contrast, the methodical inspector (SEBO) walks through every single station in sequence, spending one check on Prep, one on Grill, one on Fryer, and one on Dishwashing. The inspection covers the exact same number of checks (4), but station-selection variance is eliminated, giving a reliable, unbiased, and vastly more accurate appraisal of kitchen quality.
+
+### Key Concepts
+
+- **Absorbing-State Diffusion**: A discrete diffusion formulation where tokens transition irreversibly into a special mask token $\textsf{M}$ during the forward process, rather than adding Gaussian noise to continuous vectors.
+- **Between-Group vs. Within-Group Variance**: In stratified statistics, total variance splits into variance *between* strata (differences in expected loss across sequence blocks) and variance *within* strata (randomness in token masking positions for a given block). SEBO annihilates between-strata variance by exhaustive stratification.
+- **Block Miss Rate**: The probability $1 - \frac{C! S_2(K, C)}{C^K}$ (where $S_2$ is the Stirling number of the second kind) that at least one block receives zero evaluations under $K$ random draws. At $K=C=4$, this failure probability is 91.4%.
+
+## Framework Shift
+
+```
+Before (Random Block RL Surrogate):
+  Sequence ---> Random Choice b in {0,1,2,3} x 4 ---> Missed Blocks ---> Gradient Variance Spike
+  [Empirical Precision: Requires K = 32 Monte Carlo samples to reach Spearman rho = 0.89]
+
+After (See Every Block Once - SEBO):
+  Sequence ---> Deterministic Permutation over all b in [0, C-1] ---> Full Uniform Coverage
+  [Empirical Precision: Achieves Spearman rho = 0.88 at K = 4 samples (8x sample efficiency)]
+```
+
+One sentence: From stochastic block selection that leaves sequences partially uninspected to exhaustive single-visit stratification, the core shift is eliminating between-block sampling variance to stabilize diffusion policy gradients.
+
+## Expert Assessment
+
+- **Problem choice**: High-impact and timely. As the field seeks architectures beyond autoregressive token-by-token generation, diffusion language models have stumbled at the post-training alignment barrier. Fixing policy gradient variance is the make-or-break bottleneck for MDLMs.
+- **Method maturity**: Elegantly minimalist. The paper does not add neural networks, auxiliary critics, or hyperparameter schedules; it performs a clean, exact variance reduction on the estimator itself. A key unexamined assumption is that all blocks deserve equal evaluation weight ($1/C$); in practice, early planning tokens in long chains-of-thought may have higher variance and leverage than later repetitive formatting tokens.
+- **Experimental integrity**: Thorough and rigorous. Testing on LLaDA-8B-Instruct across GSM8K, MATH-500, Countdown, Sudoku, and HumanEval isolates the estimator effect cleanly against identical loss baselines ($\hat{\mathcal{L}}_{\text{Rand}}$ vs $\hat{\mathcal{L}}_{\text{Full}}$). The ablation delivers a crushing margin on complex constraint satisfaction (+30.19 points on Sudoku: 91.39 vs 61.20) and shows an 8x reduction in required Monte Carlo steps (K=4 achieves K=32 correlation).
+- **Writing quality**: Exemplary clarity. The statistical derivations are textbook-grade, transparent, and reproducible.
+- **Verdict**: **Strong Accept**. A definitive methodological improvement that will become standard practice in all future masked diffusion language model post-training pipelines.
+
+## Takeaways
+
+- **Audit your Monte Carlo estimators**: In RL for non-autoregressive or hierarchical architectures, check whether your surrogate loss samples indices randomly with replacement. Deterministic stratification over partitions eliminates between-group variance for free.
+- **Sample efficiency without compute overhead**: SEBO matches the ranking fidelity of an 8x larger Monte Carlo sample size ($K=32$) with just $K=4$, cutting training compute drastically.
+- **Diffusion models excel at global constraints when variance is tamed**: The 91.39% score on Sudoku demonstrates that discrete diffusion models have superior bidirectional constraint reasoning over autoregressive models once RL gradient noise is suppressed.
+:::
+
+:::zh
+**论文**: [2611.17754](https://arxiv.org/abs/2611.17754)
+**作者**: Yunzhen He, Hiroaki Yamagiwa, Hidetoshi Shimodaira
+**分类**: cs.CL, cs.LG
+
+## 缺口
+
+掩码扩散语言模型（Masked Diffusion Language Models, MDLMs）凭借非自回归的并行解码能力与全局上下文双向注意机制，正在成为挑战传统自回归 Transformer 的核心力量。
+为了在长文本生成中兼顾全局规划与局部连贯性，前沿架构普遍采用**分块生成策略（Blockwise Generation）**，将长度为 $L$ 的序列划分为 $C$ 个长度为 $B$ 的语义块（$L = B \times C$）。
+
+然而，当利用强化学习（RL，如 GRPO/PPO）对 MDLM 进行人类偏好对齐后训练时，研究者遭遇了极度严重的训练不稳定与策略梯度崩溃：
+- 与自回归模型能够精确计算逐 Token 对数似然 $\sum \log p(y_t | y_{<t})$ 不同，离散扩散模型的边际似然在计算上是不可解析的。
+- 强化学习必须依赖于基于证据下界（ELBO）的分块代理目标函数 $\mathcal{L}_{\text{Block}}$。
+- 现有算法（包括 Meta 的 SPG 以及主流随机分块基线）在计算该代理损失时，采用蒙特卡洛随机采样：在 $K$ 次采样中独立均匀地抽取分块索引 $b_k \sim \text{Unif}(\\{{0, \dots, C-1\\}})$。
+
+当序列分块数较小（如 $C \in \\{{2, 4, 8\\}}$）且计算预算受限（$K = C = 4$）时，随机采样会导致灾难性的**分块漏检（Block Miss）**：
+数学证明在 $K=C=4$ 时，**至少有一个完整分块完全未被采样的概率高达 91%**，而其他分块则被重复评估。
+这种采样偏差在分块之间引入了巨大的**组间方差（Between-Group Variance）** $\sigma^2_{\text{between}}$，向策略梯度注入了剧烈的随机噪声，直接导致强化学习震荡与性能劣化。
+
+```
+[ 现实困境：掩码扩散模型（MDLM）强化学习对齐面临严重的梯度方差崩溃 ]
+                                       |
+                                       v
+[ 惯常做法：在蒙特卡洛评估分块 ELBO 代理目标时，随机抽取分块索引 bk ]
+                                       |
+                                       v
+[ 致命缺陷：在小样本下 91% 的概率漏掉关键块，产生巨大的组间方差 ]
+                                       |
+                                       v
+[ 统计学洞见：总方差精准分解为组间方差 Var_between 与组内方差 Var_within ]
+                                       |
+                                       v
+[ 解决方案：SEBO 全块确定性估计器，每个分块确定性评估且仅评估一次 ]
+                                       |
+                                       v
+[ 实证突破：基准平均暴涨 12.79 分；K=4 即可逼近随机采样 K=32 的精度 ]
+                                       |
+                                       v
+[ 核心结论：在离散扩散 RL 中，估计器的拓扑设计决定了算法学习上限 ]
+```
+
+## 增量
+
+**一句话**: 本文通过提出确定性遍历所有分块且仅评估一次的全块估计器（SEBO），在严格保持目标无偏性的前提下数学消除组间采样方差，使 MDLM 在五大推理基准上的平均精度提升 12.79 分。
+
+### 核心机制
+
+设模型生成的输出序列包含 $L$ 个 Token，划分为 $C = L/B$ 个分块。
+在分块生成过程中，评估第 $b$ 块时，前序分块（$b' < b$）作为已知上下文全保留，当前块按时间步 $t_b \in (0, 1]$ 掩码部分 Token，而后序未生成分块（$b' > b$）则全部保持掩码状态。
+
+真实的分块代理目标函数为：
+$$\mathcal{L}_{\text{Block}}(o | c; \theta) = \mathbb{E}_{b, t_b, M_{t_b}} [\ell_{b, t_b, M_{t_b}}(o, c; \theta)]$$
+
+现有方法采用 $K$ 次独立同分布的随机蒙特卡洛抽样进行估计：
+$$\hat{\mathcal{L}}_{\text{Rand}} = \frac{1}{K} \sum_{k=1}^K \ell_{b_k, t_k, M_k}, \quad b_k \sim \text{Unif}(\\{{0, \dots, C-1\\}})$$
+
+根据全方差定律（Law of Total Variance），每个采样的总方差分解为：
+$$\text{Var}[\hat{\mathcal{L}}_{\text{Rand}}] = \frac{1}{K} \left( \sigma^2_{\text{between}} + \bar{\sigma}^2_{\text{within}} \right)$$
+其中组间方差 $\sigma^2_{\text{between}} = \frac{1}{C}\sum_{b=0}^{C-1} (\mu_b - \bar{\mu})^2$ 刻画了不同位置分块（如起步推理与最终结论）损失期望的内在离散度；而 $\bar{\sigma}^2_{\text{within}}$ 为块内随机掩码位置带来的方差均值。
+
+作者提出的**全块估计器（Full-Block Estimator, SEBO）**定义为：
+$$\hat{\mathcal{L}}_{\text{Full}}(o | c; \theta) = \frac{1}{C} \sum_{b=0}^{C-1} \ell_{b, t_b, M_{t_b}}(o, c; \theta)$$
+这里分块索引 $b$ **完全确定性地遍历 $\\{{0, \dots, C-1\\}}$ 中的每一个数值且仅出现一次**，各块内的掩码比例 $t_b$ 与掩码子集 $M_{t_b}$ 依然保持块间独立采样。
+
+由于分块索引不再具备随机性，其方差坍缩为：
+$$\text{Var}[\hat{\mathcal{L}}_{\text{Full}}] = \frac{\bar{\sigma}^2_{\text{within}}}{C}$$
+组间方差 $\sigma^2_{\text{between}}$ 被**严格归零**。
+在相同评估预算 $K = C$ 下，方差比值为：
+$$\frac{\text{Var}[\hat{\mathcal{L}}_{\text{Full}}]}{\text{Var}[\hat{\mathcal{L}}_{\text{Rand}}]} = \frac{\bar{\sigma}^2_{\text{within}}}{\sigma^2_{\text{between}} + \bar{\sigma}^2_{\text{within}}} \le 1$$
+
+```
+随机抽样基线（K = 4 采样）：
+  抽样 1: 块 0  |  抽样 2: 块 2  |  抽样 3: 块 0  |  抽样 4: 块 2
+  结果：块 1 和 块 3 完全被遗漏！
+  梯度噪声：巨大的组间波动 sigma^2_between 污染参数更新。
+
+全块估计器 SEBO（C = 4 确定性遍历）：
+  评估 0: 块 0  |  评估 1: 块 1  |  评估 2: 块 2  |  评估 3: 块 3
+  结果：每个分块不偏不倚全部覆盖。
+  梯度噪声：组间方差数学归零，目标严格保持无偏。
+```
+
+**核喻（后厨卫生四岗位巡检）**：
+将序列分块评估比作**食品安全检查员对包含 4 个工作区（备菜区、烤架区、油炸区、洗碗区）的大型后厨进行抽样检查**。
+如果检查员采取随意抽查（随机采样），掷 4 次 4 面骰子，很可能出现备菜区看了两次、烤架区看了两次，而油炸区和洗碗区看都没看的情况。
+假如洗碗区存在严重的排污回流，这份检查报告就会对后厨卫生状态产生灾难性的误判，评分忽高忽低。
+而严谨的检查员（SEBO 全块估计器）则制定严格的路线：虽然总共只检查 4 次，但他依次踏进备菜区、烤架区、油炸区和洗碗区，每个工位恰好检查一次。
+虽然检查总成本完全相同（都是 4 次检查），但彻底消除了由于“踩点运气不好”带来的虚假方差，能够最忠实、最稳定地反映真实的卫生水平。
+
+### 关键概念
+
+- **吸收态扩散过程（Absorbing-State Diffusion）**：离散扩散模型的前向加噪过程，序列中的原始词元不加连续高斯噪声，而是按照概率不可逆地替换为特殊的掩码符号 $\textsf{M}$。
+- **组间方差与组内方差（Between vs. Within Variance）**：分层统计学概念。
+组间方差衡量不同文本位置（如前缀、思维主干、结论）本身损失难度的剧烈差异；组内方差衡量相同位置内部不同掩码组合的随机扰动。
+SEBO 巧妙地通过完备分层彻底清零了组间方差。
+- **分块遗漏概率（Block Miss Probability）**：在独立均匀采样 $K$ 次且分块数为 $C$ 时，至少漏掉一个块的概率公式为 $1 - \frac{C! S_2(K, C)}{C^K}$（其中 $S_2$ 为第二类斯特林数）。
+当 $K=C=4$ 时，漏检率高达惊人的 91.4%。
+
+## 框架转变
+
+```
+之前（随机采样蒙特卡洛代理）：
+  输入序列 ---> 随机抽取 b in {0,1,2,3} 重复 4 次 ---> 91% 出现漏检块 ---> 梯度方差剧增
+  [评估质量：需要采样 K = 32 次才能让 Spearman 秩相关系数达到 0.89]
+
+之后（SEBO 确定性全块估计器）：
+  输入序列 ---> 确定性遍历所有 b in [0, C-1] ---> 全域无死角均匀覆盖
+  [评估质量：仅需 K = 4 即可达到 Spearman rho = 0.88，带来 8 倍的样本效率跃升]
+```
+
+一句话：从依赖运气的随机分块抽样转向确定性单次遍历分层覆盖，核心转变在于通过数学消除组间采样方差来稳固扩散模型的策略梯度。
+
+## 专家评审
+
+- **选题眼光**：极其敏锐。
+非自回归离散扩散模型是公认的生成式 AI 关键突破方向之一，但在转向 RL 对齐时屡屡受挫。
+团队精准诊断出训练波动的根源不是模型容量不够，而是代理损失的蒙特卡洛估计器自身具有过大的组间采样方差，选题极具学术与工程穿透力。
+- **方法成熟度**：返璞归真。
+没有引入复杂的辅助判别器、额外的神经网络超参数或复杂的学习率调度，仅仅修改了采样估计器的拓扑遍历逻辑，就完成了严格的方差消除。
+唯一值得商榷的预设是：算法默认所有分块对总损失的贡献权重是均等的（$1/C$）；但在实际复杂推理任务中，前序的长链规划分块往往对全局轨迹具有决定性影响，未来的演进方向或许可以探索非均匀但非随机的自适应加权。
+- **实验诚意**：扎实完备。
+以 LLaDA-8B-Instruct 为底座，在 GSM8K、MATH-500、Countdown、Sudoku 和 HumanEval 上展开严格对比。
+消融实验对比鲜明：仅将随机估计器更换为全块估计器，数独（Sudoku）准确率直接从 61.20% 飙升至 91.39%（净增 30.19 分），全基准平均狂涨 12.79 分。
+同时理论预测的方差比值与实测数据高度吻合。
+- **写作功力**：数学符号精炼规范，定理推导一气呵成，实验对比图表直观且极具说服力。
+- **判决**：**强接收（Strong Accept）**。
+不仅理论上无懈可击，而且代码修改代价极小、性能增益极大，必将成为未来所有掩码扩散模型强化学习训练的标准范式。
+
+## 要点总结
+
+- **严密审查你代码库里的蒙特卡洛估计器**：在对任何分块或分层架构实施强化学习代理损失优化时，排查是否存在有放回的随机采样。
+采用确定性的完备分层遍历，可以零成本消灭组间方差。
+- **用采样结构换取 8 倍计算效率**：SEBO 仅需 $K=4$ 的算力开销，就能换来随机采样需要 $K=32$ 才能达到的排序精确度，将 MDLM 后训练的显存与时间浪费大幅砍半。
+- **消解梯度噪声后扩散模型的双向约束优势尽显**：在数独任务上斩获 91.39% 的极高胜率，有力证实了离散扩散模型在处理全局约束和回溯推理问题时，天生具备超越单向自回归模型的结构潜力。
+:::
