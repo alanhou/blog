@@ -1,0 +1,272 @@
+---
+title:
+  en: "Policy Optimization With Multiple Verifiers via Pareto Rankings"
+  zh: "多重验证器下的策略优化：基于帕累托偏序排名的无标量化强化学习"
+description:
+  en: "Researchers from the University of Tokyo propose POLPO, a reinforcement learning framework that replaces scalarized rewards with Pareto dominance partial orders and Plackett-Luce likelihoods, accelerating multi-verifier reasoning and code generation."
+  zh: "东京大学松尾研究所团队提出 POLPO 框架，在多重验证器场景下彻底摒弃标量化奖励聚合，利用帕累托支配偏序与 Plackett-Luce 线性扩展似然最大化，显著提升大模型代码生成与复杂指令遵循的对齐效率。"
+date: 2026-11-18
+tags: ["arxiv", "ai", "cs.ai", "cs.lg", "reinforcement-learning", "rlvr", "code-generation", "pareto-optimization"]
+image: "/arxiv-visuals/arxiv-polpo-policy-optimization-multiple-verifiers-pareto-rankings.png"
+---
+
+:::en
+**Paper**: [2611.19064](https://arxiv.org/abs/2611.19064)
+**Authors**: Kai Yamashita, Shohei Taniguchi, Hiroki Furuta, Masahiro Suzuki, Yutaka Matsuo
+**Categories**: cs.AI, cs.LG
+
+## The Gap
+
+Reinforcement Learning with Verifiable Rewards (RLVR)—the driving engine behind DeepSeek-R1 and OpenAI's reasoning breakthroughs—relies on objective programmatic verifiers to guide policy optimization. In realistic environments like software synthesis, robotic planning, and multi-constraint instruction following, an agent must satisfy **multiple heterogeneous verifiers** $c(x, y) = (c_1, \dots, c_K) \in \\{{0, 1\\}}^K$ (e.g., unit tests, syntax linters, execution time bounds, and formatting criteria).
+
+The standard paradigm aggressively collapses this multidimensional feedback vector into a single **scalar reward** $r(x, y) = g(c(x, y))$. This lossy scalarization introduces two destructive learning pathologies:
+1. **The All-Pass Dilemma ($r_{\text{all}} = \prod c_k$)**: When tasks are complex, early rollouts pass zero complete solutions. Every rollout receives reward 0, advantages vanish identically ($\nabla_\theta J = 0$), and the policy receives zero gradient signal from partial breakthroughs.
+2. **The Flawed Trade-Off Dilemma ($r_{\text{rate}} = \frac{1}{K}\sum c_k$)**: A pass-rate reward assigns equal value to passing Test 1 while failing Test 2, versus failing Test 1 while passing Test 2. Scalar weighting forces an artificial exchange rate between incomparable requirements, confusing gradient updates.
+
+Existing preference methods (such as DPO) require pairwise linear orderings, leaving the policy optimizer blind to the natural **partial order** defined by multi-verifier pass/fail sets.
+
+```
+[ Problem: Multi-Verifier Feedback Collapses into Scalar Rewards in RLVR ]
+                                    |
+                                    v
+[ Flawed Practice: All-Pass Zero Signal or Pass-Rate Arbitrary Trade-offs ]
+                                    |
+                                    v
+[ Failure Mode: Vanishing Gradients Early in Training; Misaligned Baselines ]
+                                    |
+                                    v
+[ Core Insight: Multi-verifier outcomes form a natural strict Partial Order ]
+                                    |
+                                    v
+[ Method: POLPO -- Pareto Dominance + Plackett-Luce Linear Extension Likelihood ]
+                                    |
+                                    v
+[ Evidence: Solves FizzBuzz in 98k vs >512k steps; Outperforms GRPO across MBPP & APPS ]
+                                    |
+                                    v
+[ Conclusion: Supervision directly on partial orders avoids scalarization bias ]
+```
+
+## The Increment
+
+**One sentence**: By representing multi-verifier outcomes as a strict Pareto dominance partial order and maximizing the joint Plackett-Luce likelihood over all compatible linear extensions, this paper eliminates the need for scalar reward aggregation, accelerating policy convergence and achieving superior pass rates on coding and instruction-following benchmarks.
+
+### Core Mechanism
+
+The authors develop **POLPO** (Partial-Order Likelihood Policy Optimization), structured into three core mathematical components:
+
+1. **Pareto Dominance Partial Orders**:
+   Given a group of $N$ candidate responses $Y = (y_1, \dots, y_N)$ to prompt $x$, evaluated on $K$ binary verifiers yielding vectors $c_i \in \\{{0, 1\\}}^K$, response $y_i$ Pareto-dominates $y_j$ ($y_i \succ_P y_j$) if and only if:
+   $$\forall k, c_{ik} \ge c_{jk} \quad \wedge \quad \exists k, c_{ik} > c_{jk}$$
+   If $y_i$ passes Test 1 and fails Test 2, while $y_j$ fails Test 1 and passes Test 2, **neither dominates the other**. The pair remains deliberately **incomparable**. The resulting relation $R_V = \\{{(i, j) : y_i \succ_P y_j\\}}$ is a strict partial order (irreflexive and transitive).
+2. **Implicit DPO Policy Scoring**:
+   Building on Direct Preference Optimization, each response $y$ is scored via its implicit reward relative to reference policy $\pi_{\text{ref}}$:
+   $$s_\theta(x, y) = \beta \log \frac{\pi_\theta(y | x)}{\pi_{\text{ref}}(y | x)}$$
+3. **Plackett-Luce Likelihood over Linear Extensions**:
+   A complete permutation $\sigma = (\sigma_1, \dots, \sigma_N)$ from best to worst has Plackett-Luce probability:
+   $$p^{\text{PL}}_\theta(\sigma | x, Y) = \prod_{k=1}^{N-1} \frac{\exp(s_{\sigma_k})}{\sum_{j=k}^N \exp(s_{\sigma_j})}$$
+   Crucially, because $R_V$ is a partial order, there exists a set $\text{LE}(R_V)$ of all complete permutations (linear extensions) compatible with $R_V$. POLPO defines the likelihood of the observed partial order as the sum of probabilities of all compatible rankings, minimizing the negative log-likelihood:
+   $$\mathcal{L}_{\text{POLPO}}(\theta) = - \log \sum_{\sigma \in \text{LE}(R_V)} p^{\text{PL}}_\theta(\sigma | x, Y)$$
+
+```
+Sample Rollouts:  y1: (Pass, Pass, Fail)  |  y2: (Fail, Fail, Pass)  |  y3: (Pass, Fail, Fail)
+                                   |
+Pareto Dominance:                  v
+                     y1 dominates y3 (Passes extra test!)
+                     y2 is incomparable with both y1 and y3!
+                                   |
+Strict Partial Order R_V:          v
+                     Established: y1 > y3
+                     Compatible Rankings LE(R_V):
+                       1) y1 > y2 > y3
+                       2) y1 > y3 > y2
+                       3) y2 > y1 > y3
+                                   |
+Plackett-Luce Model:               v
+       Compute Implicit Policy Scores s_i = beta * log(pi_theta / pi_ref)
+                                   |
+POLPO Objective:                   v
+       Loss = - log [ P_PL(Rank 1) + P_PL(Rank 2) + P_PL(Rank 3) ]
+       --> Backpropagate directly into pi_theta without scalar rewards!
+```
+
+**Structural Metaphor**: Imagine an admissions committee evaluating applicants across three independent criteria: Mathematics, Creative Writing, and Coding. A flawed administrative rubric (scalar reward aggregation) assigns arbitrary points, declaring a student with 100 Math and 0 Writing equal to a student with 50 Math and 50 Writing. An inexperienced clerk (all-pass reward) rejects all students because nobody scored 100 on all three. The POLPO committee operates with Pareto integrity: If Applicant A beats Applicant B in Coding while tying in Math and Writing, A is strictly ranked above B. If Applicant C excels in Writing but lags in Math compared to A, the committee refuses to invent an arbitrary conversion rate. Instead, it aggregates all fair rankings where verified superiorities hold, updating admissions standards to incentivize simultaneous excellence without sacrificing individual competencies.
+
+### Key Concepts
+
+- **Pareto Dominance**: A multi-objective relation where an alternative is superior if it improves at least one criterion without degrading any other criterion.
+- **Linear Extension**: A total ordering of elements that is consistent with a given partial order; in POLPO, summing over all linear extensions naturally marginalizes out unconstrained comparisons.
+- **Plackett-Luce (PL) Model**: A probability distribution over permutations where items are selected sequentially without replacement in proportion to exponentiated latent quality scores.
+
+## Framework Shift
+
+```
+Before (Scalar Reward Aggregation in GRPO):
+  Verification Vectors c_i ---> Weighted Sum / Product ---> Scalar Reward r_i
+                                                                 |
+                                                                 v
+  [Information lost: conflates incompatible subsets; zero advantage if all fail]
+
+After (Partial-Order Likelihood in POLPO):
+  Verification Vectors c_i ---> Pareto Partial Order R_V ---> Sum over Linear Extensions
+                                                                 |
+                                                                 v
+  [No scalarization: preserves partial progress; zero false trade-offs; robust gradients]
+```
+
+One sentence: From squeezing multidimensional verifier feedback into a flawed scalar reward to optimizing the Plackett-Luce likelihood of Pareto partial orders, the core shift is learning from verified improvements without enforcing arbitrary trade-offs between conflicting goals.
+
+## Expert Assessment
+
+- **Problem choice**: Exceptional. As RLVR expands from simple math problems (where a single ground truth exists) to complex software engineering and multi-agent coordination, handling dozens of independent verifiers without scalar reward hacking is a premier challenge.
+- **Method maturity**: Mathematically rigorous and elegant. Connecting Pareto dominance, topological sorting, and listwise Plackett-Luce extensions creates a clean, principled bridge between multi-objective optimization and Direct Preference Optimization. A practical consideration is combinatorial complexity: computing all linear extensions $\text{LE}(R_V)$ for large rollout groups ($N > 10$) with intricate partial orders could become computationally demanding, necessitating sampling approximations.
+- **Experimental integrity**: Outstanding execution. The controlled FizzBuzz experiment cleanly isolates the learning dynamics, proving that POLPO solves the problem in 98k rollouts while scalar GRPO fails within 512k. On MBPP and APPS Introductory across Qwen3-0.6B, Qwen3-4B, and Qwen2.5-Coder-1.5B, POLPO consistently outperforms GRPO-All, GRPO-Rate, GDPO, and DPO-Pareto.
+- **Writing quality**: Clear, systematic, and well-structured, with intuitive pedagogical diagrams and comprehensive mathematical appendices.
+- **Verdict**: **Strong Accept**. A pioneering advancement in multi-verifier reinforcement learning that provides the correct mathematical framework for complex reasoning alignment.
+
+## Takeaways
+
+- **Never average binary test suites into a scalar pass rate**: A pass rate of 50% hides whether a model passed difficult edge cases or trivial sanity tests; Pareto dominance preserves true verification topology.
+- **Don't wait for complete solutions**: All-pass rewards starve models of gradient signal early in training; partial-order likelihood extracts full supervisory value from partial breakthroughs.
+- **Incomparability is a feature, not a bug**: When two code solutions pass different, non-overlapping tests, do not force an artificial ranking between them; marginalizing over compatible linear extensions respects their mutual validity.
+:::
+
+:::zh
+**论文**: [2611.19064](https://arxiv.org/abs/2611.19064)
+**作者**: Kai Yamashita, Shohei Taniguchi, Hiroki Furuta, Masahiro Suzuki, Yutaka Matsuo
+**分类**: cs.AI, cs.LG
+
+## 缺口
+
+以 DeepSeek-R1 为代表的可验证奖励强化学习（RLVR）已成为激活大语言模型复杂推理与代码生成能力的核心引擎。
+然而，在软件工程、长程具身规划与复杂格式遵循等真实工业任务中，环境往往包含**多重异构验证器（Multiple Verifiers）**，输出布尔反馈向量 $c(x, y) = (c_1, \dots, c_K) \in \\{{0, 1\\}}^K$（如单元测试集、边界检查、时间限制、语法规范）。
+
+当前学术界与工业界的标准做法是将这个多维反馈向量粗暴压缩为单一**标量奖励** $r(x, y) = g(c(x, y))$。
+这种标量化处理直接引发了两大约束对齐的系统性病态：
+1. **全通困境（All-Pass Dilemma，$r_{\text{all}} = \prod c_k$）**：要求模型必须通过所有测试才给予奖励。在复杂任务训练初期，所有生成结果几乎无一全通，导致所有候选解的优势函数全部归零（$\nabla_\theta J = 0$），强化学习完全丧失探索梯度。
+2. **错误折衷困境（Pass-Rate Dilemma，$r_{\text{rate}} = \frac{1}{K}\sum c_k$）**：若采用均值通过率，模型通过测试 1 挂掉测试 2，与挂掉测试 1 通过测试 2 得到完全相同的标量奖励。人为设置的加权和强行在不可比的测试项之间划定了虚假的交换率，严重误导策略梯度的更新方向。
+
+现有的偏好对齐框架（如 DPO）强制要求两两之间具备完全线性序，无法直接适配多验证器天然诱导出的**严格偏序（Partial Order）**结构。
+
+```
+[ 现实困境：多重验证器反馈被粗暴标量化，导致强化学习病态震荡 ]
+                                    |
+                                    v
+[ 惯常做法：采用全通奖励（无渐进信号）或通过率均值（强加虚假折衷） ]
+                                    |
+                                    v
+[ 致命缺陷：训练初期梯度消失，或在互不兼容的部分解之间强行分配权重 ]
+                                    |
+                                    v
+[ 核心洞见：多验证器通过状态在数学上构成自然的严格帕累托偏序 ]
+                                    |
+                                    v
+[ 解决方案：POLPO -- 帕累托支配 + Plackett-Luce 线性扩展全概率最大化 ]
+                                    |
+                                    v
+[ 实证突破：FizzBuzz 训练收敛快 5 倍；全面超越 GRPO、GDPO 与 DPO-Pareto ]
+                                    |
+                                    v
+[ 核心结论：直接在偏序拓扑上优化似然，彻底告别标量奖励的设计内耗 ]
+```
+
+## 增量
+
+**一句话**: 本文提出偏序似然策略优化框架（POLPO），将多验证器反馈构建为严格帕累托支配偏序，并通过最大化所有合法线性扩展在 Plackett-Luce 模型下的联合似然，彻底摆脱了标量化奖励聚合，在代码生成与指令遵循任务上实现了更高效的全面达标率。
+
+### 核心机制
+
+该方法摒弃了奖励模型（Reward Model）与标量加权函数，由三个环环相扣的理论步骤构成：
+
+1. **基于帕累托支配的严格偏序构建**：
+   对于提示词 $x$ 采样得到的 $N$ 个候选回答 $Y = (y_1, \dots, y_N)$，其在 $K$ 个验证器上的通过向量为 $c_i \in \\{{0, 1\\}}^K$。
+   回答 $y_i$ 帕累托支配 $y_j$（记作 $y_i \succ_P y_j$），当且仅当：
+   $$\forall k, c_{ik} \ge c_{jk} \quad \wedge \quad \exists k, c_{ik} > c_{jk}$$
+   即 $y_i$ 至少多通过了一项测试，且未在任何测试上退步。
+   若两份代码各通过了一部分互不相同的测试集，则**双方互不支配，保持不可比状态（Incomparable）**。
+   以此诱导出严格偏序集 $R_V = \\{{(i, j) : y_i \succ_P y_j\\}}$。
+2. **基于 DPO 隐式奖励的模型打分**：
+   借鉴直接偏好对齐（DPO）思想，使用当前策略与参考策略的对数几率比定义每个候选回答的隐式得分：
+   $$s_\theta(x, y) = \beta \log \frac{\pi_\theta(y | x)}{\pi_{\text{ref}}(y | x)}$$
+3. **线性扩展全概率的 Plackett-Luce 似然优化**：
+   由隐式得分诱导出排列的 Plackett-Luce（PL）概率分布。
+   由于 $R_V$ 是偏序而非全序，存在一个**线性扩展集合 $\text{LE}(R_V)$**，包含所有与该偏序关系不冲突的完整排序 $\sigma$。
+   POLPO 将损失函数定义为该偏序下所有相容完全排名的全概率负对数似然：
+   $$\mathcal{L}_{\text{POLPO}}(\theta) = - \log \sum_{\sigma \in \text{LE}(R_V)} p^{\text{PL}}_\theta(\sigma | x, Y)$$
+   模型只需提升所有合法偏序排名的总概率，而无需强行决定不可比样本之间的前后次序。
+
+```
+采样回答组:  y1: (通, 通, 挂)  |  y2: (挂, 挂, 通)  |  y3: (通, 挂, 挂)
+                                   |
+帕累托比较:                        v
+                     y1 严格支配 y3 (多通过一项，无退步)
+                     y2 与 y1、y3 互不支配 (各自独立通过不同项)
+                                   |
+严格偏序 R_V:                      v
+                     确认序关系: y1 > y3
+                     所有合法完全排序集合 LE(R_V):
+                       1) y1 > y2 > y3
+                       2) y1 > y3 > y2
+                       3) y2 > y1 > y3
+                                   |
+Plackett-Luce 模型:                v
+       计算每个回答的策略隐式得分 s_i = beta * log(pi_theta / pi_ref)
+                                   |
+POLPO 损失函数:                    v
+       Loss = - log [ P_PL(排序 1) + P_PL(排序 2) + P_PL(排序 3) ]
+       --> 无需构造任何人工标量奖励，梯度直接注入策略模型更新！
+```
+
+**核喻（多项全能选拔赛的特长生录取法则）**：
+将整个算法比作**高校自主招生委员会在数学、写作、编程三个互不相关的领域考核选拔考生**。
+死板的行政官僚（标量加权平均分）简单将三科成绩相加，认为“数学 100 写作 0”与“数学 50 写作 50”完全等价，导致选拔出的学生毫无特色。
+极端的一票否决官僚（全通奖励）则要求三门必须全部满分，结果初试阶段全员被淘汰，招不到任何苗子。
+而 POLPO 委员会遵循帕累托准则：如果考生 A 在编程上超越考生 B，且数学和写作完全不输给 B，委员会一致裁定 A 优于 B。
+若考生 C 写作极佳但数学偏弱，委员会绝不主观断言“几分数学抵得上一篇美文”，而是保留两者各有所长的合法排序空间。
+通过优化全集相容排序概率，引导所有考生在不抛弃原有特长的前提下全面补齐短板。
+
+### 关键概念
+
+- **帕累托支配（Pareto Dominance）**：多目标决策中最纯粹的占优定义，在不使任何一个维度劣化的情况下至少提升一个维度的表现。
+- **线性扩展（Linear Extension）**：图论中将偏序集拓扑排序为相容完全全序的所有可能排列集合；在 POLPO 中通过对线性扩展求和自然边际化掉未知次序。
+- **Plackett-Luce（PL）排序模型**：离散选择理论中将连续质量得分映射为无放回序贯抽取排列概率的经典概率模型。
+
+## 框架转变
+
+```
+传统方案（GRPO 中的标量奖励压缩）：
+  多维验证向量 c_i ---> 人工加权和 / 乘积 ---> 单一标量奖励 r_i
+                                                    |
+                                                    v
+  [信息坍缩：强行合并不可比维度；训练初期若无全通样本则梯度全失]
+
+本文方案（POLPO 帕累托偏序似然优化）：
+  多维验证向量 c_i ---> 帕累托严格偏序 R_V ---> 遍历相容线性扩展全概率
+                                                    |
+                                                    v
+  [完全免标量化：无损保留部分解有效信息；拒绝人为折衷；梯度平稳鲁棒]
+```
+
+一句话：从将多维验证结果生硬碾平成标量数值，转向直接对帕累托偏序的线性扩展似然展开端到端优化，核心转变在于用形式化偏序拓扑彻底替代充满主观偏见的人工奖励工程。
+
+## 专家评审
+
+- **选题眼光**：直击核心。
+随着大模型推理对齐从单一的标准答案匹配向复杂工程、智能体规划与长文本多约束遵循深水区挺进，多重验证器已成常态。
+彻底解决多验证器的信息损失问题，是后 RLVR 时代的必争之地。
+- **方法成熟度**：理论兼具美感与严谨性。
+将公理化帕累托序、线性扩展拓扑排序与 DPO 隐式奖励深度融合，推导自然流畅，摆脱了启发式技巧。
+唯一潜在的计算约束在于：当单批次采样的候选回答数量极大（$N > 10$）且偏序关系高度交错时，线性扩展集合的枚举计算量可能呈组合爆炸，未来在工业级大规模应用时需要引入轻量化的蒙特卡洛排序采样近似。
+- **实验诚意**：层次分明。
+从高度可控的受控程序合成（FizzBuzz）抽丝剥茧，证实 POLPO 在 9.8 万步内达成 90% 全胜，而标量 GRPO 耗费 51.2 万步依然无法收敛。
+随后在 MBPP 与 APPS 上横跨 Qwen3-0.6B、4B 及 Qwen2.5-Coder，全方位压制 GRPO-All、GRPO-Rate 及最新的 GDPO。
+- **写作功力**：叙述清晰，数学符号定义精准，附录提供了完备的闭式推导与梯度反向传播拆解。
+- **判决**：**强接收（Strong Accept）**。
+这是多目标强化学习与大模型偏好对齐领域近年来极具理论深度与实用价值的代表作。
+
+## 要点总结
+
+- **坚决弃用单元测试的平均通过率标量**：平均通过率 50% 无法表达通过的是核心逻辑还是边界断言；帕累托偏序是唯一不失真的多验证器表征。
+- **在全通之前绝不能让模型摸黑前行**：全通乘积奖励在初期的零信号是制约复杂任务 RLVR 的罪魁祸首；偏序似然能将每一次部分维度的攻克直接转化为正向梯度。
+- **不可比性不是缺陷而是客观真实**：面对不同特长的解，切忌强加主观权重；最大化合法线性扩展的总概率，能够让模型自发实现全能力板的同步抬升。
+:::
