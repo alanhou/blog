@@ -5,7 +5,13 @@
 - [x] Added `anthropic` to pip install in `.github/workflows/arxiv.yml`
 - [x] Updated README.md with provider instructions
 
-## 🔧 GitHub Secrets Required
+## Local scheduling
+
+The default six-hour paper check and article generation run locally through Codex in this repository. The local run follows the installed `alanhou-paper` skill, validates its output, then commits and pushes the generated articles and assets. GitHub Actions deploys the pushed site changes.
+
+The `Fetch Arxiv Papers` GitHub workflow has no scheduled trigger, preventing a second publisher from running alongside the local automation. Its manual dispatch remains available as a fallback.
+
+## 🔧 GitHub Secrets Required for the Optional Manual Fallback
 
 Go to your repository → Settings → Secrets and variables → Actions
 
@@ -25,7 +31,7 @@ LLM_BASE_URL = https://api.openai.com/v1
 
 ## 📋 What the Workflow Does
 
-1. **Triggers**: Every 6 hours or manually via workflow_dispatch
+1. **Triggers**: Manually via workflow_dispatch only; the six-hour cadence belongs to the local Codex automation
 2. **Installs**: `requests`, `openai`, `anthropic<1.0`, `manim`, `pyyaml`, `beautifulsoup4`, `pypdf` + system deps (ffmpeg, cairo)
 3. **Runs**: `python scripts/fetch_arxiv.py`
 4. **Commits**: New MDX files and visuals to main branch

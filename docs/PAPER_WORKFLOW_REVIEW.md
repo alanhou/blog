@@ -26,13 +26,19 @@ The September prompt update already adopted useful ljg-paper ideas: explain the 
 
 ## Changes selected for this repository
 
-1. Reuse the existing GitHub Actions pipeline and change its interval from eight to six hours. Avoid a second scheduler publishing the same feed.
+1. Run the six-hour paper check, skill-based generation, validation, commit, and push locally through Codex. The user clarified that GitHub should receive the results rather than execute the recurring paper-generation job. Remove the GitHub Actions schedule and preserve manual dispatch as an optional fallback, avoiding two publishers for the same feed.
 2. Fetch the original arXiv HTML, with PDF text extraction as a fallback. Require usable original-paper text for full article generation; retain the announcement cursor for retry when publication fails.
 3. Adapt the fork's six sections to the existing bilingual MDX schema. Keep its narrative and accessible language, while applying upstream's evidence-first exceptions above.
 4. Ask the authoring model to identify claims and their source locations before drafting, and cite relevant sections, tables, or figures in the article. Record the source URL, source hash, and any excerpting in an audit comment.
 5. Preserve the blog's canonical paper links, deduplication, frontmatter, visual pipeline, and automated commit/push behavior.
 
 These changes adapt the installed skill for this blog; they do not modify the installed skill itself or claim to implement the upstream workflow in full.
+
+## Local execution clarification
+
+The recurring automation operates in the local blog checkout. Each run checks the existing paper IDs, reads original sources for selected new papers, produces bilingual articles with the installed skill, validates the generated MDX and site build, and only then commits and pushes the run's output. Unrelated local files are not staged. Runs that find no suitable new papers do not manufacture articles or empty commits.
+
+The GitHub `arxiv.yml` workflow is manual only. The ordinary deploy-on-push workflow remains responsible for publishing committed site changes. The optional Python/API pipeline and its GitHub secrets are still available for manual use; the local Codex skill workflow does not depend on dispatching it remotely.
 
 ## Useful follow-up work
 
@@ -50,5 +56,22 @@ Do not import upstream's personal Org/Denote/Emacs file conventions into the Ast
 - A generated-format bilingual fixture with its source audit comment compiled through the actual MDX compiler and bilingual directive plugin.
 - Astro's production build completed successfully: 1,980 pages.
 - Live source extraction was checked against arXiv `2611.24032`: HTML yielded 131,954 text characters with table rows retained; the PDF yielded 122,797 text characters across 38 labeled pages. Both exceed the 100,000-character reading budget, exercising the need to disclose excerpting.
-- The existing GitHub paper workflow was verified as active before publication.
-- No live LLM article generation or independent model review was run for this change. Prompt behavior still needs the representative-paper evaluation described above; extraction and build checks do not certify generated factual claims.
+- The existing GitHub paper workflow was verified as available; its scheduled trigger was subsequently removed after the user clarified that the six-hour execution must be local. Manual dispatch is preserved.
+- The initial pipeline validation did not include live article generation or independent reading review. The subsequent local publishing test below exercises Codex skill execution; it does not benchmark the optional API prompt across contribution types.
+
+## Local publishing test — 2026-11-19
+
+The test ran in the local repository through Codex, without dispatching GitHub Actions or requiring local LLM API credentials. The native metadata check returned 35 new candidates; supplemental Atom/RSS discovery yielded 252 uncovered candidates after deduplication. Two papers were selected for a focused publishing test:
+
+| Paper | Local article | Original HTML SHA-256 |
+| --- | --- | --- |
+| `2611.24924`, AHE-Beta | `src/content/blog/arxiv-agentic-harness-engineering-beta-requirements.mdx` | `28c3c024842be4c9548eaf100131a9513dabe591e250d6236888d326aabe8604` |
+| `2611.24778`, Counterfactual World Models | `src/content/blog/arxiv-counterfactual-world-models-jepas-what-if.mdx` | `df0ff663af26d0a48e5557b0cd46987ad2d1ae81201c96f624e1b4141d743ffe` |
+
+Both articles were written locally from the original paper text with bilingual frontmatter, the skill's six Chinese sections, evidence locations, limits, and source audit comments. Neither paper ID was already covered by another article. The announcement cursor remains at 2026-11-19 because this selected batch does not establish complete daily coverage.
+
+A separate context read only the finished articles and checked narrative, paper identity, understanding, and reconstruction. It identified missing terminology, the need to explain AHE-Beta's three-run evaluation average, an underspecified feedback comparison, and several bilingual wording differences. These were corrected and reread; the remaining Chinese feedback-comparison wording was aligned afterward. The checks assess readability and consistency, not the original papers' factual correctness or reproducibility.
+
+The normal Satori cover command generated two 1200×630 covers. Both were visually inspected. All 1,878 MDX files passed validation, the final articles compiled through the actual MDX/bilingual plugin, and the 42 Python regression tests passed. The full local `npm run build` succeeded with Astro telemetry disabled: 1,982 pages. Both new article routes rendered with their Chinese sections, and source-audit comments remained absent from visible HTML.
+
+The app-managed local automation **Check papers and publish articles locally** is active at a six-hour interval. GitHub's paper workflow is manual only; GitHub still deploys normal pushes.

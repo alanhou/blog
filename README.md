@@ -26,13 +26,13 @@ English content here.
 
 ### Automated arXiv Paper Pipeline
 
-A GitHub Actions workflow runs every 6 hours to discover, curate, and publish AI/ML research papers:
+A local Codex automation checks for AI/ML research papers every 6 hours from this repository checkout, generates articles using the installed `alanhou-paper` skill, validates them, and then commits and pushes the results to GitHub. The GitHub Actions paper workflow is an optional manual fallback; it has no scheduled trigger.
 
 1. **Fetch** — Queries the arXiv API for recent papers in cs.AI, cs.LG, cs.CL, cs.CV
-2. **Select** — An LLM picks the ~5 most interesting papers by novelty and impact
+2. **Select** — Curates new, uncovered papers by novelty, practical impact, and available evidence
 3. **Generate** — Reads the original arXiv HTML (PDF text fallback) and produces bilingual MDX stories using the `alanhou-paper` structure, with evidence and scope requirements adapted from current `ljg-paper`
-4. **Visualize** — Generates Manim-based hero images and concept animation GIFs
-5. **Publish** — Commits new posts and triggers a deploy
+4. **Visualize** — Generates suitable covers and, when useful and available, Manim-based diagrams or animations
+5. **Validate and publish** — Checks generated MDX and the site build locally, commits only the run's articles and assets, and pushes to GitHub to trigger deployment
 
 The paper analysis prompt adapts `alanhou-paper`, derived from [ljg-paper](https://github.com/lijigang/ljg-skills/tree/master/skills/ljg-paper) by [@lijigang](https://github.com/lijigang). It keeps the local skill's accessible narrative while requiring source-backed claims, labeled illustrative examples, and explicit limits. See [the comparison and selected improvements](docs/PAPER_WORKFLOW_REVIEW.md). Articles use Problem / Explanation / Core Concepts / Insight / Critical Reading / What You Can Use, with the local skill's six Chinese section names. Text extraction does not inspect figures; any excerpting is disclosed. If neither original format is readable, the paper is retried rather than analyzed from the abstract alone.
 
@@ -84,7 +84,7 @@ scripts/
 ├── render_manim.py    # Manim scene rendering + validation
 └── manim_prompts.py   # LLM prompts for visual generation
 .github/workflows/
-├── arxiv.yml          # Scheduled paper fetch (every 6h)
+├── arxiv.yml          # Manual paper pipeline fallback; no cron trigger
 └── deploy.yml         # Build & deploy on push
 ```
 
