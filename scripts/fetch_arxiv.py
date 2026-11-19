@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from string import Template
 
 import time
 
@@ -35,6 +36,7 @@ from manim_prompts import (
     HERO_IMAGE_USER,
 )
 from render_manim import VISUALS_DIR, render_scene, validate_scene_code
+from paper_sources import fetch_reading_source
 
 BLOG_DIR = Path(__file__).resolve().parent.parent / "src" / "content" / "blog"
 CURSOR_FILE = Path(__file__).resolve().parent / ".last_fetch"
@@ -605,204 +607,27 @@ Reply with ONLY the numbers of your selected papers, one per line. Example:
 
 
 def generate_blog_post(client, model, provider, paper):
-    """Use LLM to generate a full bilingual MDX blog post."""
+    """Read the original paper before generating a bilingual MDX article."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     authors_str = ", ".join(paper["authors"][:10])
     cats_str = ", ".join(paper["categories"][:5])
 
     tags_list = ', '.join('"{}"'.format(c.lower()) for c in paper['categories'][:5])
-    prompt = """You are reading an academic paper and explaining it to a smart colleague over coffee.
-
-Three goals, checked separately:
-1. Say clearly what the paper did: research question, main contribution, how the method or relation works, and the scope of the key evidence.
-2. Show why the reader's prior understanding needs correction — not always a dramatic reversal. The change may be a correction, a supplement, a distinction, or a narrowed scope.
-3. Leave the reader able to explain the results themselves. If there is a unifying mechanism, use it to explain at least two different findings. If there is not, say so and show how the findings still fit together.
-
-Contribution-type emphasis:
-- Method / intervention: which action changed, how input moves through steps, why results can differ.
-- Theory / explanation: which factors act how, which findings it explains, where it stops holding.
-- Measurement / evaluation: what the old metric missed, what the new one measures, and the remaining gap between measured and explained.
-- Resource / system: what capability is provided, which cost/speed/scale limit is reduced, what constraints remain.
-
-Paper ID: {paper_id}
-Title: {paper_title}
-Authors: {authors_str}
-Categories: {cats_str}
-Abstract: {paper_summary}
-
-Output a bilingual MDX blog post following this EXACT structure:
-
----
-title:
-  en: "[English title based on paper]"
-  zh: "[Chinese title]"
-description:
-  en: "[1-2 sentence English description]"
-  zh: "[1-2 sentence Chinese description]"
-date: {today}
-tags: ["arxiv", "ai", {tags_list}]
-image: "{ARXIV_IMAGE}"
----
-
-:::en
-**Paper**: [{paper_id}](https://arxiv.org/abs/{paper_id})
-**Authors**: {authors_str}
-**Categories**: {cats_str}
-
-## The Gap
-
-[Where has existing research reached? What specific boundary or limitation does this paper address? Be precise — name the prior approaches and their shortcomings. Then show the logical path from gap → method → evidence → conclusion using a simple ASCII diagram. First two sections must already make the research question and main contribution clear.]
-
-```
-[ASCII logic topology showing: Problem → Assumption → Method → Evidence → Conclusion]
-[Use only: + - | / \\ > < v ^ * = ~ . : # [ ] ( ) _]
-[NO Unicode box drawing characters]
-```
-
-## The Increment
-
-**One sentence**: [What does this paper add, narrow, correct, or distinguish? Do not force a dramatic before/after if the paper only supplements or narrows scope — say what actually changed.]
-
-### Core Mechanism
-
-[Explain the method's internal structure in 2-3 paragraphs. What are the components? How does data flow? What operations happen? Name the paper's contribution type (method / theory / measurement / resource) and explain along that axis.]
-
-```
-[ASCII diagram of method internals: components, data flow, operations — include only if it reduces mental assembly; otherwise omit this diagram]
-[Use only pure ASCII: + - | / \\ > < v ^ * = ~ . : # [ ] ( ) _]
-```
-
-[Now explain using a **structural metaphor**: find something familiar where each part of the method maps to a part of the analogy. Walk through the method using this metaphor so the reader can retell it in their own words. The metaphor must be load-bearing — without it, the reader is back to staring at diagrams.]
-
-### Key Concepts
-
-[Pick 1-3 concepts essential to understanding this paper. For each:]
-- **[Concept name]**: [Explain Feynman-style from zero. Build intuition. Give a concrete example. Don't use jargon to explain jargon.]
-
-## Framework Shift
-
-[Draw a "napkin sketch" comparing the old way vs this paper's way. The goal: let the reader see the structural change at a glance — a correction, a narrowed scope, or a genuine shift, not an inflated reversal.]
-
-```
-Before (mainstream approach):        After (this paper):
-[ASCII diagram]                      [ASCII diagram]
-[Show structural difference, not feature list]
-```
-
-[One sentence: From X to Y, the core shift is ___.]
-
-## Expert Assessment
-
-[You're a senior researcher who's seen thousands of papers. Evaluate honestly in plain language:]
-
-**Problem choice**: [Is this a real gap or manufactured? Where does it sit in the field's trajectory?]
-
-**Method maturity**: [Clever insight or brute force? Are there simpler approaches being overlooked? Name at least one unexamined assumption if one exists — this matters more than "scale is small".]
-
-**Experimental integrity**: [What did the central experiment ask, fix, change, and compare against? Are baselines fair? Do the numbers hold up under scrutiny? Any red flags?]
-
-**Writing quality**: [Where did the authors cut corners? Which section, if rewritten, would elevate the whole paper?]
-
-**Verdict**: [strong accept / weak accept / borderline / weak reject / strong reject] — [one-sentence reason]
-
-## Takeaways
-
-[What can a practitioner steal from this paper? Not generic insights — specific ideas, techniques, or framings that transfer to other domains. If there's nothing concrete to take, say so honestly.]
-:::
-
-:::zh
-**论文**: [{paper_id}](https://arxiv.org/abs/{paper_id})
-**作者**: {authors_str}
-**分类**: {cats_str}
-
-## 缺口
-
-[现有研究到达了什么边界？这篇论文要解决什么具体的局限或问题？要精准——指出此前的方法及其不足。然后用简单的 ASCII 图展示从缺口到方法到证据到结论的逻辑路径。前两节必须已让读者知道研究问题与主要贡献。]
-
-```
-[ASCII 逻辑拓扑图：问题 → 假设 → 方法 → 证据 → 结论]
-[只用：+ - | / \\ > < v ^ * = ~ . : # [ ] ( ) _]
-[禁用 Unicode 制表符]
-```
-
-## 增量
-
-**一句话**: [这篇论文实际增加了什么、收窄了什么、纠正了什么或区分了什么？不要硬造戏剧性的前后反转——若只是补充或缩小适用范围，就如实写。]
-
-### 核心机制
-
-[用2-3段解释方法的内部结构。有哪些组件？数据如何流动？发生了什么操作？点明贡献类型（方法／理论／评测／资源）并沿该轴展开。]
-
-```
-[方法内部的 ASCII 图：组件、数据流、操作——仅在能减少脑内拼装负担时保留，否则省略]
-[只用纯 ASCII：+ - | / \\ > < v ^ * = ~ . : # [ ] ( ) _]
-```
-
-[现在用**核喻**（结构性比喻）来解释：找一个熟悉的事物，方法的每个部分都能映射到比喻的某个部分。沿着这个比喻把方法走一遍，让读者能用自己的话复述。核喻必须承重——没有它，读者就回到盯着图发呆的状态。]
-
-### 关键概念
-
-[选1-3个理解本文必需的概念。对每个概念：]
-- **[概念名]**: [费曼式讲解，从零开始。建立直觉。给具体例子。不用术语解释术语。]
-
-## 框架转变
-
-[画一张"餐巾纸速写"对比旧方法和本文方法。目标：让读者一眼看出结构上的位移——纠正、收窄或真正的转变，而不是夸大反转。]
-
-```
-之前（主流方法）：                之后（本文方法）：
-[ASCII 图]                        [ASCII 图]
-[展示结构差异，而非功能清单]
-```
-
-[一句话：从 X 到 Y，核心转变是___。]
-
-## 专家评审
-
-[你是见过数千篇论文的资深研究者。用白话坦率评估：]
-
-**选题眼光**: [这是真缺口还是人造缺口？在该领域的发展轨迹中处于什么位置？]
-
-**方法成熟度**: [巧劲还是蛮力？有没有被忽略的更简单方法？若有未被讨论的根本预设，必须点出——这比「scale 不够」重要。]
-
-**实验诚意**: [中心实验问了什么、固定了什么、改了什么、和谁比？基线公平吗？数字经得起推敲吗？有无值得警惕之处？]
-
-**写作功力**: [作者在哪里偷懒了？哪一段重写能让整篇论文升一个档次？]
-
-**判决**: [强接收 / 弱接收 / 临界 / 弱拒绝 / 强拒绝] — [一句话理由]
-
-## 要点总结
-
-[实践者能从这篇论文"偷"走什么？不要泛泛的洞见——要具体的想法、技术或思维框架，能迁移到其他领域的。如果没有具体可取之处，诚实地说没有。]
-:::
-
-CRITICAL CONSTRAINTS:
-- Three goals: (1) what the paper did is clear, (2) why understanding needed correction (not forced drama), (3) reader can explain results — use a unifying mechanism for 2+ findings when one exists, otherwise say so
-- Numbers: before stating a number, say what the experiment asked, fixed, changed, and compared against; after the number, say what judgment it updates
-- Do not claim a unified mechanism if the paper does not provide one; do not invent causal claims from correlational evidence
-- Do not overstate: name what the paper does NOT claim when that boundary matters
-- Evidence: lead with the most representative results; supplementary results only when they add a different limit, exception, or check — do not average across every experiment
-- Example switching: prefer one concrete anchor; you may switch examples when one cannot hold a research line, but say what the new example adds
-- ASCII diagrams: ONLY use + - | / \\ > < v ^ * = ~ . : # [ ] ( ) _ and spaces
-- NEVER use Unicode box drawing: ─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼ ═ ║ ╔ ╗ ╚ ╝ ● ○ ■ □ ◆ ◇ ▼ ▲ ► ◄ → ← ↑ ↓
-- Diagrams only when they reduce mental assembly; keep the Gap topology and Framework Shift napkin; Core Mechanism diagram is optional
-- Chinese paragraphs: Add line breaks after periods (。) to prevent horizontal scrolling
-- Structural metaphor: Must be load-bearing (method components map to analogy parts), not decorative
-- Expert assessment: Be honest and calibrated, not uniformly positive; method maturity should surface at least one unexamined assumption when one exists
-- Tone: Like explaining to a colleague over coffee, not writing a review
-- Chinese content: Parallel composition, NOT translation
-- MDX safety: Escape curly braces in mathematical notation (use \\{{ and \\}} instead of {{ and }}) to prevent JSX parsing errors. Examples: \\{{-1,1\\}}^n, \\{{1,...,n\\}}, f: X \\to \\{{0,1\\}}
-- Output ONLY the complete MDX file, nothing else
-- DO NOT include <thinking> tags or any other XML tags in your output
-- Start your response directly with the --- frontmatter delimiter""".format(
-        paper_id=paper['id'],
-        paper_title=paper['title'],
+    source = fetch_reading_source(paper["id"], _request_arxiv)
+    template_path = Path(__file__).resolve().parent / "prompts" / "arxiv_article.md"
+    prompt = Template(template_path.read_text()).substitute(
+        paper_id=paper["id"],
+        paper_title=paper["title"],
         authors_str=authors_str,
         cats_str=cats_str,
-        paper_summary=paper['summary'],
+        paper_summary=paper["summary"],
+        paper_text=source["text"],
+        source_url=source["url"],
+        source_sha256=source["sha256"],
+        source_scope=source["scope"],
         today=today,
         ARXIV_IMAGE=ARXIV_IMAGE,
-        tags_list=tags_list
+        tags_list=tags_list,
     )
 
     content = call_llm(
@@ -815,9 +640,14 @@ CRITICAL CONSTRAINTS:
         print(f"Warning: LLM returned empty response for post generation ({paper['id']})")
         return None
 
-    # Strip thinking tags if present
-    content = strip_thinking_tags(content)
-    return content.strip()
+    # Normalize before appending provenance so a stray outer fence cannot
+    # swallow the closing delimiter or the audit comment.
+    content = extract_code_block(strip_thinking_tags(content))
+    provenance = (
+        f"{{/* Reading source: {source['url']}; sha256: {source['sha256']}; "
+        f"{source['scope']} */}}"
+    )
+    return content.strip() + "\n\n" + provenance
 
 
 def _yaml_double_quote(value: str) -> str:
@@ -977,6 +807,11 @@ def sanitize_mdx(content):
     in_zh_section = False
 
     for line in lines:
+        # MDX comments are already inert; escaping their braces would turn
+        # source-provenance comments into visible text.
+        if line.strip().startswith("{/*") and line.strip().endswith("*/}"):
+            result.append(line)
+            continue
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
 
@@ -1233,7 +1068,7 @@ def main():
     if cursor.date() < today:
         print(f"Cursor is behind ({cursor.date().isoformat()}); backfilling")
     # One announcement day per run, clamped so it never starts in the future.
-    # A cursor already ahead of today -- the 2nd and 3rd cron run of a day --
+    # A cursor already ahead of today -- subsequent cron runs of a day --
     # falls back onto today, which re-offers the day but never skips one.
     start_date = min(cursor.date(), today)
     start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
@@ -1253,12 +1088,6 @@ def main():
         sys.exit(1)
     print(f"Found {len(papers)} papers")
 
-    # Advance the cursor even when the window turns out empty or fully covered:
-    # arXiv announces nothing at weekends, and leaving the cursor on a covered
-    # day would stall the walk forward for good.
-    save_cursor(next_cursor)
-    print(f"Cursor advanced to {next_cursor.date().isoformat()}")
-
     # Filter out already-covered papers
     existing_ids = get_existing_arxiv_ids()
     print(f"Found {len(existing_ids)} existing arxiv IDs in blog")
@@ -1266,12 +1095,17 @@ def main():
     print(f"{len(papers)} new papers after filtering")
 
     if not papers:
+        # Empty and fully covered days must not stall a backfill.
+        save_cursor(next_cursor)
         print("No new papers to process")
         return
 
     # Select most interesting papers
     print("Selecting most interesting papers via LLM...")
     selected = select_papers(client, model, provider, papers, count=min(5, len(papers)))
+    if not selected:
+        print("Error: paper selection returned no candidates; retaining cursor for retry")
+        sys.exit(1)
     print(f"Selected {len(selected)} papers:")
     for p in selected:
         print(f"  - {p['title']}")
@@ -1359,6 +1193,13 @@ def main():
             "(all generations failed)"
         )
         sys.exit(1)
+
+    # Publish successful articles, but revisit this day if any selected paper
+    # could not be read or generated. Existing-ID deduplication keeps retries
+    # from republishing the articles that did succeed.
+    complete = written + skipped_existing == len(selected)
+    save_cursor(next_cursor if complete else start)
+    print(f"Cursor {'advanced' if complete else 'retained for retry'}")
 
 
 if __name__ == "__main__":

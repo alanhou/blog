@@ -41,8 +41,8 @@ if not title_match:
 title = title_match.group(1)
 print(f"Title: {title}")
 
-# Extract summary from post (first paragraph after "## The Gap")
-summary_match = re.search(r'## The Gap\s*\n\s*(.+?)(?:\n\n|\n```)', content, re.DOTALL)
+# Extract summary from the new structure or a legacy post.
+summary_match = re.search(r'## (?:The Problem|The Gap)\s*\n\s*(.+?)(?:\n\n|\n```)', content, re.DOTALL)
 summary = summary_match.group(1).strip() if summary_match else ""
 
 paper = {

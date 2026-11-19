@@ -2,6 +2,16 @@
 
 Based on the ljg-skill-paper approach, we've upgraded the arxiv blog post generation to create more insightful, readable content.
 
+## 2026-11-19 — reviewed alanhou-paper against current ljg-paper
+
+See [the source comparison and decisions](../docs/PAPER_WORKFLOW_REVIEW.md). The current article prompt is `scripts/prompts/arxiv_article.md`; the sections below document earlier versions.
+
+- Original arXiv HTML, with PDF text fallback, now supplies the methods and evidence. An unreadable original is retried rather than expanded from its abstract. Source URL, hash, and extraction limits are recorded in an audit comment.
+- The local skill's six-part narrative is retained, with the Chinese headings 问题 / 翻译 / 核心概念 / 洞见 / 博导审稿 / 启发.
+- Current upstream's safeguards take precedence over rigid quotas: no forced reversal, single-example restriction, number count, concept count, or mandatory diagram pair.
+- Teaching examples, predictions, source omissions, and uninspected figures are distinguished from actual experiments and findings. Evidence needs identifiable source locations.
+- Critical reading stays calibrated; it does not pretend to be a formal accept/reject decision. A prompt self-check does not claim an independent factual or readability review.
+
 ## 2026-09-17 — folded in ljg-paper v1.17.110
 
 Source: [lijigang/ljg-skills](https://github.com/lijigang/ljg-skills) `skills/ljg-paper` (rewrite away from the archived Gap/Increment-only skill). Useful pieces adopted into `generate_blog_post()`:

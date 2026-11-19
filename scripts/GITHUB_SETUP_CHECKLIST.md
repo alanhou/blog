@@ -25,8 +25,8 @@ LLM_BASE_URL = https://api.openai.com/v1
 
 ## 📋 What the Workflow Does
 
-1. **Triggers**: Every 8 hours or manually via workflow_dispatch
-2. **Installs**: `requests`, `openai`, `anthropic`, `manim` + system deps (ffmpeg, cairo)
+1. **Triggers**: Every 6 hours or manually via workflow_dispatch
+2. **Installs**: `requests`, `openai`, `anthropic<1.0`, `manim`, `pyyaml`, `beautifulsoup4`, `pypdf` + system deps (ffmpeg, cairo)
 3. **Runs**: `python scripts/fetch_arxiv.py`
 4. **Commits**: New MDX files and visuals to main branch
 5. **Deploys**: Rebuilds and deploys site if new posts were added
@@ -35,7 +35,7 @@ LLM_BASE_URL = https://api.openai.com/v1
 
 ### Test locally first:
 ```bash
-pip install requests openai anthropic manim
+pip install requests openai 'anthropic<1.0' manim pyyaml beautifulsoup4 pypdf
 export LLM_API_KEY="your-key"
 export LLM_MODEL_NAME="claude-sonnet-4-6"
 # export LLM_BASE_URL="..." # optional for Claude

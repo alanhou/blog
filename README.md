@@ -26,15 +26,15 @@ English content here.
 
 ### Automated arXiv Paper Pipeline
 
-A GitHub Actions workflow runs every 8 hours to discover, curate, and publish AI/ML research papers:
+A GitHub Actions workflow runs every 6 hours to discover, curate, and publish AI/ML research papers:
 
 1. **Fetch** — Queries the arXiv API for recent papers in cs.AI, cs.LG, cs.CL, cs.CV
 2. **Select** — An LLM picks the ~5 most interesting papers by novelty and impact
-3. **Generate** — Produces structured bilingual MDX posts with sections like Gap, Core Mechanism, Framework Shift, and Expert Assessment
+3. **Generate** — Reads the original arXiv HTML (PDF text fallback) and produces bilingual MDX stories using the `alanhou-paper` structure, with evidence and scope requirements adapted from current `ljg-paper`
 4. **Visualize** — Generates Manim-based hero images and concept animation GIFs
 5. **Publish** — Commits new posts and triggers a deploy
 
-The paper analysis prompt is inspired by [ljg-skill-paper](https://github.com/lijigang/ljg-skill-paper) by [@lijigang](https://github.com/lijigang), a Claude Code skill that provides a structured multi-stage pipeline for academic paper analysis (Split, Squeeze, Plain, Feynman, Napkin Sketch, Advisor Review).
+The paper analysis prompt adapts `alanhou-paper`, derived from [ljg-paper](https://github.com/lijigang/ljg-skills/tree/master/skills/ljg-paper) by [@lijigang](https://github.com/lijigang). It keeps the local skill's accessible narrative while requiring source-backed claims, labeled illustrative examples, and explicit limits. See [the comparison and selected improvements](docs/PAPER_WORKFLOW_REVIEW.md). Articles use Problem / Explanation / Core Concepts / Insight / Critical Reading / What You Can Use, with the local skill's six Chinese section names. Text extraction does not inspect figures; any excerpting is disclosed. If neither original format is readable, the paper is retried rather than analyzed from the abstract alone.
 
 ### Social Cover Generation
 
@@ -84,7 +84,7 @@ scripts/
 ├── render_manim.py    # Manim scene rendering + validation
 └── manim_prompts.py   # LLM prompts for visual generation
 .github/workflows/
-├── arxiv.yml          # Scheduled paper fetch (every 8h)
+├── arxiv.yml          # Scheduled paper fetch (every 6h)
 └── deploy.yml         # Build & deploy on push
 ```
 
@@ -112,7 +112,7 @@ npm run preview  # preview the built site locally
 ### arXiv Pipeline (optional)
 
 ```bash
-pip install requests openai anthropic manim
+pip install requests openai 'anthropic<1.0' manim pyyaml beautifulsoup4 pypdf
 
 export LLM_API_KEY="your-key"
 export LLM_BASE_URL="https://api.example.com/v1"  # Optional for Claude, required for OpenAI-compatible APIs
@@ -127,7 +127,7 @@ The pipeline supports both:
 
 ## Acknowledgments
 
-- [ljg-skill-paper](https://github.com/lijigang/ljg-skill-paper) by [@lijigang](https://github.com/lijigang) — The structured paper analysis methodology (Feynman explanation, napkin sketch comparison, advisor review) inspired the arXiv blog post generation prompt.
+- [ljg-paper](https://github.com/lijigang/ljg-skills/tree/master/skills/ljg-paper) by [@lijigang](https://github.com/lijigang) — The source-grounded explanation methodology behind `alanhou-paper` and this blog's adapted article prompt.
 - [Astro](https://astro.build) — Static site framework.
 - [Manim](https://www.manim.community) — Mathematical animation engine used for paper visualizations.
 
