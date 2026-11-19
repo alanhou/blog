@@ -75,3 +75,18 @@ A separate context read only the finished articles and checked narrative, paper 
 The normal Satori cover command generated two 1200×630 covers. Both were visually inspected. All 1,878 MDX files passed validation, the final articles compiled through the actual MDX/bilingual plugin, and the 42 Python regression tests passed. The full local `npm run build` succeeded with Astro telemetry disabled: 1,982 pages. Both new article routes rendered with their Chinese sections, and source-audit comments remained absent from visible HTML.
 
 The app-managed local automation **Check papers and publish articles locally** is active at a six-hour interval. GitHub's paper workflow is manual only; GitHub still deploys normal pushes.
+
+## Local publishing check — 2026-11-20
+
+The next local run checked the outstanding 2026-11-19 announcement window: 60 candidates were read from arXiv and 58 were not yet covered in the blog. Two additional source-grounded articles were prepared:
+
+| Paper | Local article | Original HTML SHA-256 |
+| --- | --- | --- |
+| `2611.24892`, On Evaluating User Simulators for Interactive Agents | `src/content/blog/arxiv-on-evaluating-user-simulators-interactive-agents.mdx` | `4693c97b5dfebf6b741c1b0c1b92687c22d5525cec5bf33408654d961f3bb80e` |
+| `2611.24927`, Mapping the AI Supply Chain | `src/content/blog/arxiv-mapping-ai-supply-chain-dependencies.mdx` | `0d42b69674b324465dbd4cd78aacb9662226b1d2e03282378e03566402a732e6` |
+
+Both use the original arXiv HTML and have local claim-to-source records. An independent reading check on the supply-chain article prompted clarification of the covered date range, the counted-edge definition behind concentration, and the mix of broad and site-restricted queries; those points were verified against and corrected from the extracted paper. The user-simulator article distinguishes deliberate perturbations from observed behavior and distinguishes detector sensitivity from trace filtering.
+
+The same reader check found the supply-chain contribution and boundaries clear, and could reconstruct where such a map is useful. It prompted added context for the user-simulator article's score scale and filtering threshold. These are readability checks, not verification of paper facts. The supply-chain dataset spans November 2022–October 2026. Its concentration measure sums each actor's share of monthly recorded relationship counts in a filtered graph; it is not revenue or market share.
+
+This is still a selected batch, not a full issue of every uncovered candidate. The announcement cursor remains unchanged so the next local run can continue from the same date instead of silently skipping unselected papers.
