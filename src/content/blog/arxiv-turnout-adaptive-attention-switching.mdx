@@ -1,0 +1,224 @@
+---
+title:
+  en: "Turnout Learns When to Shrink the Attention Cache"
+  zh: "缓存何时收，交给模型学"
+description:
+  en: "Turnout pairs a pretrained model's full-attention path with a distilled linear path, then learns when each layer should switch. One Qwen3-8B policy averages 82.4% across five reasoning benchmarks while saving 25.4% of its matched attention-cache proxy; benefits depend on response length and the memory being measured."
+  zh: "Turnout 保留完整注意力，另训一条线性路径，再学习每层何时切换。Qwen3-8B 的一组策略在五项推理基准上平均得分 82.4%，匹配长度后的注意力缓存估计平均节省 25.4%；短回答与整机显存，仍要分别看。"
+date: 2026-11-23
+tags: ["arxiv", "ai", "cs.lg", "cs.ai", "attention", "reasoning", "efficiency"]
+image: "/arxiv-visuals/arxiv-turnout-adaptive-attention-switching.png"
+---
+
+:::en
+**Paper**: [2611.27500](https://arxiv.org/abs/2611.27500) — Turnout: Adaptive Attention Switching for Efficient Reasoning\
+**Authors**: Anna Kuzina, Mart van Baalen, Paul N. Whatmough, Babak Ehteshami Bejnordi\
+**Categories**: cs.LG, cs.AI\
+**Reading scope**: Original arXiv v1 HTML main text and both appendices, including the linearization recipe, router, accuracy tables, cache accounting and implementation details. Figure captions were read; graphics were not visually inspected. The experiments were not reproduced.
+
+## The Problem
+
+A model writes a long mathematical solution. At each attention layer, it keeps encoded keys and values for earlier token positions so the next step can consult them. As the answer grows, so does this key–value cache. This is an illustrative situation: the storage cost grows even when the model's learned weights stay the same.
+
+An alternative is to update a fixed-size numerical state instead of keeping every old key and value. That saves space on long sequences, but converting a pretrained model to this linear-attention path can damage its answers. A fixed choice of layers or a universal switch after a set number of tokens also gives every problem the same schedule.
+
+Anna Kuzina and colleagues introduce Turnout to learn **which layers should leave full attention, and when**. The method preserves the original full-attention path, prepares a linear alternative, and trains a small controller to choose a one-way switch during generation (§§1–2).
+
+## The Explanation
+
+### Prepare two routes through the same layer
+
+The linear route combines a running Gated Delta Network state with exact attention over **64 recent tokens and eight initial sink tokens**. A useful analogy is a filing cabinet beside a compact ledger: the cabinet retains individual records, while the ledger updates a bounded numerical representation of older material. The short exact window keeps recent records available (§3; Appendix B.2).
+
+The original backbone stays frozen. The authors train new gates, small modules that mix nearby tokens, and a low-rank adapter that adjusts attention outputs. These imitate the original model's next-token probabilities and intermediate attention outputs. Their main linearized Qwen3-8B path uses **4.5 billion OpenThoughts3 training tokens**. This preparation matters: the router is choosing between already prepared paths, rather than learning the whole alternative from scratch (§3; Appendix A).
+
+The prompt is processed with full attention. During answer generation, a layer can remain full or switch to linear. At the switch, its recorded keys, values and gates are used to construct the recurrent state for the observed prefix. Older cache entries are then released, keeping the sink tokens and recent window. That state matches what the linear update would compute from those inputs; it is not a guarantee that linear and full attention give identical answers. Once switched, the layer does not switch back (§§4.1–4.2; Appendix B.2).
+
+### Reward the decision after seeing the answer
+
+Before each still-full layer processes a generated token, a router combines two signals. One tracks position, a memory break-even reference, and which layers have already switched. The other reads the current hidden representation. Different layers and different inputs can therefore receive different schedules (§4.2).
+
+Only the router is trained in this phase; both attention paths remain frozen. The authors sample four responses with different routing decisions for each training question, compare their rewards, and favor the decisions in better-performing responses. The reward combines answer correctness with cache efficiency. In the accuracy-scaled version, an incorrect answer receives no efficiency reward (§§4.3–4.4).
+
+Reward shape has a visible consequence. An additive memory-only reward collapsed toward switching immediately, so the authors exclude that configuration from their sweep. Their break-even-shaped reward also distinguishes switching too early: a small full-attention cache can occupy less space than the linear route's fixed state. The learned policy has to balance quality with when compression actually pays, not just reward an early switch (Appendix B.7; §4.3).
+
+### Recover quality while spending less cache
+
+The main routing study uses Qwen3-8B on GSM8K, MATH-500, GPQA-Diamond, HumanEval+ and MBPP+. The average below gives each benchmark equal weight. The code benchmarks use single-sample pass rates. Cache savings compare each routed response with full attention at the **same prompt and response length**, so shorter answers cannot supply the savings (§5.2; Appendices A.3 and B.3).
+
+| Configuration | Mean benchmark score | Relative cache saving |
+| --- | ---: | ---: |
+| Full attention | 85.1% | 0.0% |
+| Prepared all-linear path | 45.9% | 69.4% |
+| All layers switch after 4K generated tokens | 73.4% | 12.0% |
+| Context-aware Turnout, default setting | 82.4% | 25.4% |
+| Turnout with a longer reward-decay range | 83.6% | 10.3% |
+
+The table shows a trade-off, rather than complete recovery at zero cost. The default learned policy improves both the mean score and cache saving over the tested 4K manual switch. Allowing a longer reward-decay range raises the score toward the full model while keeping more cache. The settings are reported in main Table 1 and Appendix B, Table 8.
+
+The context input also matters. With the other default settings held fixed, a schedule-only router without that input scores **78.3%** with **17.4%** cache saving; adding the hidden-state input gives **82.4%** and **25.4%**. This ablation supports using information about the current computation rather than timing alone. It does not make the router an oracle for which decisions will preserve a correct answer (§5.2; Table 1).
+
+### Short answers can make the fixed state expensive
+
+The Llama 3.1-8B-Instruct experiment reveals a different regime. Full attention averages **56.4%**, and the break-even-aware router **57.6%**, but the reported cache saving is only **1.3%**. The all-linear model scores **28.8%** and has **−68.4% cache saving** under the matched-length accounting. Its fixed state is costly relative to a short full-attention cache (§5.2; Table 1).
+
+For that setup, one linear layer's state, recent window and sink tokens use the memory of about **584 full-attention tokens**. Around 97% of the Llama GSM8K and code samples have shorter combined prompts and responses. A structure whose memory stops growing can still start larger than the structure it replaces. The router can retain full attention when switching offers little benefit.
+
+## Core Concepts
+
+**KV cache.** Per-layer keys and values saved for future attention. Its size grows with the number of retained token positions; model weights are a separate memory cost.
+
+**Linear state.** A bounded numerical record updated as older tokens leave the exact local window. It makes long decoding cheaper in memory, with an approximation to the pretrained model's behavior.
+
+**A one-way routing policy.** A learned decision about when each layer releases its large cache. Position and current hidden state guide it; answer-level rewards train it. Released entries are not held as a full-attention backup.
+
+## The Insight
+
+Memory can be allocated across both layers and generation time. Keeping full attention where it still earns its cost, then moving selected layers to a bounded state, offers more flexibility than a fixed replacement. The benefit depends on the model, the task and how long its answer becomes.
+
+## A Critical Reading
+
+The percentages measure different things. The accuracy study estimates the peak attention-state storage for each trace and averages it. Main Table 2 separately estimates a 16K-token cache at **2.25 GiB** for full attention versus **1.39 GiB** for Turnout, while additional parameters also occupy memory. Those estimates exclude activations, workspace and some implementation buffers (§§5.2–5.3).
+
+In the measured single-H100 MATH-500 run, peak allocated memory is **17.9 GiB versus 17.4 GiB**. The authors report 33% faster decoding for long 8K–16K-token sequences. These observations support a gain on the measured workload; the cache-saving percentage is not itself a percentage reduction in the whole GPU footprint (§5.3; Figure 7).
+
+The routing controller is small, about 0.65 million parameters, but its linear alternative already required substantial distillation. Router training also filters for questions the original full model answers correctly, targeting preservation of existing ability. Most routing evidence comes from the long-thinking Qwen model; the short-answer Llama result shows why gains cannot be assumed across workloads (§§3, 5.1 and 5.3).
+
+The FlashMorph comparisons adapt layer rankings to the authors' linear path and omit the original method's final hybrid fine-tuning. They compare these configured baselines, rather than reproducing every stage of the published FlashMorph pipeline. The one-way switch and remaining accuracy gap also make the trained policy a measured trade-off, not a guarantee of lossless replacement (Appendix B.4; §5.2).
+
+## What You Can Use
+
+When assessing such a model, measure answer quality, attention-state storage and whole-system GPU memory separately. Include short completions as well as long reasoning traces. The mathematical solver in the opening example can benefit from a learned cache budget, but the result depends on a prepared linear path and a trained policy. Evaluate that checkpoint on the actual task and hardware before treating a cache percentage as a deployment saving.
+:::
+
+:::zh
+**论文**：[2611.27500](https://arxiv.org/abs/2611.27500) — Turnout: Adaptive Attention Switching for Efficient Reasoning\
+**作者**：Anna Kuzina、Mart van Baalen、Paul N. Whatmough、Babak Ehteshami Bejnordi\
+**分类**：cs.LG、cs.AI\
+**阅读范围**：阅读 arXiv v1 原始 HTML 正文与两个附录，包括线性化训练、路由器、准确率表、缓存核算和实现细节。
+读了图注，未查看图像本身；未复现实验。
+
+## 问题
+
+设想模型正在写一段很长的数学解答。
+每层注意力都会存下较早词元的键和值，让下一步计算可以访问它们。
+答案越写越长，这份键值缓存也跟着长；模型权重没有变，运行时的存储负担却增加了。
+这是帮助理解的场景，不是论文某一道具体测试题。
+
+一种替代办法，是不断更新固定大小的数值状态，不再逐个保存所有旧键值。
+长序列上能省空间，可把预训练模型改成线性注意力，可能损伤回答。
+固定选几层替换，或写到指定词数就统一切换，也会让所有问题套上同一张时刻表。
+
+Anna Kuzina 等人提出 Turnout，学习**哪些层离开完整注意力，以及什么时候离开**。
+它保留原来的完整注意力路径，训练另一条线性路径，再让一个小控制器决定生成中的单向切换，见第 1—2 节。
+
+## 翻译
+
+### 先备好同一层里的两条路
+
+线性路径把持续更新的 Gated Delta Network 状态，与 **最近 64 个词元、开头八个保留词元**上的精确注意力合起来。
+可以把它想成文件柜旁边的一本小账：柜子逐份保留记录，小账把较早材料更新进有限大小的数值表示，最近的记录仍在旁边可查，见第 3 节及附录 B.2。
+
+原模型骨干保持冻结。
+作者训练新的门控、混合邻近词元的小模块，以及调整注意力输出的低秩适配器，模仿原模型的下一词概率与中间注意力输出。
+主实验的 Qwen3-8B 线性路径使用 **45 亿 OpenThoughts3 训练词元**。
+因此，后面的路由器是在两条已经备好的路之间选择，不是从零训练整条替代路径，见第 3 节及附录 A。
+
+提示词先用完整注意力处理。
+生成回答时，每一层可以继续完整注意力，或改走线性路径。
+切换时，用已经存下的键、值和门控，构造这段实际输入对应的循环状态，再释放较早的缓存，只留下开头保留词元和最近窗口。
+这保证接上的是线性更新本来会计算出的状态，不保证线性注意力与完整注意力给出相同回答。
+一层切换以后，就不再切回去，见第 4.1—4.2 节及附录 B.2。
+
+### 等答案出来，再奖励选择
+
+每个仍在完整模式的层，在处理新词元前，会收到两种信号。
+一种看位置、缓存成本相当的参考点，以及其他层是否已经切换；另一种看当前的隐藏表示。
+这样，不同层与不同输入就能采用不同时间表，见第 4.2 节。
+
+这一阶段只训练路由器，两条注意力路径都冻结。
+作者为同一道训练题抽样生成四个采用不同切换选择的回答，比较奖励，再加强表现较好的选择。
+奖励结合答案是否正确与缓存效率；在准确率缩放版本里，答案错了，就拿不到省缓存的奖励，见第 4.3—4.4 节。
+
+奖励形状会改变结果。
+简单把正确奖励与只看内存的奖励相加，曾让路由器塌到一开始就全切线性，因此作者把这组配置排除出比较。
+按成本相当点设计的奖励，还能区别过早切换：小的完整注意力缓存，可能比线性路径的固定状态更省。
+学习目标要兼顾质量与何时压缩才划算，不能只奖励早切换，见附录 B.7 及第 4.3 节。
+
+### 用少一些缓存，找回大部分质量
+
+主路由实验使用 Qwen3-8B，测试 GSM8K、MATH-500、GPQA-Diamond、HumanEval+ 与 MBPP+。
+下表的平均分让五项基准各占同样权重；代码基准用单个生成样本的通过率。
+缓存节省按每条路由回答，与**相同提示长度、相同回答长度**的完整注意力比较，排除了仅靠少写字来省缓存，见第 5.2 节及附录 A.3、B.3。
+
+| 配置 | 五项基准平均分 | 相对缓存节省 |
+| --- | ---: | ---: |
+| 完整注意力 | 85.1% | 0.0% |
+| 已训练的全线性路径 | 45.9% | 69.4% |
+| 所有层在生成四千词元后切换 | 73.4% | 12.0% |
+| 读取当前状态的 Turnout 默认配置 | 82.4% | 25.4% |
+| 奖励衰减范围更长的 Turnout | 83.6% | 10.3% |
+
+这是一份取舍，不是零成本完整恢复。
+默认学习策略相对所测的四千词元手动切换，同时提高了平均分与缓存节省。
+把奖励衰减范围放宽，分数更接近原模型，也会留下更多缓存；配置见正文表 1 与附录 B 的表 8。
+
+当前状态输入也有作用。
+其他默认设置不变，去掉这路输入，只看时序等信号的路由器得到 **78.3%**、缓存节省 **17.4%**；加上隐藏状态后为 **82.4%**、**25.4%**。
+这项消融支持让控制器参考当前计算，而不只是计时；仍不等于它能预先知道每次切换都保住正确回答，见第 5.2 节及表 1。
+
+### 回答很短时，固定状态反而贵
+
+Llama 3.1-8B-Instruct 展示了另一种情况。
+完整注意力平均 **56.4%**，按成本相当点学习的路由器为 **57.6%**，缓存节省却只有 **1.3%**。
+全线性模型得到 **28.8%**，匹配长度后的缓存节省为 **−68.4%**；固定状态相对短小的完整缓存，反而占得更多，见第 5.2 节及表 1。
+
+在这套设置里，一层的线性状态、最近窗口与开头保留词元，大致占用 **584 个完整注意力词元**的缓存空间。
+Llama 的 GSM8K 和代码样本里，约 97% 的提示加回答还没到这个长度。
+不再增长的结构，也可能一开始就比替代对象大。
+当切换收益很小时，路由器可以继续保留完整注意力。
+
+## 核心概念
+
+**键值缓存。** 每层为后续注意力留下的键和值。
+大小随保留的位置数增长；模型权重占的内存是另一项成本。
+
+**线性状态。** 较老词元离开精确窗口后，更新进入有限大小的数值记录。
+它让长解码少占缓存，也带来了对原模型行为的近似。
+
+**单向路由策略。** 学习每层何时释放大缓存。
+位置与当前隐藏状态提供输入，完整回答的奖励提供训练；释放的条目没有另存一份完整注意力备份。
+
+## 洞见
+
+缓存预算可以沿着层数与生成时间两条轴分配。
+该保留完整注意力的地方先留下，再让选中的层进入有限状态，比统一替换更灵活。
+收益仍要连着模型、任务和回答长度一起看。
+
+## 博导审稿
+
+论文中的百分比，测的对象不同。
+准确率实验估计每条生成轨迹的峰值注意力状态，再取平均。
+正文表 2 另行估计一万六千词元时，完整缓存为 **2.25 GiB**，Turnout 为 **1.39 GiB**，额外参数本身也占空间。
+这些估计不含激活、工作区与部分实现缓冲，见第 5.2—5.3 节。
+
+实际测量的单张 H100、MATH-500 运行中，峰值分配内存为 **17.9 GiB 与 17.4 GiB**。
+作者报告八千到一万六千词元长序列的解码快 33%。
+它支持所测工作负载上的收益；缓存节省百分比本身，不能换成整张显卡少用同样百分比的内存，见第 5.3 节及图 7。
+
+路由器很小，约 65 万参数，可供它选择的线性路径已经经过大量蒸馏。
+路由训练还只留原模型能答对的题，目标是节省内存时保住既有能力。
+主要路由证据来自会长推理的 Qwen；短回答 Llama 的结果说明，不同工作负载不能照搬收益，见第 3、5.1、5.3 节。
+
+FlashMorph 对照把层排序套在作者的线性路径上，并省略原方法最后的混合模型微调。
+比较成立于这套配置，不能当成对原论文全部流程的复现。
+单向切换和仍存在的分数差距，也说明它是一份测量过的取舍，不是无损替换保证，见附录 B.4 及第 5.2 节。
+
+## 启发
+
+评估这类模型时，把答案质量、注意力状态与整机显存分别记录，既测长推理，也测短回答。
+开头的数学模型能从学习缓存预算中获益，前提是备好线性路径并训练策略。
+先在实际任务与硬件上评价那个检查点，再把缓存百分比换算成部署收益。
+:::
+
+{/* Reading source: https://arxiv.org/html/2611.27500v1; sha256: b7232724a36161d2211292c14bda7aee8d4f96bfefa2321a3684484f8a7090fc; main text and both appendices read, including routing, accuracy, matched-length cache proxy, measured memory, and baseline adaptations; figure captions read but graphics not visually inspected; experiments not independently reproduced. */}
