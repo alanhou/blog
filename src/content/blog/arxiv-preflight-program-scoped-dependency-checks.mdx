@@ -1,0 +1,280 @@
+---
+title:
+  en: "A Dependency Verdict Needs Application Context"
+  zh: "查依赖，要沿程序走"
+description:
+  en: "Preflight probes Python dependencies through the APIs referenced by an application, then compares observed behavior across exact artifacts. Function-level probes expose two incidents missed by import-only checks. The evidence remains bounded by exercised inputs, reference versions and the verdict policy."
+  zh: "Preflight 从应用引用的接口出发，在沙箱里探测 Python 依赖，再比较确切版本的行为。两个案例中，调用函数发现了只做导入时漏掉的异常；结论仍受测试范围、参照版本和判定规则限制。"
+date: 2026-11-24
+tags: ["arxiv", "ai", "cs.ai", "security", "dependencies", "agents", "software-supply-chain"]
+image: "/arxiv-visuals/arxiv-preflight-program-scoped-dependency-checks.png"
+---
+
+:::en
+**Paper**: [2611.31110](https://arxiv.org/abs/2611.31110) — Preflight: Agentic Last-Mile Verification for AI Software Supply Chains\
+**Authors**: Yaman Jandali, Nojan Sheybani, Farinaz Koushanfar, Tara Javidi\
+**Categories**: cs.AI, cs.CR\
+**Reading scope**: Original arXiv v1 HTML, all six main sections and both tables. Both original SVG figures were rendered and visually inspected; table values were read from HTML cells. The implementation was not independently audited, and the experiments were not reproduced.
+
+## The Problem
+
+In the paper's LiteLLM experiment, the same comparison—version **1.82.6 against 1.82.7**—receives two verdicts. An ordinary client workload gets **clean**. A proxy-server workload gets **malicious**. The package versions stay fixed; the functionality exercised by the application changes (§4.1; Table 1; Figure 2).
+
+The client workload never enters the compromised proxy path. Its clean result describes that tested workload. It does not clear every part of the released package.
+
+This distinction matters because a Python dependency executes with access to resources inside its application's trust boundary. An update can behave normally at import and reveal another behavior only when a constructor, function, plugin or particular input is used. Artifact provenance helps establish where the software came from. Static inspection and package-level tests add other evidence. The remaining question is what the resolved artifact does through the interfaces this application references (§§1–2).
+
+Jandali and colleagues build Preflight around that question: generate application-conditioned probes, run them in a restricted environment, and bind the resulting decision to the program and dependency state that were analyzed.
+
+## The Explanation
+
+### Start from the application and build a probe
+
+For the LiteLLM client, Preflight starts with the client program and its pinned dependencies. It parses the Python syntax tree to collect imported packages and referenced symbols, including aliases and module attributes. It joins those references to versions recorded in requirements.txt, uv.lock or Pipfile.lock. Unpinned dependencies are rejected because the result needs a specific version (§3.2).
+
+The references tell the system what to try exercising. A program that calls `requests.get` needs a probe that calls that function, rather than merely imports its package. This is an extracted API surface, with the limitations of that extraction; it is not an exhaustive map of every path the application could reach.
+
+A language model, gpt-5.4-mini in the reported setup, proposes a small Python harness—a piece of code that supplies inputs and invokes the referenced interfaces. A deterministic validator checks syntax, the 100-line limit, required imports, referenced-symbol invocation and fixed constraints. A rejected candidate gets feedback and one revision, for at most two validation rounds. The model receives **validator feedback**, rather than execution traces used to search for more suspicious behavior (§3.2).
+
+Across the study's five incident contexts, all **nine final harnesses** passed validation and executed. Four passed on their first candidate; five needed a revision, producing 14 model API calls. The live-agent evaluation used no deterministic harness fallback. This shows the bounded synthesis loop operating, while its advantage over other ways to write an equivalent function-level probe remains a separate question (§3.2).
+
+### Run exact artifacts and compare what happened
+
+“Pre-execution” means before the downstream application's intended execution. The analysis itself **installs and executes dependency artifacts** inside restricted Docker environments. It traces installation and harness execution, collecting system calls, network and DNS activity, filesystem changes and spawned processes (§3.3).
+
+Preflight turns noisy logs into a stable behavior list, called a fingerprint. It normalizes details such as temporary paths and process identifiers, then records endpoints, sensitive environment access, persistent writes, executables and syscall categories. The raw traces remain available when this summary needs interpretation.
+
+The client and proxy probes each run against the exact LiteLLM target and reference artifacts. For a matched application interface, the comparison asks which capabilities appear in the target and were absent in the reference. Network access or a subprocess can be ordinary application behavior; a controlled version comparison gives those observations context (§3.4).
+
+A prior version is a **behavioral reference**, with its own trust assumptions. If there is no defensible predecessor, Preflight can analyze the target alone. That supports a report of observed behavior, but cannot establish that a capability was newly introduced by an update.
+
+### Turn evidence into a decision with a stated scope
+
+Preflight combines behavior, version differences and static findings into `clean`, `suspicious` or `malicious` labels. In the reported incident runs, all five attempts to use an optional gpt-5.4 verdict synthesizer failed because the requests exceeded input or context limits. **All five final incident verdicts used deterministic fallback rules**, rather than model judgments (§3.5).
+
+Those rules label at least two critical capability findings malicious, one suspicious and none clean, with a possible override for a critical static finding. Static findings did not determine any of the five incident verdicts. A verdict is therefore the result of a specified policy applied to collected evidence; it should be read alongside that evidence.
+
+A signed certificate records the program, dependency state, artifact digests and verdict. A separate checker verifies the signature, matching hashes and freshness, and permits execution only with a valid clean certificate. The signature authenticates the report and the state it describes; it does not expand the behavior that was tested (§3.5; Figure 1).
+
+### Ask what each comparison establishes
+
+The LiteLLM workloads show why application context matters. The preregistered client workload produces no security-sensitive differential. The separately labeled exploratory proxy workload reaches the compromised path and exposes endpoints and subprocesses absent from the reference. Across four real incidents and five application contexts, the reported labels are:
+
+| Context | Artifact comparison | Verdict |
+| --- | --- | --- |
+| LiteLLM client | 1.82.6 against 1.82.7 | clean |
+| LiteLLM proxy | 1.82.6 against 1.82.7 | malicious |
+| Ultralytics | 8.3.40 against 8.3.41 | malicious |
+| ctx | 0.1.2 against 0.2.2 | malicious |
+| DurableTask | target only | malicious |
+
+These are **detector verdicts**. The authors separately track whether every behavior category on their preregistered expected-findings list was observed. LiteLLM proxy and ctx receive malicious labels while some expected findings are missing (§4.2; Table 1).
+
+DurableTask illustrates the distinction sharply. Its source contains a downloader, but execution shows domain resolution and sinkholed connections, without the expected persistent write or subprocess. Its target-only malicious label comes from three counted endpoints, **two of which belong to sandbox infrastructure**. The run does not establish completed payload execution or a newly introduced malicious version difference (§4.2).
+
+To test why function invocation matters, the authors compare function-level and import-only probes on Ultralytics and ctx. The artifacts, dependency closures, referenced-symbol specifications, environment, limits and decision policy are held fixed; only harness mode changes. Function-level probing produces **two malicious verdicts out of two cases**, while import-only probing produces **zero out of two**. The function probes observe both expected categories for Ultralytics and one of two for ctx; import-only probes observe none (§4.4; Table 2).
+
+That supports exercising the relevant API instead of stopping at import. It does not establish that a language model is better than a deterministic function-level probe given equivalent API knowledge, or that iterative synthesis beats a single proposal.
+
+The complementary benign test uses **100 pinned, curated AI/data/ML-adjacent packages**. All exercised workloads complete with clean verdicts and no infrastructure errors: **zero observed false positives out of 100**. This is useful evidence of selectivity on those workloads, rather than a guarantee about untested interfaces or the wider package population (§4.3).
+
+## Core Concepts
+
+**The exercised surface.** The client and proxy use different parts of LiteLLM. Preflight extracts references and constructs probes around them. A verdict inherits the coverage of those probes, including their inputs and object states.
+
+**A matched reference.** Comparing the same application-facing functionality across exact artifacts helps distinguish ordinary behavior from a newly observed capability. The earlier artifact still needs a justified identity and reference role; age alone does not make it benign.
+
+**A decision with supporting evidence.** A malicious label, completeness of expected observations, and a valid signature answer different questions. DurableTask can cross the decision threshold while its expected payload stages remain unobserved. A certificate can faithfully authenticate that limited report.
+
+## The Insight
+
+The strongest result is that dependency verification gains useful context from what the application actually references and what the probes exercise. The LiteLLM contrast makes that scope visible, and the two-case ablation shows behavior that import-only testing misses.
+
+The further lesson is to preserve the path from observation to label. When capability counts, expected findings and the verdict remain separate, a reader can assess what a successful detection means and where the investigation stopped.
+
+## A Critical Reading
+
+The architecture is concrete, and the controlled probing comparison addresses a real weakness of import-only testing. Its central coverage assumption remains substantial: extracted symbols and a few invocation patterns must exercise the relevant behavior. Reflection, dynamic imports, callbacks, plugins and input- or environment-sensitive branches can fall outside that surface (§5).
+
+The experiment isolates **function-level versus import-only execution**. It provides no comparison against equivalent deterministic function probes, and the synthesis loop receives no runtime feedback to expand coverage. The model alias is recorded without an immutable snapshot or seed, which also limits exact reproduction of its proposals (§3.2; §5).
+
+The verdict policy deserves scrutiny alongside its output. DurableTask's infrastructure endpoints contribute to a malicious label under an empty reference set, while neither expected payload category is observed. Containment may stop later attack stages, so missing observations need interpretation through raw traces. The normalized representation also lacks complete attribution of behavior to installation, import or explicit API execution (§§4.2, 5).
+
+Finally, four incidents and a curated benign set are an initial evaluation. Non-evaluable or artifact-identity-incomplete attempted cases are excluded, and an older reference version is not proof of benignity. The evidence supports this application-conditioned verification design under the reported conditions; broader detection accuracy and complete application safety remain unestablished (§§4.1, 5).
+
+## What You Can Use
+
+For a dependency review, record which interfaces the application references, the exact artifacts analyzed, and the inputs exercised. If a client later starts using proxy functionality, its earlier report describes a different tested state.
+
+When comparing an update with a prior version, keep the application-facing probes and dependency treatment matched. Preserve raw observations, the expected behavior categories reached, and the policy verdict as separate parts of the result. This makes a clean report or an incomplete malicious trace easier to interpret.
+
+Preflight offers a concrete way to bind behavioral evidence to an intended execution. The useful habit is to keep that scope attached to the verdict all the way to the decision that consumes it.
+:::
+
+:::zh
+**论文**: [2611.31110](https://arxiv.org/abs/2611.31110) — Preflight: Agentic Last-Mile Verification for AI Software Supply Chains\
+**作者**: Yaman Jandali, Nojan Sheybani, Farinaz Koushanfar, Tara Javidi\
+**分类**: cs.AI, cs.CR\
+**阅读范围**: arXiv v1 原始 HTML，读过全部六个正文节和两张表。
+两张原始 SVG 图已渲染并目视检查，表格数值按 HTML 单元格读取。
+没有独立审计实现，也没有复现实验。
+
+## 问题
+
+论文里的 LiteLLM 实验，拿同一对版本——**1.82.6 与 1.82.7**——得到两种判定。
+普通客户端工作负载得到 **clean**，代理服务器工作负载得到 **malicious**。
+软件版本没变，变的是应用实际触发了哪部分功能（§4.1；表 1；图 2）。
+
+客户端没有进入遭到篡改的代理服务器路径。
+它的 clean 结果描述的是这次测试过的工作负载，并没有检查发行包里的每一处代码。
+
+Python 依赖会在应用的权限范围里执行。
+有的异常在导入时就出现，有的要调用某个构造函数、接口、插件，或者碰到特定输入才显露。
+来源证明帮助确认软件从哪来，静态检查和包级测试也提供信息。
+剩下的问题，是拿到的这份实际软件，通过当前应用引用的接口，会做什么（§§1–2）。
+
+Jandali 和同事做的 Preflight，就围着这个问题展开：按照应用生成探测代码，在受限环境里运行，再把判定绑到分析过的程序和依赖状态上。
+
+## 翻译
+
+### 先看应用，再写探测代码
+
+对 LiteLLM 客户端，Preflight 先读客户端程序与固定版本的依赖清单。
+它把 Python 程序拆成语法树，找出导入的包和引用的符号，包括别名、模块属性，再与 requirements.txt、uv.lock 或 Pipfile.lock 里的版本对应。
+没有固定版本的依赖会被拒绝，因为判定需要落到确切版本（§3.2）。
+
+这些引用决定接下来尝试触发什么。
+应用如果调用 `requests.get`，探测代码就要尝试调用这个函数，不能只导入 requests 便结束。
+这是从程序提取出来、准备用测试覆盖的接口范围，并不是完整列出了应用可能走到的全部路径。
+
+实验使用 gpt-5.4-mini 提议一小段 Python 测试代码，让它准备输入并调用指定接口。
+确定性校验器检查语法、最多一百行、必要导入、引用符号的调用，以及固定约束。
+被拒绝的候选得到反馈，再修改一次，总共最多两轮校验。
+模型收到的是**校验器的反馈**，不是运行轨迹；它没有根据实际执行继续搜索可疑行为（§3.2）。
+
+五个事件场景中，最终的**九份探测代码**都通过校验并执行。
+四份第一次就过，五份改了一次，总共调用模型 API 十四次。
+这组在线代理实验没有采用确定性探测代码兜底。
+它展示了有限的生成与校验回路能够运作，至于是否胜过其他等价的函数级探测办法，还要另外比较（§3.2）。
+
+### 运行确切的软件，再比较行为
+
+论文说的“执行前”，指的是下游应用正式运行之前。
+分析过程本身会**安装并执行依赖软件**，只是放在受限的 Docker 环境里。
+安装与探测代码运行都会留下轨迹，包括系统调用、网络与域名活动、文件变化、子进程（§3.3）。
+
+原始日志很杂，临时路径和进程编号每次都可能变。
+Preflight 把它们整理成稳定的行为清单，称为“行为指纹”：访问的端点、敏感环境信息、持久写入、启动的可执行程序、系统调用类别。
+原始轨迹仍会保留，方便解释这张简化清单。
+
+客户端和代理服务器的探测，分别对 LiteLLM 的确切目标软件与参照软件运行。
+对相同的应用接口，比较的是目标里出现了哪些能力，而参照里没有。
+联网或启动子进程本来就可能是正常行为；条件匹配的版本比较，让这些观察有了上下文（§3.4）。
+
+旧版本在这里是**行为参照**，也带着它自己的可信假设。
+没有站得住的前一个版本时，Preflight 可以只分析目标。
+这样能报告看到了什么，却不能断言某项行为是这次更新新带来的。
+
+### 给出判定，也写清判定的范围
+
+Preflight 把行为、版本差异和静态发现合起来，输出 `clean`、`suspicious` 或 `malicious`。
+论文的事件实验中，作者还尝试让 gpt-5.4 辅助综合判定，但五个场景的请求全都超过输入或上下文限制。
+因此，**五个最终判定都来自确定性兜底规则**，不是模型裁决（§3.5）。
+
+规则把至少两个关键能力发现判为 malicious，一个判为 suspicious，没有则判为 clean；关键静态发现可以覆盖这项结果。
+不过，这五个事件判定都不是静态发现决定的。
+标签是特定策略处理已收集证据的结果，需要和证据一起读。
+
+之后生成签名证书，记录程序、依赖状态、软件摘要与判定。
+另一道小检查验证签名、哈希是否对应，以及证书是否仍新鲜；只有有效且为 clean 的证书才能放行。
+签名确认报告完整、对应哪份状态，并不会让测试范围自动变大（§3.5；图 1）。
+
+### 每组比较，究竟说明什么
+
+LiteLLM 的两个工作负载，直接展示了应用范围的作用。
+预先登记的客户端工作负载没有出现安全相关差异；另外标作探索性的代理服务器工作负载进入了受影响路径，触发参照里没有的端点和子进程。
+四次真实供应链事件、五个应用场景的标签如下：
+
+| 场景 | 软件比较 | 判定 |
+| --- | --- | --- |
+| LiteLLM 客户端 | 1.82.6 与 1.82.7 | clean |
+| LiteLLM 代理服务器 | 1.82.6 与 1.82.7 | malicious |
+| Ultralytics | 8.3.40 与 8.3.41 | malicious |
+| ctx | 0.1.2 与 0.2.2 | malicious |
+| DurableTask | 只分析目标 | malicious |
+
+这是**检测器的标签**。
+作者另记一项：实验前列好的预期行为类别，是否全部观察到了。
+LiteLLM 代理服务器和 ctx 虽被判为 malicious，仍有预期现象没出现（§4.2；表 1）。
+
+DurableTask 更能说明两项记录为什么要分开。
+源代码里有下载器，但执行只看到域名解析和被导向沙箱接收端的连接，没有观察到预期的持久写入或子进程。
+它在没有旧版本参照的情况下，被统计到的三个端点推过了 malicious 阈值，其中**两个端点属于沙箱基础设施**。
+这次运行没有证明载荷已完整执行，也没有证明某次更新新引入了恶意差异（§4.2）。
+
+为了检验调用函数为何重要，作者在 Ultralytics 和 ctx 上比较函数级探测与只做导入的探测。
+软件本体、依赖组合、引用符号要求、环境、运行限制和判定策略固定，只换探测方式。
+函数级探测的**两个案例都被判为 malicious（2/2）**，只做导入则**两个都没有（0/2）**。
+函数探测看到了 Ultralytics 的两项预期类别，以及 ctx 两项中的一项；只做导入，两案的预期类别都没看到（§4.4；表 2）。
+
+这支持“要触发应用引用的接口，不能停在导入”。
+它并没有证明语言模型胜过掌握同样接口知识的确定性函数探测，也没有证明反复生成比一次生成更好。
+
+另一组测试选取 PyPI 上**一百个固定版本的 AI、数据、机器学习相关良性包**。
+实际运行的工作负载全部得到 clean，也没有基础设施错误，即**一百次中没有观察到误报**。
+这是这些工作负载上的选择性证据，不能延伸成全部接口或整个软件生态的零误报保证（§4.3）。
+
+## 核心概念
+
+**实际探测的接口范围。** 客户端与代理服务器用到 LiteLLM 的不同部分。
+Preflight 提取引用，再围着它们构造探测。
+判定要继承这些探测的范围，包括尝试过的输入和对象状态。
+
+**条件匹配的参照。** 用相同的应用功能测试确切软件，才能更有根据地辨认新增行为。
+但参照的身份和选择理由仍需成立，旧本身不等于良性。
+
+**判定与支撑证据。** 恶意标签、预期现象是否观察完整、签名是否有效，回答的是不同问题。
+DurableTask 可以达到判定阈值，同时仍没观察到预期载荷阶段。
+证书也可以如实认证这样一份有限的报告。
+
+## 洞见
+
+最有支撑的结果，是依赖检查能从应用引用什么、探测实际触发什么，得到有用的上下文。
+LiteLLM 的对照把这个范围摆出来，两个案例的探测比较又展示了只做导入时看不到的行为。
+
+还要保留观察怎样走到标签的过程。
+能力统计、预期现象与判定分别记录，读者才知道一次“检测成功”意味着什么，调查又停在了哪里。
+
+## 博导审稿
+
+架构具体，探测对照也回应了只导入便结束的真实短板。
+关键预设仍很重：提取到的符号，加上有限调用方式，能否触发值得检查的行为？
+反射、动态导入、回调、插件，以及依赖输入或环境的分支，都可能落在测试范围之外（§5）。
+
+实验隔离的是**函数级执行与只做导入**。
+它没有和等价的确定性函数探测比较，生成回路也没有接收运行反馈来扩展覆盖。
+模型记录为别名，没有固定到不可变快照或随机种子，也限制了提议的精确复现（§3.2；§5）。
+
+判定规则需要和输出一起审视。
+DurableTask 用空参照时，基础设施端点参与了 malicious 判定，两项预期载荷类别却都没看到。
+隔离措施可能挡住攻击后续阶段，因此缺失现象需要结合原始轨迹解释。
+目前的归一化记录，也不能完整区分某项行为发生在安装、导入，还是显式调用接口时（§§4.2、5）。
+
+最后，四次事件与一组精选良性包，仍是初步评估。
+不能有效运行，或不能确认恶意软件确切身份的尝试被排除；旧版本参照也不是良性证明。
+证据支持这套按应用组织行为检查的设计，却没有建立更广泛的检测准确率或完整的应用安全保证（§§4.1、5）。
+
+## 启发
+
+检查依赖时，把应用引用的接口、分析过的确切软件，以及实际尝试的输入记录下来。
+客户端后来若改用代理服务器功能，早先的报告描述的就已经是另一份测试状态。
+
+比较新旧版本时，保持应用探测和依赖处理一致。
+原始观察、预期行为类别的覆盖，以及策略标签，分别保留。
+这样才能解释一份 clean 报告，或一条没有执行完整的恶意轨迹。
+
+Preflight 给出了一种把行为证据绑到预定执行的方法。
+值得带走的习惯，是让这个范围一直跟着判定，直到最后使用它作决定。
+:::
+
+{/* Reading source: https://arxiv.org/html/2611.31110v1; sha256: 6399d3a0e7c33baf3288d8f46777bc7e905b2341a3c45037d3d3ebd2e913bf1e; all six main sections and Tables 1–2 read; Figures 1–2 rendered from original SVGs and visually inspected; table values read from HTML cells; source map prepared before drafting; application scope, bounded validator loop, failed optional model verdict requests, deterministic policy, artifact baselines, verdict-versus-coverage distinction, infrastructure endpoint counts, limited ablation and benign workload denominator disclosed; no independent factual/readability review, implementation audit or experiment reproduction. */}
