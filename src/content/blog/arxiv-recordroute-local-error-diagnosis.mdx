@@ -1,0 +1,276 @@
+---
+title:
+  en: "Locate Agent Errors, Then Diagnose the Selected Record"
+  zh: "查错先定位，诊断看局部"
+description:
+  en: "RecordRoute learns to rank records in failed agent logs, then classifies the selected record's error type. With location predictions fixed, local evidence raises pooled joint accuracy from 69.28% to 77.47% on injected failures. Exact localization remains much harder on two natural-failure benchmarks."
+  zh: "RecordRoute 从标注过的智能体日志学习定位，再用选中记录判断错误类型。在位置预测相同的对照里，局部诊断让注入错误上的联合准确率从 69.28% 升到 77.47%。两个自然失败基准上的精确定位仍难得多。"
+date: 2026-11-25
+tags: ["arxiv", "ai", "cs.ai", "agents", "debugging", "evaluation"]
+image: "/arxiv-visuals/arxiv-recordroute-local-error-diagnosis.png"
+---
+
+:::en
+**Paper**: [2611.33022](https://arxiv.org/abs/2611.33022) — RecordRoute: Auditing Agent Failures with Localization-Guided Diagnosis\
+**Authors**: Yifan Duan, Lihuan Li, Chao Xue, Siyuan Zheng, Du Yin, Flora D. Salim\
+**Category**: cs.AI\
+**Reading scope**: Original arXiv v1 HTML. All six main sections and Appendices A–C were read, including Tables 1–10 from HTML cells. Figures 1–3 were visually inspected; the original SVGs for Figures 2–3 were rendered locally. Bibliographic entries and external cited papers were not separately reviewed. The implementation was not audited and the experiments were not reproduced.
+
+## The Problem
+
+The paper's Figure 1 illustrates a relay: agent A reads **“over 40 reptile species,”** agent B turns it into **“exactly 40 crocodiles,”** and agent C repeats “40” in a wrong final answer. The diagram labels B's second step as the origin and C's repetition as a later symptom. It is a schematic example, not an additional experiment.
+
+An auditor needs to identify the responsible actor, the decisive step and the error type. In this example, inspecting the final answer alone does not tell the auditor where the distortion entered the chain. Reading the entire log adds evidence, but also adds later repetitions of the same mistake (§1; Figure 1).
+
+RecordRoute uses that distinction to organize the audit. It learns to select a record from an annotated failed execution, then diagnoses the error type using that record's text. The contribution is a supervised ranking and classification pipeline: the location prediction chooses the execution text used for diagnosis (§§3–4).
+
+## The Explanation
+
+### Preserve the wording, learn which record to inspect
+
+In the relay, B's wording and C's repetition belong to separate records. RecordRoute preserves those boundaries. It temporarily removes the actor and step headers before scoring the text, while keeping the headers attached for later output (§4.1).
+
+Each record becomes a set of weighted word and character features. Single words and two-word phrases retain action wording; character fragments retain parts of tool identifiers or error messages even when complete words differ. This representation is called **TF-IDF**: a feature reflects how often a term appears in the record and how distinctive it is across the training records. When a task query is available, additional features capture shared words between the query and record. Natural-failure localization uses the record text without a task query (§4.1; Appendix A).
+
+The locator learns from pairs inside the same failed execution. An annotated decisive record is compared with other candidates, including later symptoms. Subtracting their features cancels what they share and exposes their differences to a linear logistic model. Pair weights are normalized within each execution so that logs with more candidate pairs do not dominate training (§4.2).
+
+At inference, the model scores each record once and selects the highest score. It does not reconstruct all training pairs. Equal scores favor the earlier record. The selected record's retained header then supplies the actor and step, keeping both predictions tied to the same action (§§4.2–4.3).
+
+![The paper's schematic: B distorts A's source, C repeats the mistake, and RecordRoute selects a record before diagnosing its error type.](/arxiv-visuals/arxiv-recordroute-local-error-diagnosis/overview.png)
+
+*Original Figure 1 from the paper. The illustrated B-at-step-2 outcome explains the intended audit; it does not establish success on every such relay.*
+
+### Ask the diagnostic classifier about the selected action
+
+After localization, a separately trained linear classifier assigns an error type. It uses the selected record's text, available query, actor identity and structural information such as record length and position. The classifier is a class-balanced **support vector machine**, or SVM, which learns a boundary for each error category (§4.3).
+
+“Local” therefore describes the execution text given to diagnosis. Task and structural context remain available. In the schematic, the requested label describes B's action—communication failure—while the full log also contains A's source and C's consequence. The method makes the diagnostic input correspond to the action being labeled.
+
+The paper tests that choice on **6,257 controlled-injection failures** from Who&When Pro, spanning eight agent frameworks and 16 task benchmarks. It fixes the actor and step predictions, classifier design, metadata, folds and regularization, then changes the diagnostic text (§5.1; §5.4.2; Table 3).
+
+| Text used for diagnosis | Pooled joint accuracy |
+| --- | ---: |
+| Concatenated full trace | 69.28% |
+| Selected record | 77.47% |
+
+Joint accuracy requires **actor, step and error type all to match the annotations**. The improvement is about **8.2 percentage points**. Because the location predictions are identical, this comparison isolates the diagnostic evidence choice rather than a better locator. The selected record contains a median of **19.77% of preprocessed trace tokens**, but its text still matters: retaining only metadata reduces joint accuracy to **44.38%** (§1; Table 3).
+
+### Separate the contributions, then test natural failures
+
+Other controls keep folds, step targets, diagnostic classifier and regularization fixed, with task queries blank. Pairwise ranking with word and character features reaches **90.41% pooled exact-step accuracy**, versus **72.69%** with 1,024-dimensional Qwen3 embeddings. The same sparse features with pointwise training reach **86.73%**. These comparisons support both the representation and the comparative training objective under the tested conditions (§5.4.1; Table 2).
+
+The full system also leads the compared supervised baselines on two natural-failure datasets. Each supervised method is trained and evaluated separately within each benchmark using matched grouped folds. This is not a model trained only on injected errors and transferred without natural-failure labels (§5.1; Appendix A).
+
+| Benchmark and localization metric | RecordRoute | ASCon | StepFinder |
+| --- | ---: | ---: | ---: |
+| Who&When Pro: exact step, averaged across frameworks | 88.50% | 77.06% | 73.28% |
+| TraceElephant: exact step | 27.06% | 18.81% | 11.01% |
+| CatchBench POST: mean Top-1 | 37.46% | 34.92% | 17.46% |
+
+The natural datasets contain **218** and **126** failures, respectively. Their lower exact localization scores make the practical boundary clear: the top-ranked record is often still wrong. On CatchBench POST, the top three contain the annotated fault **77.78%** of the time, making the ranking a potentially useful inspection list (§5.2; Table 1).
+
+### A small classifier can also prepare evidence for an LLM
+
+On a fixed **128-case** supplementary cohort, Claude Sonnet 5.5 receives RecordRoute's predicted actor and step in both conditions. Its joint accuracy is **32.81%** with the full trace and **41.41%** with the selected record. DeepSeek V4.1 Flash similarly improves from **30.47% to 36.72%**. The original supervised classifier reaches **58.59%** on those same cases (Appendix B.2; Table 5).
+
+The location-conditioned comparison supports the local evidence choice for these two models on this cohort. It does not establish a general ranking of language models and linear classifiers: the supervised pipeline learns benchmark failures, while the LLMs receive no training examples. Reported API input-token reductions of about **55–57%** relative to direct full-trace attribution exclude locator training and inference.
+
+The ordinary RecordRoute path needs no language-model generation. On 256 traces from one host, its reported median raw-text inference is **9.32 ms on CPU**. StepFinder takes **66.61 ms on GPU** including embedding construction, or **2.21 ms** with cached features. Startup and disk I/O are excluded, so these measurements identify particular pipeline costs rather than a universal speed advantage (Appendix A; Table 4).
+
+## Core Concepts
+
+**A location and an error type answer different questions.** B's step is the location; communication failure is its category. Fixing the location before comparing diagnostic inputs is what makes the local-versus-full-trace result informative.
+
+**Selecting text and retaining identity are separate choices.** The locator scores the body without actor or coordinate headers. Those headers return when it outputs the location and supplies diagnostic metadata. If several actors share a round, training targets can require both actor and coordinate; a round number alone need not identify one record (§4.2).
+
+**The average depends on what receives equal weight.** Final Who&When Pro joint accuracy is **77.47%** when cases receive equal weight, but the official **All** score is **63.67%** when frameworks receive equal weight. These are different summaries of the same three-target prediction problem. They should not be substituted for each other (§5.1; Tables 1 and 6).
+
+## The Insight
+
+In the relay, localization does more than identify B. It tells the next classifier which action its label must describe. The controlled comparison supports making that connection explicit: first choose the candidate action, then give diagnosis evidence centered on it.
+
+The useful lesson is conditional. A focused record helps when the requested diagnosis belongs to that record and the locator can find it. Additional text can contain later consequences that compete with that evidence. A narrow diagnostic input still needs a trustworthy location and sufficient local detail.
+
+## A Critical Reading
+
+The experiments separate feature choice, ranking objective and diagnostic evidence. Important inputs and training access still differ across method families. The three open LLM baselines receive no benchmark training labels, while supervised methods do. Who&When Pro and TraceElephant record bodies are capped at **800 characters**, keeping their beginning and end; these are evaluations of that preprocessing protocol (§5.1; Appendices A–B).
+
+Transfer is uneven. Leaving out each task benchmark gives **81.99% pooled localization** without a query. Leaving out each agent framework gives **54.97% framework-macro accuracy**, above StepFinder's **44.41%**, but pooled accuracy is **49.03%**, slightly below the last-step baseline's **49.38%**. On held-out MetaGPT it reaches **12.35%**, versus StepFinder's **65.43%**. A favorable macro average does not make every new framework reliable (§5.3; Figure 3; Tables 9–10).
+
+The content-masking test is another useful boundary. After removing queries and masking content words and numbers, localization remains **86.75%**. Punctuation, word lengths and a fixed set of function and heading words remain available. This shows that residual format cues can support prediction; it does not demonstrate that the model reconstructed the causal chain (Appendix C; Table 8).
+
+The pipeline assumes that selecting one record supplies enough execution evidence for its error category. A useful next test would examine failures whose decisive evidence is distributed across several actions or absent from the recorded text. The reported scores measure agreement with annotations; a proposed repair still needs its own validation.
+
+## What You Can Use
+
+For an agent audit, preserve record boundaries and their actor and step headers. Train and test a locator on representative annotated failures, and evaluate its candidate list separately from the error-type classifier. Use held-out queries and frameworks to see how much the result depends on familiar log formats.
+
+When comparing local and full-trace diagnosis, keep location predictions and diagnostic budgets matched. Report exact and shortlist localization, complete attribution, and the weighting behind each average. Include preprocessing and locator costs in a system-level comparison.
+
+Return to B's distorted message before changing C's final-answer behavior. Treat the selected record as a lead for inspection, and check whether a repair actually resolves the execution. The evidence supports a better-organized audit; that last confirmation makes it useful for debugging.
+:::
+
+:::zh
+**论文**: [2611.33022](https://arxiv.org/abs/2611.33022) — RecordRoute: Auditing Agent Failures with Localization-Guided Diagnosis\
+**作者**: Yifan Duan、Lihuan Li、Chao Xue、Siyuan Zheng、Du Yin、Flora D. Salim\
+**分类**: cs.AI\
+**阅读范围**: arXiv v1 原始 HTML。
+读过全部六个正文节和附录 A–C，表 1–10 按 HTML 单元格读取。
+图 1–3 已目视检查，图 2、3 的原始 SVG 在本地渲染后查看。
+没有逐项核查参考文献及其外部论文，没有审计实现代码，也没有复现实验。
+
+## 问题
+
+A 看见“**超过 40 种爬行动物**”，B 转述成“**恰好 40 条鳄鱼**”，C 又把“40”写进错误的最终答案。
+这是论文图 1 里的传话示意，不是额外跑的一条实验。
+图中标注的发源处是 B 的第二步，C 的重复则是后续症状。
+
+复盘的人要找出**谁出了错、关键错误在哪一步、属于什么错误类型**。
+只看最终答案，找不出这次转述从哪里走样；把整段日志都读一遍，又会读到同一个错误的后续重复（§1；图 1）。
+
+RecordRoute 围绕这项区别安排复盘。
+它从标注过的失败日志里学习挑选一条记录，再用这条记录的正文判断错误类型。
+论文的贡献是一套监督学习的排序和分类流程：**定位结果决定诊断读哪段执行文字**（§§3–4）。
+
+## 翻译
+
+### 留住措辞，学会挑哪条记录
+
+传话链里，B 的转述和 C 的重复是两条记录。
+RecordRoute 保留这种边界，评分时暂时去掉执行者和步骤标头，原标头仍附在记录上，供之后输出（§4.1）。
+
+每条正文会变成一组带权重的词和字符特征。
+单词、两词短语保留动作措辞，字符片段保留工具名和错误信息的局部细节；完整词不同，仍可能共享这些片段。
+这种表示叫 **TF-IDF**：一个词的权重取决于它在这条记录里出现得多不多，以及相对训练记录有多特别。
+有任务问题时，还加入问题与记录共享哪些词的特征。
+自然失败的定位测试不提供任务问题（§4.1；附录 A）。
+
+定位器从**同一条失败日志内部的记录对**学习。
+标注认可的关键记录，与其他候选记录比较，其中包括后续症状。
+两者特征相减，共有部分抵消，差异交给一个线性逻辑回归模型。
+每条日志的记录对权重总和相同，候选更多的长日志不会因此压过其他日志（§4.2）。
+
+实际使用时，每条记录只评分一次，选最高分；同分选较早的记录。
+训练时的记录对无需重新构造。
+选中记录的原标头提供执行者和步骤，让这两个预测落在同一个动作上（§§4.2–4.3）。
+
+![论文示意图：B 改写 A 的原文，C 继续传错；RecordRoute 先选记录，再判断其中的错误类型。](/arxiv-visuals/arxiv-recordroute-local-error-diagnosis/overview.png)
+
+*原论文图 1。图中 B 的第二步解释的是复盘目标，不能据此认定每条类似传话链都能定位成功。*
+
+### 让诊断回答选中动作的问题
+
+定位之后，一个单独训练的线性分类器判断错误类型。
+它使用选中记录的正文、可用的任务问题、执行者身份，以及记录长度、位置等结构信息。
+分类器叫**支持向量机**，简称 SVM，会为不同错误类别学习区分边界，并平衡类别权重（§4.3）。
+
+因此，“局部”说的是诊断读到的执行文字，任务和结构背景仍保留。
+在示意图里，要判的是 B 的动作——沟通失败；整段日志则还包含 A 的来源和 C 的后果。
+这项设计让诊断输入对应到正在分类的那个动作。
+
+作者在 Who&When Pro 的 **6,257 条注入错误日志**上检验这项选择，覆盖八种智能体框架和十六个任务基准。
+对照固定执行者和步骤预测、分类器设计、元数据、数据划分及正则化，只改诊断读哪段文字（§5.1；§5.4.2；表 3）。
+
+| 诊断使用的文字 | 按案例平均的联合准确率 |
+| --- | ---: |
+| 拼接整段日志 | 69.28% |
+| 选中的记录 | 77.47% |
+
+联合准确率要求**执行者、步骤、错误类型三项都与标注匹配**。
+提高的是约 **8.2 个百分点**。
+两组的位置预测相同，因此这项对照检验的是诊断证据的选择。
+选中记录占预处理后整段日志词元的中位比例为 **19.77%**；文字仍不可少，只保留元数据，联合准确率就降到 **44.38%**（§1；表 3）。
+
+### 拆开贡献，再看自然失败
+
+另一些对照固定数据划分、步骤目标、诊断分类器和正则化，不给任务问题。
+词和字符特征配合成对排序，精确步骤准确率为 **90.41%**；换成 1,024 维 Qwen3 向量，同样成对排序则是 **72.69%**。
+保留词和字符特征，改为逐条训练，得 **86.73%**。
+这些对照分别支持该条件下的表示选择和比较式训练（§5.4.1；表 2）。
+
+完整方法在两个自然失败数据集上，也领先受比较的监督学习基线。
+每项监督方法都在**各基准自己的数据内**，按相同的分组划分训练和评估；这里没有证明仅用注入错误训练，就能直接迁移到未标注的自然失败（§5.1；附录 A）。
+
+| 基准与定位指标 | RecordRoute | ASCon | StepFinder |
+| --- | ---: | ---: | ---: |
+| Who&When Pro：按框架平均的精确步骤准确率 | 88.50% | 77.06% | 73.28% |
+| TraceElephant：精确步骤 | 27.06% | 18.81% | 11.01% |
+| CatchBench POST：平均第一候选命中率 | 37.46% | 34.92% | 17.46% |
+
+两个自然失败数据集分别有 **218 条和 126 条**案例。
+精确定位低得多，意味着第一候选仍经常选错。
+CatchBench POST 的前三候选包含标注错误的比例为 **77.78%**，因而可能适合作为后续检查的短名单（§5.2；表 1）。
+
+### 小分类器也能给大模型递证据
+
+在固定的 **128 条**补充案例里，Claude Sonnet 5.5 两组都拿到 RecordRoute 预测的执行者和步骤。
+诊断读整段日志时，联合准确率为 **32.81%**；读选中记录时，是 **41.41%**。
+DeepSeek V4.1 Flash 同样从 **30.47% 升到 36.72%**。
+原来的监督分类器在同组案例上，则达到 **58.59%**（附录 B.2；表 5）。
+
+位置相同的对照，支持这两个模型在该样本上使用局部证据。
+这还不是大模型与线性分类器的普遍排名：监督流程学过基准里的失败，大模型没有拿到训练样例。
+相对直接读整段日志，报告的 API 输入词元减少约 **55% 到 57%**，没有计入前置定位器的训练和推理。
+
+普通 RecordRoute 流程无需大模型生成文字。
+单台机器上 256 条日志的测量中，从原始正文开始，CPU 推理中位耗时为 **9.32 毫秒**。
+StepFinder 在 GPU 上连同向量构造是 **66.61 毫秒**，使用缓存向量则为 **2.21 毫秒**。
+测量不计启动和磁盘读写，因此说明的是这些流程环节的成本，不能直接变成普遍的速度优势（附录 A；表 4）。
+
+## 核心概念
+
+**位置与类型，回答两项问题。** B 的那一步是位置，沟通失败是类别。
+先固定位置，再比较诊断输入，局部与全局的对照才有清楚的含义。
+
+**挑选正文与保留身份，各有用途。** 定位器不从执行者、步骤标头提取文字特征；输出位置及准备诊断元数据时，标头又派上用场。
+多位执行者若共享同一轮号，训练目标可以同时要求执行者和轮号匹配；一个轮号未必只对应一条记录（§4.2）。
+
+**平均谁，决定读到哪个分数。** Who&When Pro 的三项联合准确率，按案例等权平均是 **77.47%**；官方的 **All** 指标按框架等权平均，则是 **63.67%**。
+它们用不同权重概括同一项三目标预测，不能互换（§5.1；表 1、6）。
+
+## 洞见
+
+在传话链里，定位不仅指出 B，还告诉下一位分类器：你要判断的是这个动作。
+受控对照支持把这项联系写进流程——先选候选动作，再围绕它组织诊断证据。
+
+这项判断有条件：待诊断的错误类型要属于该记录，定位器也要能找对它。
+更多文字可能带来相互竞争的后续症状。
+收窄诊断输入，仍需要可信的位置和足够的局部细节。
+
+## 博导审稿
+
+实验拆开了特征选择、排序目标和诊断证据，问题问得具体。
+各类方法的输入和训练资源仍有区别：三个开源大模型基线没拿到基准训练标签，监督方法拿到了。
+Who&When Pro、TraceElephant 的正文截到 **800 个字符**，保留开头和末尾；评测结论包含这项预处理条件（§5.1；附录 A–B）。
+
+迁移表现并不齐整。
+轮流留出任务基准，不给问题文字，按案例平均的定位准确率为 **81.99%**。
+轮流留出智能体框架，按框架等权平均是 **54.97%**，高于 StepFinder 的 **44.41%**；按案例等权平均却是 **49.03%**，略低于总选最后一步的 **49.38%**。
+留出的 MetaGPT 框架上，仅 **12.35%**，StepFinder 则是 **65.43%**。
+宏观平均有优势，不代表每种新框架都可靠（§5.3；图 3；表 9–10）。
+
+内容遮蔽实验也值得保留。
+去掉任务问题，遮掉内容词和数字，定位仍有 **86.75%**。
+标点、词长，以及固定的一组功能词和标题词仍在。
+这说明残留格式线索能支持预测，不能据此认定模型还原了错误的因果链（附录 C；表 8）。
+
+流程预设，选中一条记录就能提供判断其错误类别所需的执行证据。
+可继续检验的情况，是关键证据分散在多个动作里，或根本没有写入日志。
+报告分数衡量的是与标注的一致程度，提出修复之后，还要另行验证。
+
+## 启发
+
+复盘智能体，先保留记录边界，以及执行者、步骤标头。
+用有代表性的标注失败训练并测试定位器，把候选名单与错误类型分类器分开评估。
+留出任务问题和框架，看看结果有多依赖熟悉的日志格式。
+
+比较局部与整段诊断时，位置预测和诊断预算要匹配。
+报告精确定位、短名单命中、完整归因，以及每种平均的权重。
+若比较整个系统的成本，预处理和前置定位也算进去。
+
+先回到 B 改歪的转述，再调整 C 的最终回答。
+把选中的记录当作检查线索，验证修复是否真正解决了那次执行。
+证据支持一种组织得更清楚的复盘流程；补上这一步确认，它才接到实际调试里。
+:::
+
+{/* Reading source: https://arxiv.org/html/2611.33022v1; sha256: 6811cf06fa05956b838978afcf20364b18d1b9411018368fd18f63623f975052; all six main sections and Appendices A–C, Tables 1–10 read from complete extracts and original HTML cells; Figures 1–3 visually inspected, original SVGs 2–3 rendered locally; original Figure 1 included with attribution; bibliography and external cited papers not separately reviewed; source map prepared before draft; schematic distinguished from experiment, grouped benchmark-specific supervision, local text plus metadata, annotation targets, pooled/framework-macro measures, uneven held-out-framework results and masking limits preserved; diagnostic gain rounded to about 8.2 points because table precision and reported underlying difference vary; no independent factual/readability review, implementation audit or experiment reproduction. */}
