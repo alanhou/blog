@@ -1,0 +1,300 @@
+---
+title:
+  en: "Long Context Gains Need an Attention Calibration Check"
+  zh: "长窗口，先校准注意力"
+description:
+  en: "In one of three 365M standard-precision model pairs, sparse-mask training appears to improve 30k-window perplexity by 7%. Calibrating internal attention temperature removes that edge. A separate bf16 gain-freezing condition amplifies the confound. The calibration uses target-length data and diagnoses the zero-shot comparison."
+  zh: "三个标准精度模型对中，有一对在长窗口上显示约 7% 的稀疏训练优势；校准内部注意力温度后，这项优势消失。论文另定位了会放大偏差的 bf16 增益冻结。校准使用目标长度的数据，是评测诊断，不是零样本扩窗方法。"
+date: 2026-11-24
+tags: ["arxiv", "ai", "cs.ai", "cs.cl", "cs.lg", "attention", "context", "evaluation"]
+image: "/arxiv-visuals/arxiv-context-extension-attention-calibration.png"
+---
+
+:::en
+**Paper**: [2611.31113](https://arxiv.org/abs/2611.31113) — Attention Temperature Confounds Zero-Shot Context Extension\
+**Author**: Ruben Navasardyan\
+**Categories**: cs.AI, cs.CL, cs.LG\
+**Reading scope**: Original arXiv v1 HTML, using the complete local extraction. All five main sections and statements, Appendices A, B, D and E, and selected Appendix C result tables were read. Figures 1, 2 and A1 were visually inspected; table values were read from HTML cells. Other Appendix C tables were not read. The implementation and result archive were not independently audited, and the experiments were not reproduced.
+
+## The Problem
+
+Two language models train on **8,192-token windows**, then predict text in **30,720-token windows**; tokens are small pieces of text. In the paper's standard-precision seed-43 pair at the **365M tier, about 360 million parameters**, the ordinary dense model scores **37.87 perplexity**, while its sparse-mask-trained twin scores **35.32**. Lower perplexity means the actual next tokens are less surprising to the model. The roughly **7%** advantage looks like improved prediction beyond the training length (Table 4; Table C.5a).
+
+The twins share their architecture, training data order and optimizer schedule. Their training attention masks differ, but both use full dense attention at evaluation. They also use a standard precision recipe: a high-precision master copy of each trainable parameter, with lower-precision computation. This is one of three such model pairs, not a survey of commercial systems (§3.1).
+
+Change a single internal attention setting, using separate calibration data, and the same held-out comparison becomes **32.29 versus 32.33**—essentially level. Both models select temperature **0.85**, rather than the default 1. The dense baseline recovers more of its own lost score, and the apparent training advantage disappears (§4.4; Table C.5a).
+
+Ruben Navasardyan investigates that hidden variable: how much of an apparent context-extension improvement comes from comparing against a baseline whose attention scale is poorly matched to the longer window? The paper measures the effect, proposes a diagnostic comparison, and identifies a numerical training condition that makes the mismatch much larger.
+
+## The Explanation
+
+### Adjust the strength of attention, then measure on different text
+
+Attention compares what a current token is looking for—its query—with representations of earlier tokens—their keys. The scores become weights that determine which earlier information contributes to the next representation. When the number of competing keys grows beyond the training window, the same score scale can spread those weights more broadly (§§1–3).
+
+The paper changes an **internal attention temperature**. Dividing the scores by a value below 1 makes their differences more pronounced and sharpens the weights. The adjustment happens after query/key normalization so that normalization does not cancel it. This is a knob inside the attention computation (§3.2).
+
+For each model and evaluation length, the author searches the same **13-value grid** on calibration windows from FineWeb-Edu validation text, PG-19 books and arXiv papers. The selected value is then used on disjoint held-out windows. At 30k, there are two calibration and two held-out windows per corpus: **six windows in each set** (§§3.2–3.3; Appendix B).
+
+There is no new gradient training for this comparison, but it **does use data at the target length**. The paper explicitly calls the calibrated comparison a diagnosis of the zero-shot result, not a zero-shot extension method.
+
+For the opening standard-recipe pair, the held-out perplexities are:
+
+| Internal attention setting | Dense | Sparse-mask-trained twin |
+| --- | ---: | ---: |
+| Default temperature 1 | 37.87 | 35.32 |
+| Selected temperature 0.85 for both | 32.29 | 32.33 |
+
+These are matched next-token prediction scores from the same pair and window protocol. The percentages describe relative perplexity changes, not percentage points of reasoning accuracy. Figure 1 shows the temperature sweeps on **calibration windows**; its curves should not be read as the held-out numbers in this table (Table C.5a; Figure 1).
+
+Across all three standard-recipe dense baselines, calibration recovers **8–15%** of their default 30k perplexity. The full 7% apparent training advantage occurs in one pair; the other two are already close at the default. Within the 8k training span, the sparse-mask-trained models are **2–3% worse**. The paper calls this training arm “Mixed,” referring to its mixture of sparse mask budgets, rather than its precision recipe (§§3.1, 4.4; Tables 3–4).
+
+### Find out whether a trainable multiplier actually moved
+
+The paper also investigates a different training recipe: every parameter and optimizer state is stored in bf16, with **no fp32 master copy**. That differs from standard training that merely uses bf16 for computation (§3.1; Appendix A).
+
+The affected parameters are normalization gains, initialized at **1.0**. They multiply the normalized query and key representations, allowing the model to adjust their scale and component weights. In bf16, the representable values near 1 are relatively far apart. An update too small to cross half that gap rounds back to the same stored value.
+
+With the study's AdamW coefficients, 0.9 and 0.95, and peak learning rate **0.0005**, the estimated largest adaptive update is about **0.00058**, plus a weight-decay step of **0.000005**. Moving downward from a stored bf16 1.0 requires about **0.00195** before rounding changes it. Those small steps therefore disappear instead of accumulating in the parameter (§4.2; Appendix B).
+
+The author reports that every stored query/key normalization gain remains exactly 1.0 in **22 frozen-gain checkpoints**. In the audited dense seed-42 checkpoint, the optimizer's running gradient statistics are nonzero even though the gains remain fixed. A recorded learning signal therefore does not establish that the stored parameter changed.
+
+This freeze amplifies the long-window mismatch. The frozen dense baselines recover about **37%** of default 30k perplexity at the smallest tier, and **50–58%** at the **1.2B and 3B tiers** when their attention temperatures are calibrated. Against those baselines, the Mixed arm looks much better before calibration (§4.1; Tables 1–3).
+
+The paper retrains three pairs each at 365M and 1.2B while keeping the **56 query/key gain tensors and their optimizer states in fp32**, leaving the other parameters in the original bf16 recipe. The gains can now move. At 365M, Mixed falls behind Dense at both default and calibrated temperatures in all three pairs. At 1.2B, the default **log-perplexity gap** shrinks by **71–89%** across the three pairs, although a default advantage remains; after calibration, the small residual has inconsistent direction across the expanded window set (§4.3; Table 4).
+
+Learned gain vectors can also reweight individual dimensions, so retraining them is not identical to changing one global temperature. The scalar-gain and vector-gain controls explore that distinction. The reason freezing hurts Dense more than Mixed is not identified, and the standard recipe still has a measurable longer-window mismatch even though its gains learn (§§4.3–4.4; Tables C.8c, C.11a–c).
+
+### Check both an apparent gain and an improvement that survives
+
+The confound also affects comparisons with other training changes. In five frozen-gain 365M pairs, the positional alternative **ALiBi**, which adds distance biases instead of the baseline's rotary position representation, appears about **35% better** at 30k. After calibration it is about **5% worse**. This is a result for that matched setup: the temperature rescales ALiBi's content scores while leaving its distance biases fixed (§4.1; Table 2; Limitations).
+
+To test whether the diagnostic simply erases every improvement, the author includes **NTK-aware RoPE scaling**, an inference-time change to the rotary position-frequency scale. It retains about **3–4.5%** perplexity improvement after both models are calibrated, in one dense-model control per size tier. That is a surviving comparison under this protocol, rather than proof that every genuine improvement will survive any calibration procedure (§4.5; Table C.9c).
+
+Calibration is also not the entire answer to every recipe problem. A single frozen-gain pair with a different rotary base, **10,000**, keeps about a **5%** calibrated Mixed advantage. That advantage disappears when the gains can learn. The temperature check and the precision check address related parts of the problem (§4.3; Table C.8c).
+
+For a data-free temperature choice, the paper also tests a rule computed only from training and evaluation lengths. In one frozen pair per tier, the reported relative gaps stay within the numerical resolution described below; another, sharper length-based rule leaves an apparent **2–6%** Mixed advantage. This is a limited alternative test, not a universally validated replacement for calibration (§4.5; Table C.10a).
+
+### Keep numerical sensitivity separate from statistical certainty
+
+The author uses **0.03 log-perplexity**, roughly a 3% score ratio, as the diagnostic's numerical resolution. It comes from shifting the temperatures by one grid step. A smaller residual is interpreted through the consistency of its direction across seeds and windows; it is not automatically called a tie (§3.2).
+
+For example, the learned-gain 365M Mixed arm has a small calibrated disadvantage, but it is consistently worse in all three seeds and every window of the 36-window check for each seed. The 1.2B learned-gain result is small and inconsistent across windows. Those conditions warrant different readings (Table 4; Table C.4b).
+
+The 0.03 sensitivity threshold is not a confidence interval. Additional windows characterize an individual model pair; they do not turn it into dozens of independently trained models. The primary analysis unit is the paired training seed (§3.3; Appendix B).
+
+## Core Concepts
+
+**An internal scale and a changed representation.** The opening pair's inference temperature changes how sharply attention weights existing representations. A training mask or a changed position encoding can alter what the model learns. A raw score gap can combine those effects, which is why the matched diagnostic helps.
+
+**Computation precision and update storage.** bf16 computation can coexist with fp32 master parameters. The master copy preserves small updates before casting for computation. In the pure-bf16 recipe, the unit-initialized gains repeatedly round back to 1 instead. The optimizer's activity and the parameter's movement need separate checks.
+
+**A prediction score and use of distant information.** Perplexity asks how well the model predicts the actual next tokens. The paper's windows can cross document boundaries, so much of the preceding text may be unrelated. Better long-window perplexity does not by itself establish better retrieval, reasoning or use of faraway context.
+
+## The Insight
+
+The opening 7% advantage changes interpretation once the baseline gets the same opportunity to adjust its attention scale. In this study, a training change's apparent context-extension gain depends partly on how the baseline tolerates the default inference setting.
+
+The precision result explains a strong amplifier of that effect, while the standard-recipe result shows that the confound can remain after the freeze is fixed. The useful judgment is to examine the matched attention setting and the actual parameter updates before attributing a score difference to improved context handling.
+
+## A Critical Reading
+
+The paired design and the gain-storage intervention make the measurement concrete. Its scope is still one architecture family, one main training length, one pretraining corpus and a limited number of seeds. Larger frozen-gain models also see more training tokens and data repetition, so the larger mismatch is not an isolated scaling law. The standard precision recipe is tested at 365M only; the 3B models were not retrained (§3.1; Limitations).
+
+The calibration protocol has useful controls, but its result consumes target-length data. Among frozen checkpoints, only one 365M seed selects its own temperatures; those values transfer to the other 365M pairs. Window-level intervals assume independence among slices of one token stream and may be too narrow if those slices are correlated. The positive control's surviving gain is near the procedure's own resolution (Appendix B; Limitations).
+
+Some position-resolved plots are partly in-sample diagnostics. The study does not compare the same target tokens with their distant context removed, so it cannot settle whether either arm makes better use of far context. The paper also leaves the unequal sensitivity of Dense and Mixed, and the difference between the two learnable-gain recipes, unexplained (§4.5; Limitations).
+
+Reproducibility has remaining limits: some early code and example hashes are incomplete, some ablation configurations come from uncommitted code, dataset revisions and source document identities are not pinned, and model checkpoints are not released. The paper reports cross-hardware reference checks, but this reading did not audit its code or result archive (Appendices A–B, E; Limitations).
+
+## What You Can Use
+
+When assessing a context-extension claim, keep the original zero-shot score and the calibrated diagnostic side by side. Use matched calibration budgets, untouched evaluation text and a stated sensitivity threshold. Label target-length tuning clearly so its result is not presented as a data-free method.
+
+When training, record where parameters and optimizer states are stored, then inspect whether the normalization gains actually changed. A bf16 computation flag alone does not identify the frozen-gain recipe, and nonzero optimizer states do not prove that small updates survived rounding.
+
+If the claim concerns using distant information, add an evaluation that tests that use directly. The opening score comparison is a useful diagnostic of a benchmark difference; it earns a broader context-handling claim only with broader evidence.
+:::
+
+:::zh
+**论文**: [2611.31113](https://arxiv.org/abs/2611.31113) — Attention Temperature Confounds Zero-Shot Context Extension\
+**作者**: Ruben Navasardyan\
+**分类**: cs.AI, cs.CL, cs.LG\
+**阅读范围**: arXiv v1 原始 HTML，使用完整的本地提取文本。
+读过全部五个正文节及声明、附录 A、B、D、E，以及附录 C 中选取的结果表。
+图 1、图 2、图 A1 已目视检查，表值按 HTML 单元格读取。
+其余附录 C 表未阅读，实现代码和结果归档没有独立审计，实验没有复现。
+
+## 问题
+
+两个语言模型都用 **8,192 个词元的窗口**训练，却要在 **30,720 个词元的窗口**里预测后续文本；词元是切分出的文字单位。
+论文标准精度方案中的第 43 号种子模型对，属于 **365M 档，约 3.6 亿参数**。
+普通稠密模型的困惑度是 **37.87**，稀疏掩码训练的孪生模型则是 **35.32**。
+困惑度越低，说明实际出现的下一个词元，对模型来说越不意外。
+约 **7%** 的优势，看起来像是在训练长度之外预测得更好了（表 4；表 C.5a）。
+
+这对模型的结构、训练数据顺序和优化器日程相同，训练时的注意力掩码不同，评测时却都使用完整稠密注意力。
+它们采用标准精度方案：保存高精度训练参数主副本，计算时使用较低精度。
+这里说的是三对模型中的一对，不是对商业系统的普遍调查（§3.1）。
+
+用另外的数据挑选一个内部注意力设置，同一批留出文本上的结果变成 **32.29 对 32.33**，基本打平。
+两个模型都选到 **0.85** 的温度，原本默认值是 1。
+基线从自己的默认设置里找回了更多分数，稀疏训练看似带来的优势就消失了（§4.4；表 C.5a）。
+
+Ruben Navasardyan 研究的，正是这项藏在比较里的变量：所谓扩窗收益，有多少来自基线的注意力尺度没有适应长窗口？
+论文测量这种偏差，给出诊断比较，又找到一项会把它放大的数值训练条件。
+
+## 翻译
+
+### 调整注意力强弱，再用另一批文本评分
+
+注意力会把当前词元要寻找什么的表示，叫作查询，与前面词元提供的键表示比较。
+得到的分数变成权重，决定哪些先前信息参与下一层表示。
+窗口里竞争的键变多，同样的分数尺度就可能把权重摊得更散（§§1–3）。
+
+论文改的是**注意力内部的温度**。
+把分数除以小于 1 的值，分数之间的差异变明显，权重也更集中。
+这一步放在查询、键归一化之后，避免归一化把缩放抵消。
+它是注意力计算里的设置（§3.2）。
+
+对每个模型、每个评测长度，作者在同一套 **13 个候选温度**中搜索。
+校准数据来自 FineWeb-Edu 验证文本、PG-19 书籍和 arXiv 论文，选好后再给没有参与选择的留出文本评分。
+30k 长度下，每个语料各用两段校准、两段留出窗口，也就是**每组共六段**（§§3.2–3.3；附录 B）。
+
+这个比较没有追加梯度训练，却**使用了目标长度的数据**。
+论文明确把校准后的结果称为对零样本结果的诊断，并没有把它当成零样本扩窗方法。
+
+开头那一对标准方案模型，在留出文本上的困惑度如下：
+
+| 内部注意力设置 | 稠密模型 | 稀疏掩码训练模型 |
+| --- | ---: | ---: |
+| 默认温度 1 | 37.87 | 35.32 |
+| 两者各自选到温度 0.85 | 32.29 | 32.33 |
+
+这是一对模型、同一窗口协议下的下一个词元预测分数。
+百分比说的是困惑度的相对变化，不是推理准确率多了几个百分点。
+图 1 画的是**校准窗口**上的温度扫描，不能把曲线数值直接当成这张表的留出分数（表 C.5a；图 1）。
+
+三个标准方案的稠密基线，在 30k 上都能通过校准找回默认困惑度的 **8% 到 15%**。
+完整的约 7% 优势出现在其中一对，另外两对默认状态下已经很接近。
+在训练范围内的 8k 窗口，稀疏掩码训练模型反而差 **2% 到 3%**。
+论文把这个训练分支叫 Mixed，指的是混用稀疏掩码预算，不是混合精度（§§3.1、4.4；表 3–4）。
+
+### 可训练的乘数，到底有没有动过
+
+论文还检查了另一套训练方案：所有参数和优化器状态都存成 bf16，**没有 fp32 主副本**。
+这与只在计算时使用 bf16 的标准训练不同（§3.1；附录 A）。
+
+受到影响的是归一化增益参数，初始值为 **1.0**。
+它们乘在归一化后的查询和键表示上，让模型调节尺度及各分量的权重。
+bf16 在 1 附近能表示的数，彼此间隔比较大；更新跨不过半个间隔，四舍五入后就又回到原值。
+
+按实验的 AdamW 系数 0.9、0.95 和最高学习率 **0.0005**，估计最大的自适应更新约 **0.00058**，再加一个 **0.000005** 的权重衰减步。
+而从 bf16 保存的 1.0 往下移动，舍入前大约需要 **0.00195** 才能改变存储值。
+因此，小步没有积累进参数，而是一次次丢掉了（§4.2；附录 B）。
+
+作者报告，**22 份冻结增益检查点**里，所有查询、键归一化增益都仍恰好等于 1.0。
+其中检查过的第 42 号稠密模型，优化器里记录梯度历史的动量状态并非零，增益却没有动。
+记录到学习信号，不代表保存的参数已经更新。
+
+这种冻结放大了长窗口上的失配。
+校准温度后，冻结稠密基线在最小规模能找回默认 30k 困惑度的约 **37%**，**1.2B 和 3B 档**则是 **50% 到 58%**。
+拿这些默认基线作参照，Mixed 就显得好很多（§4.1；表 1–3）。
+
+论文在 365M 和 1.2B 两个规模各重训三对模型，只把**查询、键的 56 个增益张量及其优化器状态保留为 fp32**，其他参数仍用原来的 bf16 方案。
+增益终于可以移动。
+365M 下，Mixed 在默认和校准温度下都落后，三个种子一致。
+1.2B 下，默认的**对数困惑度差距**缩小 **71% 到 89%**，默认优势仍有残留；校准之后残差很小，扩大的窗口集上方向不一致（§4.3；表 4）。
+
+学到的增益向量还会重新加权不同分量，所以重训增益不等于只改一个全局温度。
+标量增益和向量增益的对照探索了这项区别。
+为什么冻结对 Dense 的伤害比 Mixed 更大，论文没有查明；标准方案的增益已经能学习，长窗口失配却仍存在（§§4.3–4.4；表 C.8c、C.11a–c）。
+
+### 既查虚高，也查有没有误抹真实改进
+
+其他训练改动的比较也受到影响。
+在五对冻结增益的 365M 模型中，换成以距离偏置表示位置的 **ALiBi**，相对采用旋转位置表示的基线，在 30k 上看起来好约 **35%**。
+校准以后，却变成差约 **5%**。
+这是这组配对条件下的结果；该温度只缩放 ALiBi 的内容分数，距离偏置保持不变（§4.1；表 2；局限性）。
+
+为了检查诊断是否把所有改进都抹平，作者加入 **NTK-aware RoPE scaling** 作为正向对照：在推理时改变旋转位置的频率尺度。
+每个规模各用一个稠密模型对照，两方校准后，它仍留下约 **3% 到 4.5%** 的困惑度改进。
+这说明该协议保住了一个受测比较的收益，不能据此保证任何校准办法都能保住全部真实改进（§4.5；表 C.9c）。
+
+校准也并非所有训练条件问题的完整答案。
+一对把旋转基数改为 **10,000** 的冻结增益模型，校准后仍留下约 **5%** 的 Mixed 优势；让增益能够学习，这项优势才消失。
+温度检查与精度检查，处理的是问题中相互关联的部分（§4.3；表 C.8c）。
+
+如果要在不使用校准数据的情况下选温度，论文也测试了一条只按训练、评测长度计算的规则。
+每个规模各一对冻结模型，报告的相对差距落在下文的数值分辨率以内；另一条更尖锐的长度规则，却留下 **2% 到 6%** 的 Mixed 表面优势。
+这是有限的替代测试，不能当成已经普遍验证的校准替代办法（§4.5；表 C.10a）。
+
+### 数值敏感度与统计把握，分别说清
+
+作者把 **0.03 对数困惑度**，也就是约 3% 的分数比例，作为诊断的数值分辨率。
+它来自把温度挪一个网格步之后，比较结果能改变多少。
+残差小于这项尺度时，还要看不同种子、不同窗口的方向是否一致，不能自动判成平手（§3.2）。
+
+例如，增益可学习的 365M Mixed，校准后的劣势虽然小，但三个种子、每个种子的三十六个检查窗口，都一致落后。
+1.2B 的对应结果则小，窗口方向又不一致，两种情况需要不同解读（表 4；表 C.4b）。
+
+0.03 不是置信区间。
+增加窗口可以刻画一对模型的变化，却不能把它变成几十个独立训练的模型。
+主要分析单位仍是配对训练种子（§3.3；附录 B）。
+
+## 核心概念
+
+**内部尺度与学到的表示。** 开头模型对的内部注意力温度，改变的是对已有表示分配权重时有多集中。
+训练掩码、位置编码，则可能改变模型学到的东西。
+原始分数差可能混合这些作用，条件匹配的诊断因此有用。
+
+**计算精度与更新的存储。** 计算用 bf16，同时保留 fp32 主参数，是可以并存的。
+主副本先留住小更新，计算时再转换精度。
+纯 bf16 方案中的初始单位增益，却一次次舍入回 1。
+优化器有没有工作、参数有没有移动，需要分别看。
+
+**预测分数与远处信息的使用。** 困惑度检查实际下一个词元预测得怎样。
+论文的窗口可以跨越文档边界，前面很多文本可能与当前目标无关。
+长窗口困惑度改善，本身不能证明检索、推理或使用远处上下文的能力改善。
+
+## 洞见
+
+给基线同样调整注意力尺度的机会，开头那项 7% 优势就改变了解读。
+在这组实验中，训练改动看似带来的扩窗收益，部分取决于基线能否适应默认推理设置。
+
+精度结果找到了会放大偏差的条件，标准方案又说明，修好冻结仍不等于消除失配。
+把分数差归因于更好的上下文处理之前，先检查匹配的注意力设置，以及参数实际有没有更新。
+
+## 博导审稿
+
+配对设计与增益存储干预，让测量很具体。
+范围仍是一个结构家族、一个主要训练长度、一份预训练语料，以及有限种子。
+较大冻结模型还接触更多训练词元和数据重复，因此偏差变大不是独立的规模定律。
+标准精度方案只在 365M 测过，3B 模型没有重训（§3.1；局限性）。
+
+校准协议有有用的对照，结果却使用了目标长度数据。
+冻结模型里，365M 只有一个种子自己选温度，其余种子沿用它的值。
+窗口级区间把一条词元流的切片当成独立样本；若切片相关，区间可能过窄。
+正向对照留下的收益，也接近协议自身的分辨率（附录 B；局限性）。
+
+部分按位置画的曲线，是含有校准样本的诊断。
+论文没有拿相同目标词元，比较保留与移除远处上下文的结果，所以不能回答哪一方更会使用远处信息。
+Dense、Mixed 为什么敏感度不同，以及两套增益可学习方案为什么仍不同，也没有定论（§4.5；局限性）。
+
+复现仍有边界：部分早期代码和样本哈希记录不全，有的消融配置来自未提交代码，数据版本和源文档身份没有固定，模型检查点也没有发布。
+论文报告了跨硬件参照复测，但这次阅读没有审计代码或结果归档（附录 A–B、E；局限性）。
+
+## 启发
+
+评估扩窗说法时，把原始零样本分数与校准诊断并列。
+校准预算要匹配，评分文本不能参与选温度，数值敏感度也写清楚。
+目标长度上做过调参，就明确标出，不能当作不需要数据的方法。
+
+训练时，记录参数与优化器状态存在哪种精度里，再检查归一化增益有没有真正变化。
+单看 bf16 计算开关，辨认不出冻结方案；动量状态非零，也不能证明小更新没有被舍入丢掉。
+
+如果声称的是会用远处信息，就补上直接检验这种使用的评测。
+开头的分数比较适合诊断一次基准差异，更广的上下文能力主张，还需要更广的证据。
+:::
+
+{/* Reading source: https://arxiv.org/html/2611.31113v1; sha256: 5d16685a26ea77e758891ada604ea2fff041afe02fbd573846af48aab17a355c; complete source extraction used rather than the helper’s truncated excerpts; all five main sections and statements, Appendices A/B/D/E, main Tables 1–4 and selected Appendix C table parts read; Figures 1/2/A1 visually inspected; HTML table cells read, layouts not separately rendered; source map prepared before drafting; target-length calibration is not zero-shot, witness is one of three standard-recipe pairs, perplexity units and window/seed distinctions preserved; precision-specific freeze, learned-gain controls, positional-control exception, positive-control scope and lack of far-context-use proof disclosed; no independent factual/readability review, implementation audit or experiment reproduction. */}
