@@ -1,0 +1,369 @@
+---
+title:
+  en: "SPLICE Teaches Local Steps the Learner Can Continue"
+  zh: "教一段，还得接得住"
+description:
+  en: "SPLICE recovers training signals from all-fail agent rollouts by proposing bounded options and testing whether the current learner can finish after them. It gains 2.8–9.8 percentage points over GRPO across four settings; three continuations per option leave noisy value estimates."
+  zh: "一组尝试全失败时，SPLICE让更强模型提出有长度上限的操作片段，再让当前模型续跑，用结果决定该学哪段。两种模型、两类任务上，比GRPO提高2.8–9.8个百分点；默认每段只有三次续跑，价值估计仍有误差。"
+date: 2026-11-26
+tags: ["arxiv", "ai", "cs.ai", "cs.cl", "cs.lg", "agents", "reinforcement-learning"]
+image: "/arxiv-visuals/arxiv-splice-learner-conditioned-options.png"
+---
+
+:::en
+**Paper**: [2611.34777](https://arxiv.org/abs/2611.34777) — When Every Rollout Fails: Splicing Learner-Conditioned Options into Long-Horizon Agent RL\
+**Authors**: Haowen Hou, Yicheng Liu, Zhen Huang, Jiaqi Wang\
+**Categories**: cs.AI, cs.CL, cs.LG\
+**Reading scope**: Original arXiv v1 HTML. All six main sections and Appendices A–F were read from complete extracts, including Tables 1–6 from original cells. Figures 1–3 were visually inspected; original SVGs 2–3 were rendered locally. The 53,947-character extraction has no reading-budget omissions. Bibliographic entries, external cited papers and implementation were not independently audited; experiments were not reproduced.
+
+## The Problem
+
+A coding agent passes **471 existing regression tests and one of two issue-specific tests**. The last test still fails. It is trying to save an empty array, a collection with no elements, to Zarr storage. Its patch fixes the public call's chunk sizes, but a shared helper still tries to write empty blocks. This is a recorded training case, `dask__dask-10506`, summarized in §5.6 and Figure 3.
+
+The final outcome reward is zero. A group-based trainer compares several attempts on the same task; when every attempt fails, all their numerical rewards tie at zero. GRPO then gets no reward-relative learning direction from that group, even though the attempts may make different partial progress (§§1 and 3).
+
+One remedy is to ask a stronger model for a complete successful solution. A long agent trajectory can contain many decisions the learner already knows how to make. Producing and teaching the whole trajectory spends guidance on those decisions too.
+
+**SPLICE is a training method for this gap.** A proposal model supplies bounded alternative segments at a point in a failed trajectory. The current learner resumes after each segment. Its verified outcomes determine which proposed behavior enters the local training target. The question becomes: which intervention leaves this learner able to finish? (§4).
+
+## The Explanation
+
+### Return to a point where a different move could help
+
+SPLICE first routes the sampled groups. A mix of successes and failures uses ordinary GRPO. An all-success group is skipped. An all-fail group enters the splice branch. The default training configuration samples eight trajectories per group (§4; Appendix D).
+
+For a splice, it randomly chooses one failed trajectory. The proposal model sees the task, the full failed history and terminal verifier feedback, then chooses among resumable points recorded every four agent turns. The software environment restores a container snapshot; the research environment retains interaction history and can issue subsequent tool requests afresh (§4.1).
+
+In the Dask case, the chosen point is **after 20 completed turns, before the first production edit**. Each candidate starts from that same restored state. The model can try another way forward without carrying the failed edit into every branch (§5.6).
+
+The proposal model generates three options by default. An **option** is a bounded segment of one or more agent turns. Its maximum length is rounded up from **30% of the current rollout batch's mean turn count**, with at least one turn allowed. It is a relative cap, not a fixed one-step hint (§4.1).
+
+![Original SPLICE overview: route rollout groups, restore a branch, propose options, evaluate learner continuations, filter and weight options, then fit a local target.](/arxiv-visuals/arxiv-splice-learner-conditioned-options/overview.png)
+
+*Original Figure 1 is a schematic of the method. The Dask case's specific continuation outcomes below come from Figure 3 and §5.6.*
+
+### Test the handoff to the learner
+
+After a nonterminal option ends, the frozen current policy generates **three independent continuations**. The verifier scores each complete attempt as success or failure. The average estimates how useful that option is to this policy. If an option itself completes the task, it is verified immediately instead (§4.1).
+
+In the recorded Dask example, the three proposals and their continuations are (§5.6; Figure 3):
+
+| Proposed option | Learner successes out of 3 | Local target weight |
+| --- | ---: | ---: |
+| Adjust the public Zarr call's chunk sizes | 0 | Discarded |
+| Inspect the shared helper and expose the empty-write problem | 1 | About 12% |
+| Guard the helper's write against empty data, preserving return behavior | 3 | About 88% |
+
+The diagnostic option does not supply the complete repair, yet one continuation completes it. The guarded-write option works in all three sampled continuations. These are observed outcomes in one case, not guarantees for future attempts.
+
+SPLICE discards options with zero estimated success. If none remain, it skips that splice update. It rescales the remaining estimates relative to one another and converts them into smooth weights, favoring options with higher sampled returns. Here that produces approximately 12% and 88%; equal retained estimates would produce equal weights (§§4.1–4.2).
+
+The target keeps some diagnostic behavior as well as the stronger repair. That matters because the training choice can preserve several verified routes forward, rather than commit all its weight to a single candidate.
+
+### Learn the proposed segment, using the continuation to judge it
+
+The local loss teaches **only the proposal model's action tokens inside retained options**. The learner's earlier history supplies context, and its later continuations supply evidence of usefulness. Those parts are not included in the local supervision (§4.2).
+
+For the Dask repair, the lesson can emphasize the guarded helper edit while also retaining the diagnostic route. Each option contributes through its average token loss, so a longer proposed segment does not receive more loss weight simply because it contains more tokens.
+
+Splice examples and ordinary GRPO examples occupy separate mini-batches, with training alternating between them. The proposal model and state restoration are used during training. Evaluation afterward runs the trained policy without proposal help (§4.2).
+
+This keeps the taught portion closer to a bottleneck in the learner's own history. Proposed actions still come from another model, so the method limits exposure to teacher-generated histories rather than making the update entirely on-policy.
+
+### Check the trained policy on two kinds of task
+
+The experiments use two policy families, **Qwen3-8B-CS** and **Qwen3.5-9B**, with **Qwen3.5-122B-A10B** proposing options. CS is a shared checkpoint prepared by supervised adaptation to the tool interfaces. Every Qwen3-8B comparison starts there; Qwen3.5-9B starts from its released checkpoint (§5.1; Appendix C).
+
+Each method receives the same fixed **3,200-task training subset per domain**. Software training uses tasks from SWE-Gym and R2E-Gym, excluding repositories overlapping with SWE-bench. Research training uses a curated question–answer pool. The task data are controlled; method-specific computation is compared separately (§5.1; Appendix B).
+
+Software evaluation reports resolve rate on SWE-bench Verified. Research evaluation reports answer accuracy on BrowseComp-Plus with a shared retriever and the gpt-oss-20b judge. All scores are percentages, reported as **mean ± sample standard deviation across three training runs**, evaluated at their final checkpoints (§5.1; Table 1):
+
+| Policy and evaluation | GRPO directly | Full demonstrations, then GRPO | SPLICE |
+| --- | ---: | ---: | ---: |
+| Qwen3-8B-CS, software | 15.9 ± 0.7% | 24.4 ± 1.1% | 25.7 ± 0.8% |
+| Qwen3-8B-CS, research | 20.2 ± 0.9% | 26.7 ± 0.4% | 29.3 ± 0.7% |
+| Qwen3.5-9B, software | 58.4 ± 0.4% | 59.9 ± 1.7% | 61.2 ± 1.0% |
+| Qwen3.5-9B, research | 46.2 ± 0.4% | 49.4 ± 0.9% | 50.7 ± 0.3% |
+
+SPLICE has the highest reported mean in all four settings: **2.8–9.8 percentage points above direct GRPO**, and **1.3–2.6 points above demonstrations followed by GRPO**. The ± values describe variation between three runs, not confidence intervals or a formal significance test.
+
+The remaining analyses use Qwen3-8B-CS on software tasks. They help distinguish better sampled guidance from a policy that can later solve a task alone.
+
+### Fewer successful proposal attempts can accompany better learning
+
+The paper distinguishes **proposal hit rate**, the fraction of proposal attempts yielding at least one verified successful trajectory, from **graduation rate**, the fraction of a fixed initially failed training-task set solved by the trained policy. Graduation uses one new rollout per task (§5.3).
+
+ReLIFT, the comparison method, requests complete proposal-model trajectories for all-fail tasks. SPLICE instead attempts short options followed by learner continuations. Their recovery results are (Table 2):
+
+| Training method | Proposal hit rate | Graduation rate | Proposal-model turns |
+| --- | ---: | ---: | ---: |
+| GRPO | Not applicable | 8.1 ± 1.1% | 0 |
+| ReLIFT | 55.1 ± 2.1% | 15.9 ± 1.0% | 113.4k ± 5.9k |
+| SPLICE | 30.7 ± 0.5% | 18.9 ± 0.3% | 93.5k ± 2.6k |
+
+SPLICE's hit rate is lower, but its trained policy graduates more tasks: **10.8 points above GRPO and 3.0 above ReLIFT**. The hit statistics come from different kinds of proposal attempts during their respective training processes. They do not establish that fewer hits cause better learning. They show why proposal success alone is an incomplete measure of useful guidance.
+
+Graduation is a training-set diagnostic based on one evaluation attempt, not repeated mastery or the held-out benchmark score above. On fixed difficulty partitions, the medium subset reaches **24.8% with SPLICE versus 10.9% with GRPO**; the hard subset reaches **15.4% versus 6.4%**. Medium means the initial learner failed while another coding model succeeded, covering **1,087 tasks**. Hard means both failed, covering **1,771 tasks**. Labels use initial attempts, while evaluation uses independent rollouts; these are operational difficulty groups (§5.3; Table 3; Appendix E).
+
+The proposal-turn saving is **17.5% relative to ReLIFT**. In the reported training setup, total wall time is **13.5 hours for SPLICE, 13.9 for ReLIFT and 11.9 for GRPO**. Proposal turns and end-to-end time measure different costs; learner continuations still take work (§5.4; Figure 2).
+
+### Separate the weighting rule from extra sampling
+
+The most direct target comparisons keep **three options and three continuations per option** fixed. Assigning equal weight to all positive options reaches **23.7 ± 0.2%** software resolve rate; putting all weight on the best positive option reaches **24.3 ± 0.6%**. SPLICE's smooth return weighting reaches **25.7 ± 0.8%**. These matched-budget results support using the relative continuation outcomes and preserving verified alternatives (§5.5; Table 4).
+
+The continuation choice exposes a tradeoff. Letting the proposal model continue, while teaching only the bounded option, has a slightly higher reported mean, **26.2 ± 1.6%**, than learner continuations' **25.7 ± 0.8%**. It uses **372.5k proposal turns versus 93.5k**, about four times as many. Extending supervision to those successful proposal-generated suffixes lowers the mean to **22.3 ± 1.5%** at comparable proposal cost. The authors interpret this as consistent with greater exposure to teacher-induced histories, rather than a direct measurement of that mismatch (§5.5).
+
+Length also matters. Raising the option cap from 30% to 50% of mean rollout length increases proposal turns from **93.5k to 157.0k**, while the reported resolve mean falls from **25.7% to 24.3%**. The shortest tested cap, 10%, reaches only **18.2%**. A bounded lesson has to reach a state the learner can use; making it longer is not sufficient (§5.5; Table 4).
+
+The Dask handoff now has three distinct requirements: restore the right state, measure what this learner can finish and teach the local behavior that led there.
+
+## Core Concepts
+
+**Usefulness belongs to a learner at a particular state.** An API-only repair can look plausible yet produce no successful continuation in this case. A diagnostic segment can be useful even without finishing the fix itself. The score measures the frozen current policy continuing from the proposed segment.
+
+**A branch is an environment state as well as a conversation.** Replaying the Dask case from turn 20 must restore the files and tool state before the failed edit. The experiments use software snapshots and research interaction histories according to the environment. A copied transcript alone does not restore changed code.
+
+**The continuation evaluates the lesson; it is not the whole lesson.** Successful learner continuations give the option its weight. Local fitting covers the proposal's bounded action segment. This distinction separates scoring an intervention from supervising a complete externally generated solution.
+
+These ideas make the central criterion something the learner can demonstrate after the handoff.
+
+## The Insight
+
+Judge help by what the learner can do after it. In the recorded repair, locating the helper sometimes enables success; supplying a guarded write enables more of the sampled continuations. The local target captures that difference and teaches from it.
+
+The useful intervention is conditioned on the learner's current ability and starting state. A stronger model's completed answer, by itself, does not measure either.
+
+## A Critical Reading
+
+The method ties its target to completed, verified continuations and checks important design choices under matched proposal and continuation budgets. It also reports the case where proposal continuations obtain a slightly higher mean at much greater proposal-model cost. Those results support a performance–cost tradeoff, with the strongest conclusions limited to these two policy families and task domains.
+
+The formal result is narrower than an improvement guarantee. Proposition 1 says that return weighting has no lower expected **observed candidate value** than uniform weighting on the same retained set. It does not guarantee a higher true return after training. The implemented token-length-normalized loss is also a surrogate, not an exact sequence-level KL projection for variable-length options (§4.2; Appendix A).
+
+Three continuations give a coarse, noisy value estimate. Three failures do not prove an option useless; three successes do not prove it reliable on every attempt. Values belong to the policy snapshot used for collection, while training changes the policy. More accurate estimates require more continuation work (§6).
+
+Recovery depends on restoring a consistent branch. Cost results use an asynchronous training pipeline on **32 H200 GPUs**, with proposal serving allocated differently from direct GRPO. Matching the available tasks does not match computation. The authors explicitly note that more expensive environment execution could increase the cost of learner continuations (§5.1; §6; Appendix D).
+
+SPLICE supplies an executable way to test local guidance and learn from it. The evidence establishes reported gains and tradeoffs in these experiments, while broader reliability and cost depend on the learner, verifier and environment.
+
+## What You Can Use
+
+When an agent's repair nearly works, preserve the failed history and a resumable state. Ask for bounded alternatives at the troublesome point, then return control to the learner and check whether it finishes. Record the outcome after the handoff as well as the cost of the help.
+
+In a training system, those verified continuations can weight local supervision as SPLICE does. In another workflow, the same handoff test can help evaluate guidance, with its benefit measured there. The recorded Dask case suggests a concrete question to ask before supplying a complete solution: what short intervention leaves the learner able to finish the rest?
+:::
+
+:::zh
+**论文**: [2611.34777](https://arxiv.org/abs/2611.34777) — When Every Rollout Fails: Splicing Learner-Conditioned Options into Long-Horizon Agent RL\
+**作者**: Haowen Hou, Yicheng Liu, Zhen Huang, Jiaqi Wang\
+**分类**: cs.AI, cs.CL, cs.LG\
+**阅读范围**: 阅读原始 arXiv v1 HTML，正文六节及附录A–F均从完整提取文本阅读，核对表1–6原始单元格。
+目视检查图1–3，图2–3的原始SVG在本地渲染。
+完整提取共53,947字符，没有因阅读额度省略内容。
+未独立核查参考文献、外部论文和实现代码，未复现实验。
+
+## 问题
+
+一个编程智能体已经通过**471项既有回归测试，以及两项问题专用测试中的一项**，最后一项仍失败。
+它要把一个没有元素的空数组存进Zarr。
+补丁改好了公开调用处的分块大小，共用写入函数却还会尝试写空块。
+这是论文记录的训练案例`dask__dask-10506`，步骤经过摘要整理（第5.6节；图3）。
+
+这次尝试的最终奖励仍是零。
+按组训练的方法会比较同一任务的多次尝试；如果全都失败，数值奖励就全是零。
+这些尝试可能各自推进了不同部分，GRPO却无法从这一组得到由奖励差异产生的学习方向（第1、3节）。
+
+一种补救，是让更强模型给出完整成功解法。
+长任务的整条轨迹里，可能夹着许多学生已经会做的决定，生成并教授全程，也会把指导成本花在这些地方。
+
+**SPLICE为这个缺口设计了一种训练方法。**
+提出方案的模型，在失败轨迹的一处给出有长度上限的替代片段；当前学生从片段之后继续跑。
+用学生最后是否成功，来决定局部训练目标该偏向哪段行为。
+问题于是具体起来：哪一种介入，能让这个学生把剩下的任务做完？（第4节）
+
+## 翻译
+
+### 回到一个换条路还能继续的地方
+
+SPLICE先按结果给组分流。
+组里有成功也有失败，照常用GRPO；全部成功，跳过；全部失败，进入接续分支。
+默认训练每组采样八条轨迹（第4节；附录D）。
+
+要接续时，先随机选一条失败轨迹。
+提出方案的模型拿到任务、完整失败历史和最终检查反馈，再从每四轮保存的可恢复位置里选一点。
+软件环境恢复容器快照；研究环境保留交互历史，后续工具请求可以重新发起（第4.1节）。
+
+Dask案例选在**完成20轮之后、第一次修改生产代码之前**。
+各个候选都从同一个恢复状态出发，不会把之前的错误修改带进每条新分支（第5.6节）。
+
+默认提出三个候选**操作片段**，每段可以有一轮或多轮智能体操作。
+长度上限取当前采样批次平均轮数的**30%，向上取整，至少一轮**。
+这是相对长度限制，并非固定只给一步提示（第4.1节）。
+
+![SPLICE 原始总览：按结果给轨迹组分流、恢复分支、提出片段、让学生续跑、筛选并加权，再拟合局部目标。](/arxiv-visuals/arxiv-splice-learner-conditioned-options/overview.png)
+
+*原论文图1是方法示意。下面Dask案例的具体续跑结果来自图3和第5.6节。*
+
+### 接手之后，学生到底能不能做完
+
+一个片段结束时若任务尚未完成，就由冻结的当前策略独立续跑**三次**。
+每次跑到结束，再检查成功或失败，取平均作为这段帮助对当前学生的价值估计。
+如果片段本身已经完成任务，则立即验证（第4.1节）。
+
+Dask记录中的三个方案得到以下结果（第5.6节；图3）：
+
+| 提出的操作片段 | 学生续跑三次成功几次 | 局部目标权重 |
+| --- | ---: | ---: |
+| 只调整公开Zarr调用的分块大小 | 0次 | 丢弃 |
+| 检查共用函数，指出空数据仍会触发写入 | 1次 | 约12% |
+| 给共用写入加空数据保护，并保留返回行为 | 3次 | 约88% |
+
+诊断片段没有包办完整修复，却让一次续跑完成了任务；加保护的片段，让三次采样续跑都成功。
+这是一个案例里的观察，尚不是对以后每次尝试的保证。
+
+SPLICE丢掉估计成功率为零的片段。
+若一个正分片段也没留下，就跳过这次接续更新。
+其余分数先按彼此的相对差异缩放，再换成平滑权重，高分得到更多权重；这里约为12%与88%。
+若留下的估计值全一样，权重也会一样（第4.1–4.2节）。
+
+训练目标因此保留了一些诊断行为，也更偏向有效修复。
+它可以留下几条经过验证的前进路线，无须把全部权重压在一个候选上。
+
+### 学的是提出的片段，后续结果用来评它
+
+局部损失只训练**保留下来的片段中，由方案模型生成的动作词元**。
+学生之前的历史提供上下文，后面的续跑提供价值证据，这两部分不进入局部监督（第4.2节）。
+
+Dask修复因此可以重点学共用函数的保护修改，同时保留诊断路径。
+每段按平均词元损失贡献训练，片段更长，也不会仅因字数更多就拿到更大的损失权重。
+
+接续样本与普通GRPO样本放在不同的小批次里，交替训练。
+方案模型和状态恢复只在训练时使用，之后评测由训练后的策略独立完成（第4.2节）。
+
+所教内容因此更接近学生自身历史里的一个卡点。
+但候选动作仍来自另一个模型，这项设计减少了接触教师生成历史的范围，并没有把更新全部变成同策略数据。
+
+### 训练后，在两类任务上检查学生
+
+实验采用**Qwen3-8B-CS**与**Qwen3.5-9B**两组策略，方案模型统一为**Qwen3.5-122B-A10B**。
+CS是先经监督训练、适配工具接口的共用起点，所有Qwen3-8B方法都从那里开始；Qwen3.5-9B从发布检查点开始（第5.1节；附录C）。
+
+每类任务，各方法都使用同一个固定的**3,200项训练任务子集**。
+软件任务来自SWE-Gym和R2E-Gym，排除了与SWE-bench重叠的仓库；研究任务来自整理后的问答池。
+这里控制的是可用任务数据，各方法的计算开销另作比较（第5.1节；附录B）。
+
+软件评测报告SWE-bench Verified解决率；研究评测报告BrowseComp-Plus答案准确率，使用共用检索器与gpt-oss-20b判别模型。
+分数均以百分比报告，下表是**三次训练最终检查点的均值±样本标准差**（第5.1节；表1）：
+
+| 策略及评测 | 直接GRPO | 完整示范后再GRPO | SPLICE |
+| --- | ---: | ---: | ---: |
+| Qwen3-8B-CS，软件 | 15.9 ± 0.7% | 24.4 ± 1.1% | 25.7 ± 0.8% |
+| Qwen3-8B-CS，研究 | 20.2 ± 0.9% | 26.7 ± 0.4% | 29.3 ± 0.7% |
+| Qwen3.5-9B，软件 | 58.4 ± 0.4% | 59.9 ± 1.7% | 61.2 ± 1.0% |
+| Qwen3.5-9B，研究 | 46.2 ± 0.4% | 49.4 ± 0.9% | 50.7 ± 0.3% |
+
+SPLICE在四项设置里都有最高的报告均值：比直接GRPO高**2.8–9.8个百分点**，比完整示范后再GRPO高**1.3–2.6个百分点**。
+表里的±表示三次训练之间的变化，不是置信区间，也不是正式显著性检验。
+
+后面的分析使用Qwen3-8B-CS的软件任务。
+它们帮助区分两件事：采样时拿到更容易成功的指导，与训练后学生能独自解决任务。
+
+### 指导尝试成功得少，训练后反而能做完更多
+
+论文区分**方案命中率**与**毕业率**。
+前者看一次方案尝试有没有产出至少一条验证成功的完整轨迹；后者看训练后的策略能解决固定的初始失败训练任务子集中的多少项，每项只重新跑一次（第5.3节）。
+
+对照方法ReLIFT在全失败任务上请求完整方案轨迹；SPLICE则尝试局部片段加学生续跑。
+恢复结果如下（表2）：
+
+| 训练方法 | 方案命中率 | 毕业率 | 方案模型操作轮数 |
+| --- | ---: | ---: | ---: |
+| GRPO | 不适用 | 8.1 ± 1.1% | 0 |
+| ReLIFT | 55.1 ± 2.1% | 15.9 ± 1.0% | 113.4k ± 5.9k |
+| SPLICE | 30.7 ± 0.5% | 18.9 ± 0.3% | 93.5k ± 2.6k |
+
+SPLICE方案命中率更低，训练后却能独立做完更多：毕业率比GRPO高**10.8个百分点**，比ReLIFT高**3.0个百分点**。
+命中统计来自各自训练过程里不同形式的方案尝试，还不能推出“少命中导致更好学习”。
+它说明，方案尝试的成功率本身，还不足以衡量指导价值。
+
+毕业率是训练集上的一次尝试诊断，不等于反复掌握，也不是上面留出基准的分数。
+固定难度分组里，中等组SPLICE达到**24.8%**，GRPO为**10.9%**；困难组分别为**15.4%**与**6.4%**。
+中等组是初始学生失败、另一个编程模型成功的**1,087项任务**，困难组是两者都失败的**1,771项**。
+分组用初始尝试，评测另用独立运行；这是按运行结果划出的难度组（第5.3节；表3；附录E）。
+
+相对ReLIFT，方案模型轮数减少**17.5%**。
+报告的训练设置中，总耗时为SPLICE **13.5小时**、ReLIFT **13.9小时**、GRPO **11.9小时**。
+方案模型轮数与全程时间测的是不同成本，学生的多次续跑也仍要花计算（第5.4节；图2）。
+
+### 把权重规则与多采样的作用拆开看
+
+最直接的目标对照，固定了**三个候选、每个三次续跑**。
+把所有正分候选均匀加权，软件解决率为**23.7 ± 0.2%**；把全部权重给最高正分候选，为**24.3 ± 0.6%**；SPLICE平滑按回报加权为**25.7 ± 0.8%**。
+这组预算相同的结果，支持使用相对续跑结果，并保留经过验证的替代路线（第5.5节；表4）。
+
+让谁续跑，也有取舍。
+若换成方案模型续跑、仍只监督有限片段，报告均值略高，为**26.2 ± 1.6%**，学生续跑为**25.7 ± 0.8%**；方案模型却用了**372.5k轮**，学生续跑设置只需**93.5k轮**，约差四倍。
+把监督进一步扩到成功的方案模型后续轨迹，均值降到**22.3 ± 1.5%**，方案计算量相近。
+作者认为，这与接触更多教师生成历史所带来的偏移相符，但没有直接测出那种偏移（第5.5节）。
+
+长度也影响结果。
+把片段上限从平均轨迹长度的30%提高到50%，方案轮数从**93.5k增至157.0k**，解决率均值却从**25.7%降到24.3%**；最短的10%上限只有**18.2%**。
+有上限的指导需要把学生带到能继续的状态，单纯延长并不足够（第5.5节；表4）。
+
+Dask这次交接，现在有三项可以分开检查：状态有没有恢复对、当前学生能不能续完，以及该教给它哪段局部行为。
+
+## 核心概念
+
+**帮助的价值，属于一个特定状态下的学生。**
+只修公开调用看起来合理，在这个案例里却没有带来成功续跑；诊断片段没有做完整修复，也能有用。
+分数测的是冻结的当前策略接在片段后面的表现。
+
+**分支既是对话，也是环境状态。**
+回到Dask第20轮，必须恢复错误修改之前的文件和工具状态。
+实验按环境特点使用软件快照与研究交互历史，复制一段聊天文字并不会恢复已改的代码。
+
+**后续结果用来评课，不代表整段后续都是课。**
+学生成功续跑，给候选片段提供权重；局部拟合只覆盖方案模型提出的有界动作段。
+这把“评估一次介入”与“监督一整条外部完整解法”分开了。
+
+三项合起来，核心标准就落到了学生接手后能够做出的结果。
+
+## 洞见
+
+看帮助有没有用，要看学生接手后能做什么。
+在记录的修复里，指出共用函数有时能让学生完成，加上写入保护则让更多采样续跑成功；局部目标把这种差异用来训练。
+
+有用的介入依赖学生当下的能力和起点。
+更强模型自己交出完整答案，还没有测到这两件事。
+
+## 博导审稿
+
+方法把训练目标接到完整、经过验证的学生续跑，也用相同方案与续跑预算检查关键设计。
+它还报告了方案模型续跑略高、却昂贵许多的情况。
+这些结果支持性能与成本之间的取舍，最强结论仍限于两类策略和两个任务领域。
+
+形式结果比“训练一定会进步”窄。
+命题1只说：在同一组保留候选与既有观测分数上，按回报加权的期望**观测候选价值**不低于均匀加权。
+它没有保证训练后的真实回报更高；按词元长度归一化的实际损失也是替代目标，并非变长序列上的精确KL投影（第4.2节；附录A）。
+
+三次续跑给出的价值估计很粗，也有噪声。
+三次失败不等于片段没用，三次成功不等于以后次次可靠；分数属于采样时的策略快照，训练却会改变策略。
+更准确的估计，需要更多续跑计算（第6节）。
+
+恢复效果依赖一致的分支状态。
+成本结果来自**32张H200**上的异步流水线，方案模型的资源分配与直接GRPO不同；可用任务相同，也不等于计算相同。
+作者明确指出，更昂贵的环境执行会增加学生续跑的成本（第5.1、6节；附录D）。
+
+SPLICE给出了能执行的局部指导测试与学习方法。
+实验建立了报告的提升和取舍，更广的可靠性与成本还要看学生、检查器和环境。
+
+## 启发
+
+智能体的修复快要成功时，可以保留失败历史与能恢复的状态。
+在卡点提出几段有上限的替代操作，再交回学生，让它继续到结束，检查是否成功，同时记录帮助的成本。
+
+训练系统可以像SPLICE一样，用这些经过验证的续跑给局部监督加权。
+其他工作流也能用交接测试检查指导，效果仍需在那里实测。
+这个Dask案例留下一句能直接追问的话：给完整答案之前，哪一小段介入能让学生做完剩下的部分？
+:::
+
+{/* Reading source: https://arxiv.org/html/2611.34777v1 | SHA-256: 9ca366a3d91326fa87896c59d0f339fadc8099ca9c46dc5f2c41b02ffceb7ef2 | Complete extraction: 53947 characters; no budget truncation. Main sections1-6 and AppendicesA-F read, original cells for Tables1-6 checked, Figures1-3 visually inspected with original SVGs2-3 rendered locally. Bibliographic references, external sources and implementation not independently audited; experiments not reproduced. */}
